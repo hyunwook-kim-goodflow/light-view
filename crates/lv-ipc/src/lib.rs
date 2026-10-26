@@ -40,6 +40,14 @@
 //! worker) rather than try to read another frame. Wrap pipes in `BufWriter`/`BufReader` to avoid
 //! many tiny syscalls.
 //!
+//! # Writing
+//!
+//! `write_request`/`write_response` validate the whole message before writing anything: a
+//! message that cannot be encoded (a payload over [`MAX_PAYLOAD`], an inconsistent image) is
+//! `Err` with kind `InvalidInput` and leaves the stream untouched, so it is the sender's
+//! mistake and the stream stays usable. Any other error is the stream's.
+//! [`max_request_data`] and [`max_response_pixels`] give the sizes that always fit.
+//!
 //! # Corrupt message policy
 //!
 //! Writers truncate the message to at most [`MAX_CORRUPT_LEN`] (4 KiB) bytes on a char boundary.
@@ -52,6 +60,46 @@ pub const MAGIC: [u8; 4] = *b"LVW1";
 pub const MAX_PAYLOAD: u64 = 1 << 30;
 /// Maximum byte length of a `Corrupt` message on the wire.
 pub const MAX_CORRUPT_LEN: usize = 4096;
+/// Fixed fields in front of a `DecodeHeif` request's file bytes (`id`, `max_pixels`).
+pub const REQUEST_FIXED_LEN: u64 = 16;
+/// Fixed fields in front of an `Image` response's pixels (`id`, `width`, `height`).
+pub const IMAGE_FIXED_LEN: u64 = 16;
+/// The most file bytes one `DecodeHeif` request can carry.
+pub const MAX_REQUEST_DATA: u64 = MAX_PAYLOAD - REQUEST_FIXED_LEN;
+/// The most pixels one `Image` response can carry (4 bytes each).
+pub const MAX_RESPONSE_PIXELS: u64 = (MAX_PAYLOAD - IMAGE_FIXED_LEN) / 4;
+
+const MIB: u64 = 1024 * 1024;
+/// Floor of [`decoder_memory`].
+const MIN_DECODER_MEMORY: u64 = 256 * MIB;
+
+/// The most file bytes the app sends and the worker accepts in one request: the app's file
+/// size cap (`lv_core::decode::max_file_bytes`), clamped to what one frame can carry. Both
+/// sides use this one rule, so a file the app sends is never one the worker refuses unread.
+pub fn max_request_data(file_cap: u64) -> u64 {
+    file_cap.min(MAX_REQUEST_DATA)
+}
+
+/// The pixel limit a worker can honour: `max_pixels`, clamped so that the decoded image
+/// still fits in one `Image` response. A larger image is reported as too large instead.
+pub fn max_response_pixels(max_pixels: u64) -> u64 {
+    max_pixels.min(MAX_RESPONSE_PIXELS)
+}
+
+/// Memory libheif may allocate for one decode of at most `max_pixels` pixels (its
+/// `max_total_memory`): twice the RGBA output (YCbCr planes, the RGB(A) image and conversion
+/// scratch), at least 256 MiB so that small limits still take ordinary files.
+pub fn decoder_memory(max_pixels: u64) -> u64 {
+    max_pixels.saturating_mul(8).max(MIN_DECODER_MEMORY)
+}
+
+/// The worker's Job memory cap: what libheif may allocate ([`decoder_memory`]) plus the
+/// worker's own RGBA copy of the image (4 bytes per pixel), so libheif reaching its own
+/// limit is an error it reports, never the Job killing the worker. This is
+/// `max(12 * max_pixels, 256 MiB + 4 * max_pixels)`.
+pub fn worker_memory_limit(max_pixels: u64) -> u64 {
+    decoder_memory(max_pixels).saturating_add(max_pixels.saturating_mul(4))
+}
 
 const KIND_DECODE_HEIF: u8 = 0x01;
 const KIND_SHUTDOWN: u8 = 0x02;
@@ -222,7 +270,7 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
             max_pixels,
             data,
         } => {
-            let len = 16u64
+            let len = REQUEST_FIXED_LEN
                 .checked_add(data.len() as u64)
                 .ok_or_else(|| invalid("too long"))?;
             write_frame(w, KIND_DECODE_HEIF, len)?;
@@ -293,7 +341,7 @@ pub fn write_response(w: &mut impl Write, r: &Response) -> io::Result<()> {
             if expected != bgra.len() as u64 {
                 return Err(invalid("bgra length does not match width*height*4"));
             }
-            write_frame(w, KIND_IMAGE, 16 + expected)?;
+            write_frame(w, KIND_IMAGE, IMAGE_FIXED_LEN + expected)?;
             w.write_all(&id.to_le_bytes())?;
             w.write_all(&width.to_le_bytes())?;
             w.write_all(&height.to_le_bytes())?;
@@ -433,6 +481,53 @@ mod tests {
         p.push(tag);
         p.extend_from_slice(rest);
         p
+    }
+
+    #[test]
+    fn request_data_cap_fits_one_frame() {
+        assert_eq!(MAX_REQUEST_DATA + REQUEST_FIXED_LEN, MAX_PAYLOAD);
+        assert_eq!(max_request_data(64 << 20), 64 << 20);
+        assert_eq!(max_request_data(u64::MAX), MAX_REQUEST_DATA);
+        // The default pixel limit (2^28) gives a file cap of 2^30 + 1 MiB: clamped.
+        assert_eq!(max_request_data((1 << 30) + (1 << 20)), MAX_REQUEST_DATA);
+    }
+
+    #[test]
+    fn response_pixel_cap_fits_one_frame() {
+        const {
+            assert!(MAX_RESPONSE_PIXELS * 4 + IMAGE_FIXED_LEN <= MAX_PAYLOAD);
+            assert!((MAX_RESPONSE_PIXELS + 1) * 4 + IMAGE_FIXED_LEN > MAX_PAYLOAD);
+        }
+        assert_eq!(max_response_pixels(1 << 28), MAX_RESPONSE_PIXELS);
+        assert_eq!(max_response_pixels(100_000_000), 100_000_000);
+        assert_eq!(max_response_pixels(u64::MAX), MAX_RESPONSE_PIXELS);
+    }
+
+    #[test]
+    fn job_limit_covers_decoder_memory_and_the_worker_copy() {
+        for n in [1, 1 << 20, 30_000_000, 40_000_000, 100_000_000, 1 << 28] {
+            assert!(decoder_memory(n) >= 8 * n && decoder_memory(n) >= 256 * MIB);
+            assert_eq!(worker_memory_limit(n), decoder_memory(n) + 4 * n);
+            assert_eq!(worker_memory_limit(n), (12 * n).max(256 * MIB + 4 * n));
+        }
+        assert_eq!(worker_memory_limit(100_000_000), 1_200_000_000);
+        assert_eq!(worker_memory_limit(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn unencodable_request_is_invalid_input_and_writes_nothing() {
+        // One byte more than a frame can carry. Zeroed pages are not touched, so this
+        // costs address space, not memory.
+        let data = vec![0u8; (MAX_REQUEST_DATA + 1) as usize];
+        let request = Request::DecodeHeif {
+            id: 1,
+            max_pixels: 1,
+            data,
+        };
+        let mut out = Vec::new();
+        let err = write_request(&mut out, &request).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(out.is_empty(), "nothing may be written before the error");
     }
 
     #[test]

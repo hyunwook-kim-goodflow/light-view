@@ -45,8 +45,10 @@ pub enum HeifError {
 const MAX_ITEMS: u32 = 1000;
 const MAX_TILES: u64 = 4096;
 const MAX_COLOR_PROFILE_BYTES: u32 = 4 * 1024 * 1024;
-const MAX_MEMORY_BLOCK_BYTES: u64 = 256 * 1024 * 1024;
-const MIN_TOTAL_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+/// Floor of the single-allocation limit, so small pixel limits still take ordinary files.
+const MIN_MEMORY_BLOCK_BYTES: u64 = 256 * 1024 * 1024;
+/// Room on top of the RGBA output in one block (row alignment, padding).
+const MEMORY_BLOCK_HEADROOM: u64 = 1024 * 1024;
 
 /// Decodes the primary image of a HEIF file.
 ///
@@ -75,6 +77,19 @@ fn corrupt(context: &str) -> impl FnOnce(libheif_rs::HeifError) -> HeifError + '
 
 /// Explicit libheif limits for one decode. Values that are not derived from `max_pixels`
 /// are fixed so that a libheif upgrade cannot silently loosen them.
+///
+/// Memory, for `N = max_pixels` (the worker passes `N` already clamped to what one response
+/// carries, `lv_ipc::max_response_pixels`, at most 2^28 - 4):
+/// - single allocation: `max(4N + 1 MiB, 256 MiB)`. libheif allocates the interleaved RGBA
+///   output (4 bytes per pixel, RGB 3) as one block, so a smaller limit would turn an image
+///   within `N` into `Corrupt` (256 MiB alone stopped RGBA at about 67 MP, RGB at 89 MP).
+/// - total: `lv_ipc::decoder_memory(N)` = `max(8N, 256 MiB)`, never below the block size:
+///   YCbCr planes (1.5N for 8-bit 4:2:0, 3N for 10-bit) plus the RGBA output (4N).
+/// - The worker's Job cap, `lv_ipc::worker_memory_limit(N)` = `max(12N, 256 MiB + 4N)`, is
+///   this total plus the worker's own RGBA copy (4N), so libheif reaching its limit is an
+///   error, not the Job killing the worker. libde265's own picture buffers (about 1.5N at
+///   8 bits, 3N at 10) are not counted by libheif, but they are freed before the worker
+///   makes its copy, so the decode peak (about 7N at 8 bits, 10N at 10) stays under 12N.
 fn security_limits(max_pixels: u64) -> SecurityLimits {
     let mut limits = SecurityLimits::new();
     // 0 would disable the check, so keep at least one pixel.
@@ -82,8 +97,12 @@ fn security_limits(max_pixels: u64) -> SecurityLimits {
     limits.set_max_number_of_tiles(MAX_TILES);
     limits.set_max_items(MAX_ITEMS);
     limits.set_max_color_profile_size(MAX_COLOR_PROFILE_BYTES);
-    limits.set_max_memory_block_size(MAX_MEMORY_BLOCK_BYTES);
-    limits.set_max_total_memory(max_pixels.saturating_mul(12).max(MIN_TOTAL_MEMORY_BYTES));
+    let block = max_pixels
+        .saturating_mul(4)
+        .saturating_add(MEMORY_BLOCK_HEADROOM)
+        .max(MIN_MEMORY_BLOCK_BYTES);
+    limits.set_max_memory_block_size(block);
+    limits.set_max_total_memory(lv_ipc::decoder_memory(max_pixels).max(block));
     limits
 }
 
@@ -163,7 +182,12 @@ fn to_rgba(
     let (w, h) = (width as usize, height as usize);
     let src_px = if has_alpha { 4 } else { 3 };
     let row_bytes = w * src_px;
-    if stride < row_bytes || data.len() < stride * (h - 1) + row_bytes {
+    // `h >= 1`: zero-sized images are rejected before decoding.
+    let needed = stride
+        .checked_mul(h - 1)
+        .and_then(|n| n.checked_add(row_bytes))
+        .ok_or_else(|| HeifError::Corrupt("pixel plane size overflows".into()))?;
+    if stride < row_bytes || data.len() < needed {
         return Err(HeifError::Corrupt("pixel plane is too small".into()));
     }
     let mut rgba = Vec::with_capacity(w * h * 4);
@@ -213,4 +237,56 @@ fn color_info(handle: &ImageHandle) -> ColorInfo {
         };
     }
     ColorInfo::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// The largest image a worker decodes at the default pixel limit (2^28, clamped to
+    /// what one response carries).
+    fn largest() -> u64 {
+        lv_ipc::max_response_pixels(1 << 28)
+    }
+
+    #[test]
+    fn one_block_holds_the_largest_allowed_rgba_image() {
+        for n in [largest(), 100_000_000, 12_192_768] {
+            let limits = security_limits(n);
+            // libheif allocates the interleaved RGB(A) output as one block.
+            assert!(limits.max_memory_block_size() >= n * 4, "{n} pixels");
+            assert!(limits.max_total_memory() >= limits.max_memory_block_size());
+        }
+        assert_eq!(security_limits(1).max_memory_block_size(), 256 * MIB);
+    }
+
+    #[test]
+    fn plane_size_overflow_is_corrupt() {
+        let data = [0u8; 64];
+        for (stride, height) in [(usize::MAX / 2, 3), (usize::MAX, 2)] {
+            assert!(
+                matches!(
+                    to_rgba(&data, stride, 4, height, true),
+                    Err(HeifError::Corrupt(_))
+                ),
+                "stride {stride}, height {height}"
+            );
+        }
+        // A plane that fits still packs.
+        assert_eq!(to_rgba(&data, 16, 4, 2, true).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn job_limit_stays_above_what_libheif_may_allocate() {
+        for n in [1, 1 << 20, 12_192_768, 40_000_000, 100_000_000, largest()] {
+            let limits = security_limits(n);
+            // libheif's own total plus the worker's RGBA copy fit in the Job's cap.
+            assert!(
+                limits.max_total_memory() + 4 * n <= lv_ipc::worker_memory_limit(n),
+                "{n} pixels"
+            );
+        }
+    }
 }

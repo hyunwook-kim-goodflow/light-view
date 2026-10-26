@@ -31,7 +31,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
-use lv_ipc::{read_response, write_request, FailKind, IpcError, Request, Response};
+use lv_ipc::{
+    max_request_data, read_response, write_request, FailKind, IpcError, Request, Response,
+};
 
 use sandbox::{log, Sandboxed, StdinMonitor};
 
@@ -50,6 +52,8 @@ type Decoded = (u32, u32, Vec<u8>);
 pub struct WorkerPool {
     exe: PathBuf,
     max_pixels: u64,
+    /// Largest file sent to a worker; larger ones are `FileTooLarge` without being sent.
+    data_cap: u64,
     timeout: Duration,
     /// Extra arguments for each slot's first worker only (test fault injection).
     first_args: Vec<String>,
@@ -82,10 +86,27 @@ struct Worker {
     /// Has given at least one valid answer, so it counts as started.
     answered: bool,
     requests: Sender<Request>,
-    /// One entry per request from the writer thread: whether the write and flush succeeded.
-    written: Receiver<bool>,
-    responses: Receiver<Result<Option<Response>, IpcError>>,
+    /// What the writer and reader threads report, in one channel so a call waits on both.
+    events: Receiver<Event>,
     stdin_monitor: StdinMonitor,
+}
+
+enum Event {
+    /// The writer's outcome for request `id`.
+    Written { id: u64, outcome: WriteOutcome },
+    /// The next message from the worker, or the end of its output.
+    Response(Result<Option<Response>, IpcError>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteOutcome {
+    /// Written and flushed.
+    Sent,
+    /// The request could not be encoded. Nothing was written and the worker saw nothing:
+    /// the app's mistake, not the worker's.
+    Rejected,
+    /// The pipe failed (the worker is gone or stopped reading); the writer has ended.
+    Failed,
 }
 
 impl WorkerPool {
@@ -106,6 +127,7 @@ impl WorkerPool {
         let pool = WorkerPool {
             exe,
             max_pixels,
+            data_cap: request_data_cap(max_pixels),
             timeout,
             first_args: first_args.iter().map(|a| a.to_string()).collect(),
             every_args: every_args.iter().map(|a| a.to_string()).collect(),
@@ -128,10 +150,11 @@ impl WorkerPool {
     }
 
     /// Decodes a HEIF file in a worker to premultiplied sRGB BGRA8 (width, height, pixels).
-    /// A file larger than the worker accepts is `FileTooLarge` without being sent: the
-    /// worker would refuse it unread and die, which would count against its slot.
+    /// A file larger than the worker accepts ([`request_data_cap`]) is `FileTooLarge`
+    /// without being sent: the worker would refuse it unread and die, which would count
+    /// against its slot.
     pub fn decode_heif(&self, data: Vec<u8>) -> Result<Decoded, DecodeError> {
-        if data.len() as u64 > request_data_cap(self.max_pixels) {
+        if data.len() as u64 > self.data_cap {
             return Err(DecodeError::FileTooLarge {
                 bytes: data.len() as u64,
             });
@@ -229,37 +252,55 @@ impl WorkerPool {
             return Err(DecodeError::Corrupt(NOT_RESPONDING.into()));
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let bytes = data.len() as u64;
         let request = Request::DecodeHeif {
             id,
             max_pixels: self.max_pixels,
             data,
         };
         let dead_before_send = worker.sandboxed.has_exited();
+        let deadline = Instant::now() + self.timeout;
+        // Whether the writer put the whole request in the pipe, once it has said so.
+        let mut wrote = None;
         let outcome = if worker.requests.send(request).is_err() {
             Err("the writer thread is gone".to_string())
         } else {
-            match worker.responses.recv_timeout(self.timeout) {
-                Ok(Ok(Some(response))) => self.check(id, response),
-                Ok(Ok(None)) => Err("the worker exited".to_string()),
-                Ok(Err(e)) => Err(format!("protocol error: {e}")),
-                Err(RecvTimeoutError::Timeout) => {
-                    Err(format!("no answer within {:?}", self.timeout))
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match worker.events.recv_timeout(left) {
+                    Ok(Event::Written { id: got, outcome }) if got == id => match outcome {
+                        WriteOutcome::Rejected => {
+                            // Our own encoding refused it before writing a byte: the worker
+                            // is untouched, so no strike and no degrade.
+                            log(&format!("request {id} ({bytes} bytes) cannot be encoded"));
+                            return Err(DecodeError::FileTooLarge { bytes });
+                        }
+                        outcome => wrote = Some(outcome == WriteOutcome::Sent),
+                    },
+                    // A late report for an earlier request.
+                    Ok(Event::Written { .. }) => {}
+                    Ok(Event::Response(Ok(Some(response)))) => break self.check(id, response),
+                    Ok(Event::Response(Ok(None))) => break Err("the worker exited".to_string()),
+                    Ok(Event::Response(Err(e))) => break Err(format!("protocol error: {e}")),
+                    Err(RecvTimeoutError::Timeout) => {
+                        break Err(format!("no answer within {:?}", self.timeout))
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        break Err("the worker's threads are gone".to_string())
+                    }
                 }
-                Err(RecvTimeoutError::Disconnected) => Err("the reader thread is gone".to_string()),
             }
         };
         match outcome {
             Ok(result) => {
                 worker.answered = true;
                 slot.spawn_failures = 0;
-                // Write reports only matter for the first request; don't let them pile up.
-                while worker.written.try_recv().is_ok() {}
                 result
             }
             Err(why) => {
                 let (pid, answered) = (worker.sandboxed.pid, worker.answered);
                 // Checked before the worker (and with it the stdin monitor) is dropped.
-                let degrade = !answered && (dead_before_send || !took_request(worker));
+                let degrade = !answered && (dead_before_send || !took_request(worker, id, wrote));
                 slot.worker = None; // terminates its Job
                 if answered {
                     log(&format!("worker {pid} dropped: {why}"));
@@ -323,17 +364,24 @@ impl WorkerPool {
     }
 }
 
-/// Whether a worker that failed its first request had read that request in full. False when
-/// the bytes are still in its stdin pipe, or the writer could not put them there (failed, or
-/// is still blocked on a full pipe). If the pipe cannot be inspected, assume the worker read
-/// it: wrongly keeping the mitigations only costs a start failure, wrongly dropping them
-/// weakens the sandbox.
-fn took_request(worker: &Worker) -> bool {
-    match worker.written.recv_timeout(WRITE_SETTLE) {
-        Ok(true) => {}
-        Ok(false) | Err(_) => return false,
+/// Whether a worker that failed its first request (`id`) had read that request in full.
+/// `wrote` is the writer's report if it already came. False when the bytes are still in its
+/// stdin pipe, or the writer could not put them there (failed, or is still blocked on a full
+/// pipe). If the pipe cannot be inspected, assume the worker read it: wrongly keeping the
+/// mitigations only costs a start failure, wrongly dropping them weakens the sandbox.
+fn took_request(worker: &Worker, id: u64, mut wrote: Option<bool>) -> bool {
+    let deadline = Instant::now() + WRITE_SETTLE;
+    while wrote.is_none() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match worker.events.recv_timeout(left) {
+            Ok(Event::Written { id: got, outcome }) if got == id => {
+                wrote = Some(outcome == WriteOutcome::Sent)
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
     }
-    !matches!(worker.stdin_monitor.unread(), Ok(n) if n > 0)
+    wrote == Some(true) && !matches!(worker.stdin_monitor.unread(), Ok(n) if n > 0)
 }
 
 /// Records a failed start. With `degrade`, the slot's next workers go without the
@@ -381,10 +429,10 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
-/// Largest file a worker accepts in a request: the worker's request cap (ruling R10)
-/// without the frame's fixed fields, the same rule as lv-core's file size limit.
+/// Largest file a worker accepts in a request: lv-core's file size limit (ruling R10),
+/// clamped to what one frame carries. The worker derives its own cap from the same rule.
 fn request_data_cap(max_pixels: u64) -> u64 {
-    max_file_bytes(&DecodeLimits { max_pixels })
+    max_request_data(max_file_bytes(&DecodeLimits { max_pixels }))
 }
 
 /// Largest response the app accepts: an `N`-pixel BGRA image plus room for the fixed fields
@@ -411,28 +459,39 @@ impl Worker {
             .spawn(move || drain_stderr(pid, stderr))
             .map_err(|e| format!("stderr thread: {e}"))?;
 
-        let (response_tx, responses) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
         let cap = response_cap(max_pixels);
         let mut stdout = BufReader::with_capacity(64 * 1024, pipes.stdout);
+        let response_tx = events_tx.clone();
         named("reader")
             .spawn(move || loop {
                 let message = read_response(&mut stdout, cap);
                 let last = !matches!(message, Ok(Some(_)));
-                if response_tx.send(message).is_err() || last {
+                if response_tx.send(Event::Response(message)).is_err() || last {
                     break;
                 }
             })
             .map_err(|e| format!("reader thread: {e}"))?;
 
         let (requests, request_rx) = mpsc::channel::<Request>();
-        let (written_tx, written) = mpsc::channel();
         let mut stdin = BufWriter::new(pipes.stdin);
         named("writer")
             .spawn(move || {
                 for request in request_rx {
-                    let sent = write_request(&mut stdin, &request).and_then(|()| stdin.flush());
-                    let _ = written_tx.send(sent.is_ok());
-                    if sent.is_err() {
+                    let id = match &request {
+                        Request::DecodeHeif { id, .. } => *id,
+                        Request::Shutdown => 0,
+                    };
+                    // lv-ipc validates a message before writing any of it, so InvalidInput
+                    // leaves the pipe untouched and the writer can go on.
+                    let outcome = match write_request(&mut stdin, &request) {
+                        Err(e) if e.kind() == ErrorKind::InvalidInput => WriteOutcome::Rejected,
+                        Err(_) => WriteOutcome::Failed,
+                        Ok(()) if stdin.flush().is_ok() => WriteOutcome::Sent,
+                        Ok(()) => WriteOutcome::Failed,
+                    };
+                    let _ = events_tx.send(Event::Written { id, outcome });
+                    if outcome == WriteOutcome::Failed {
                         break;
                     }
                 }
@@ -443,8 +502,7 @@ impl Worker {
             sandboxed,
             answered: false,
             requests,
-            written,
-            responses,
+            events,
             stdin_monitor: pipes.stdin_monitor,
         })
     }
@@ -696,7 +754,7 @@ pub(crate) mod tests {
         assert!(flags.contains(JOB_OBJECT_LIMIT_ACTIVE_PROCESS));
         assert!(flags.contains(JOB_OBJECT_LIMIT_PROCESS_MEMORY));
         assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 1);
-        // max(100M * 4 * 3, 256 MiB), which Windows rounds down to whole pages.
+        // worker_memory_limit(100M) = 12 * 100M, which Windows rounds down to whole pages.
         let limit = info.ProcessMemoryLimit;
         assert!(
             limit <= 1_200_000_000 && limit > 1_200_000_000 - 65_536,
@@ -768,6 +826,48 @@ pub(crate) mod tests {
                 height: 461
             })
         ));
+    }
+
+    #[test]
+    fn request_over_the_frame_limit_is_rejected_before_sending_at_the_default_limit() {
+        // At the default pixel limit the file size rule allows more than one frame carries.
+        let pool = WorkerPool::start(worker_exe(), 1, DecodeLimits::default().max_pixels);
+        let pid = single_worker(&pool).pid;
+        let over = lv_ipc::MAX_REQUEST_DATA + 1;
+        // Zeroed pages are never touched: address space, not memory.
+        match pool.decode_heif(vec![0u8; over as usize]) {
+            Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, over),
+            Err(e) => panic!("expected FileTooLarge, got {e}"),
+            Ok(_) => panic!("expected FileTooLarge, got an image"),
+        }
+        assert_eq!(single_worker(&pool).pid, pid, "the worker was touched");
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        assert_decodes(&pool);
+    }
+
+    #[test]
+    fn unencodable_request_is_an_app_error_without_strike_or_degrade() {
+        let mut pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        // Skip the pool's own size check so the writer meets a request it cannot encode.
+        pool.data_cap = u64::MAX;
+        let pid = single_worker(&pool).pid;
+        let over = lv_ipc::MAX_REQUEST_DATA + 1;
+        let start = Instant::now();
+        match pool.decode_heif(vec![0u8; over as usize]) {
+            Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, over),
+            Err(e) => panic!("expected FileTooLarge, got {e}"),
+            Ok(_) => panic!("expected FileTooLarge, got an image"),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "waited for the worker"
+        );
+        assert_eq!(single_worker(&pool).pid, pid, "the worker was replaced");
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        // The same worker serves the next request with its sandbox whole.
+        assert_decodes(&pool);
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert!(win32k_lockdown(&pool));
     }
 
     #[test]

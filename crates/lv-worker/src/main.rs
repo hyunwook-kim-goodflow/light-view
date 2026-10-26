@@ -13,11 +13,14 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 
 use lv_core::color::{premultiply_to_bgra, to_srgb_in_place, ColorSource};
+use lv_core::decode::{max_file_bytes, DecodeLimits};
 use lv_heif::{decode_heif, ColorInfo, HeifError};
-use lv_ipc::{read_request, write_response, FailKind, Request, Response};
+use lv_ipc::{
+    max_request_data, max_response_pixels, read_request, write_response, FailKind, Request,
+    Response, REQUEST_FIXED_LEN,
+};
 
 const EXIT_ERROR: u8 = 2;
-const MIB: u64 = 1024 * 1024;
 
 /// Debug-only fault injection for the app's watchdog tests.
 #[cfg(debug_assertions)]
@@ -90,14 +93,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     })
 }
 
-/// Largest request payload the worker accepts: room for an `N`-pixel image's file bytes
-/// (ruling R10, the same rule as the app's file size limit) plus the frame's fixed fields.
+/// Largest request payload the worker accepts: the file bytes the app may send (ruling R10;
+/// the pool uses the same `max_request_data` rule) plus the request's fixed fields.
 fn request_cap(max_pixels: u64) -> u64 {
-    max_pixels
-        .saturating_mul(4)
-        .saturating_add(MIB)
-        .max(64 * MIB)
-        .saturating_add(64)
+    max_request_data(max_file_bytes(&DecodeLimits { max_pixels })) + REQUEST_FIXED_LEN
+}
+
+/// The pixel limit for one decode: the request's, within the worker's own, and small enough
+/// that the image fits in one response (a larger one is `TooLarge`, not a failed write).
+fn decode_limit(requested: u64, configured: u64) -> u64 {
+    max_response_pixels(requested.min(configured))
 }
 
 fn serve(config: &Config) -> ExitCode {
@@ -127,7 +132,7 @@ fn serve(config: &Config) -> ExitCode {
             Some(TestMode::DieAtStart) | None => {}
         }
 
-        let response = decode(id, &data, max_pixels.min(config.max_pixels));
+        let response = decode(id, &data, decode_limit(max_pixels, config.max_pixels));
         drop(data);
         if let Err(e) = write_response(&mut output, &response).and_then(|()| output.flush()) {
             eprintln!("lv-worker: cannot write response, exiting: {e}");
@@ -256,5 +261,36 @@ mod hardening {
                 std::mem::size_of::<u32>(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use lv_ipc::{MAX_PAYLOAD, MAX_RESPONSE_PIXELS};
+
+    /// The default pixel limit (2^28), which any PC with 8 GB of memory or more gets.
+    const DEFAULT_MAX_PIXELS: u64 = 1 << 28;
+
+    #[test]
+    fn request_cap_is_the_pools_data_cap_plus_fixed_fields() {
+        assert_eq!(DecodeLimits::default().max_pixels, DEFAULT_MAX_PIXELS);
+        // At the default the file size rule (2^30 + 1 MiB) is clamped to one frame.
+        assert_eq!(request_cap(DEFAULT_MAX_PIXELS), MAX_PAYLOAD);
+        assert_eq!(request_cap(u64::MAX), MAX_PAYLOAD);
+        // Small limits keep lv-core's 64 MiB floor.
+        assert_eq!(request_cap(1000), (64 << 20) + REQUEST_FIXED_LEN);
+    }
+
+    #[test]
+    fn decode_limit_keeps_the_image_within_one_response() {
+        assert_eq!(
+            decode_limit(DEFAULT_MAX_PIXELS, DEFAULT_MAX_PIXELS),
+            MAX_RESPONSE_PIXELS
+        );
+        assert!(decode_limit(u64::MAX, u64::MAX) * 4 + 16 <= MAX_PAYLOAD);
+        assert_eq!(decode_limit(1000, 2000), 1000);
+        assert_eq!(decode_limit(2000, 1000), 1000);
     }
 }
