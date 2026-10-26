@@ -8,12 +8,14 @@ mod instance;
 mod placement;
 mod render;
 mod theme;
+mod timing;
 mod toolbar;
 mod tooltip;
 mod viewer;
 mod window;
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Context;
 use lv_core::settings::load_settings;
@@ -26,6 +28,7 @@ use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 use crate::instance::{acquire_or_forward, Launch};
 
 fn main() -> anyhow::Result<()> {
+    let start = Instant::now();
     // SAFETY: plain call with valid flags, made before any other DLL is loaded on demand.
     unsafe {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
@@ -35,7 +38,12 @@ fn main() -> anyhow::Result<()> {
     if let Err(e) = unsafe { SetCurrentProcessExplicitAppUserModelID(w!("goodflow.LightView")) } {
         eprintln!("light-view: could not set the AppUserModelID: {e}");
     }
-    let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    let mut args = std::env::args_os().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "--timing") {
+        args.next();
+        timing::enable(start);
+    }
+    let initial = args.next().map(PathBuf::from);
     let settings_path = window::settings_path();
     let settings = settings_path
         .as_deref()

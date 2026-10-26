@@ -270,9 +270,13 @@ impl App {
         let p = palette(self.dark);
         r.begin(p.paper);
         let loading = self.viewer.loading();
+        let mut drew_image = false;
         match self.viewer.scene() {
             // The previous photo stays up while the next one loads.
-            Scene::Image { rect, quarters } => r.draw_image(rect, quarters),
+            Scene::Image { rect, quarters } => {
+                r.draw_image(rect, quarters);
+                drew_image = r.has_image();
+            }
             Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
         }
@@ -290,8 +294,10 @@ impl App {
             };
             toolbar::draw(r, &view);
         }
-        if let Err(e) = r.end() {
-            eprintln!("light-view: EndDraw failed: {e}");
+        match r.end() {
+            Ok(()) if drew_image => crate::timing::first_image_presented(),
+            Ok(()) => {}
+            Err(e) => eprintln!("light-view: EndDraw failed: {e}"),
         }
     }
 
