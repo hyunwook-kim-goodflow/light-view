@@ -146,21 +146,59 @@ pub fn max_file_bytes(limits: &DecodeLimits) -> u64 {
 /// Sniffs the first `SNIFF_LEN` bytes before reading the rest: a non-image is
 /// `Unsupported` and a file over `max_file_bytes` is `FileTooLarge`, both unread.
 pub fn decode_file(path: &Path, limits: &DecodeLimits) -> Result<DecodedImage, DecodeError> {
+    let image = open_image(path)?;
+    if to_image_format(image.format).is_none() {
+        return Err(DecodeError::Unsupported);
+    }
+    decode_bytes(&image.read_all(limits)?, limits)
+}
+
+/// An image file whose first bytes were sniffed and nothing more read.
+pub struct ImageFile {
+    file: std::fs::File,
+    head: Vec<u8>,
+    pub format: ImageFormat,
+}
+
+/// Opens `path` and sniffs its first `SNIFF_LEN` bytes; a non-image is `Unsupported`.
+pub fn open_image(path: &Path) -> Result<ImageFile, DecodeError> {
     let mut file = std::fs::File::open(path)?;
     let mut head = Vec::with_capacity(SNIFF_LEN);
     (&mut file).take(SNIFF_LEN as u64).read_to_end(&mut head)?;
-    match sniff_format(&head) {
-        Some(f) if to_image_format(f).is_some() => {}
-        _ => return Err(DecodeError::Unsupported),
+    let format = sniff_format(&head).ok_or(DecodeError::Unsupported)?;
+    Ok(ImageFile { file, head, format })
+}
+
+impl ImageFile {
+    /// The whole file. Over `max_file_bytes` it is `FileTooLarge` without being read,
+    /// and reading stops at that cap even if the file grew in the meantime.
+    pub fn read_all(self, limits: &DecodeLimits) -> Result<Vec<u8>, DecodeError> {
+        let cap = max_file_bytes(limits);
+        let len = self.file.metadata()?.len();
+        if len > cap {
+            return Err(DecodeError::FileTooLarge { bytes: len });
+        }
+        read_capped(self.head, self.file, len, cap)
     }
-    let len = file.metadata()?.len();
-    if len > max_file_bytes(limits) {
-        return Err(DecodeError::FileTooLarge { bytes: len });
+}
+
+/// Appends `rest` to `bytes`, reserving for an `expected` total; `FileTooLarge` once the
+/// total passes `cap`, having read at most one byte more.
+fn read_capped(
+    mut bytes: Vec<u8>,
+    rest: impl Read,
+    expected: u64,
+    cap: u64,
+) -> Result<Vec<u8>, DecodeError> {
+    bytes.reserve_exact(expected.saturating_sub(bytes.len() as u64) as usize);
+    let room = cap.saturating_sub(bytes.len() as u64);
+    rest.take(room.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(DecodeError::FileTooLarge {
+            bytes: bytes.len() as u64,
+        });
     }
-    let mut bytes = head;
-    bytes.reserve_exact(len.saturating_sub(SNIFF_LEN as u64) as usize);
-    file.read_to_end(&mut bytes)?;
-    decode_bytes(&bytes, limits)
+    Ok(bytes)
 }
 
 pub fn decode_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, DecodeError> {
@@ -522,6 +560,19 @@ mod tests {
             (img.width, img.height, img.byte_len),
             (2, 1, png.len() as u64)
         );
+    }
+    #[test]
+    fn read_capped_even_if_file_grows() {
+        // The file was 10 bytes when its size was checked but keeps growing while read.
+        let endless = std::io::repeat(7);
+        match read_capped(vec![1, 2], endless, 10, 100) {
+            Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, 101),
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+        // Up to the cap, whatever was announced, it is read whole.
+        let bytes = read_capped(vec![1, 2], &[3u8; 98][..], 10, 100).unwrap();
+        assert_eq!(bytes.len(), 100);
+        assert_eq!(&bytes[..3], &[1, 2, 3]);
     }
     #[test]
     fn exif_orientation_defaults_to_1() {

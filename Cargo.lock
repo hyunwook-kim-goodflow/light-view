@@ -253,6 +253,7 @@ dependencies = [
  "anyhow",
  "lv-core",
  "lv-ipc",
+ "tempfile",
  "windows",
  "winresource",
 ]

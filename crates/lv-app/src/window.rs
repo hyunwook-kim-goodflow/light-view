@@ -454,6 +454,8 @@ fn handle(
             None
         }
         WM_CLOSE => {
+            // From here on, paths forwarded by later launches open their own window.
+            instance::mark_closing();
             app.try_borrow_mut().ok()?.save_placement(hwnd);
             // SAFETY: destroying our own window; no App borrow is held.
             unsafe {
