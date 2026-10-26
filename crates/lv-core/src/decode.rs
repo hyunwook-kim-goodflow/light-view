@@ -1,4 +1,5 @@
 //! Pure-Rust image decoding with EXIF orientation applied and size limits enforced.
+//! Output pixels are sRGB, premultiplied BGRA8.
 
 use std::fmt;
 use std::io::{Cursor, Read};
@@ -10,20 +11,26 @@ use image::codecs::webp::WebPDecoder;
 use image::metadata::Orientation;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, Limits};
 
+use crate::color::{premultiply_to_bgra, ColorSource, SrgbConverter};
 use crate::format::{sniff_format, ImageFormat, SNIFF_LEN};
 
-/// One RGBA8 (straight alpha) frame.
+/// One sRGB, premultiplied BGRA8 frame.
 pub struct Frame {
-    pub rgba: Vec<u8>,
+    pub bgra: Vec<u8>,
     pub delay_ms: u32,
 }
 
-/// A fully decoded image with orientation already applied.
+/// A decoded frame before color conversion: straight-alpha RGBA8 in the source color space.
+struct RgbaFrame {
+    rgba: Vec<u8>,
+    delay_ms: u32,
+}
+
+/// A fully decoded image, converted to sRGB with orientation already applied.
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
     pub frames: Vec<Frame>,
-    pub icc: Option<Vec<u8>>,
     pub format: ImageFormat,
     pub byte_len: u64,
 }
@@ -42,7 +49,7 @@ impl fmt::Debug for DecodedImage {
 impl DecodedImage {
     /// Approximate memory held by the pixel data.
     pub fn memory_bytes(&self) -> u64 {
-        self.frames.iter().map(|f| f.rgba.len() as u64).sum()
+        self.frames.iter().map(|f| f.bgra.len() as u64).sum()
     }
 }
 
@@ -201,13 +208,15 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     }
 
     let byte_len = bytes.len() as u64;
-    let finish = |frames: Vec<Frame>, w: u32, h: u32, icc: Option<Vec<u8>>| DecodedImage {
-        width: w,
-        height: h,
-        frames,
-        icc,
-        format,
-        byte_len,
+    let finish = |frames: Vec<RgbaFrame>, icc: Option<Vec<u8>>, orientation: u16| {
+        let (frames, width, height) = to_output(frames, width, height, icc.as_deref(), orientation);
+        DecodedImage {
+            width,
+            height,
+            frames,
+            format,
+            byte_len,
+        }
     };
 
     match format {
@@ -221,7 +230,7 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
                 width,
                 height,
             )?;
-            Ok(finish(frames, width, height, icc))
+            Ok(finish(frames, icc, 1))
         }
         ImageFormat::WebP => {
             let mut dec = WebPDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
@@ -234,10 +243,10 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
                     width,
                     height,
                 )?;
-                let (frames, w, h) = orient_frames(frames, width, height, exif_orientation(bytes));
-                Ok(finish(frames, w, h, icc))
+                Ok(finish(frames, icc, exif_orientation(bytes)))
             } else {
-                decode_still(dec, bytes, icc, finish)
+                let frame = decode_still(dec)?;
+                Ok(finish(vec![frame], icc, exif_orientation(bytes)))
             }
         }
         _ => {
@@ -245,13 +254,54 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             reader.limits(image_limits(limits));
             let mut dec = reader.into_decoder().map_err(corrupt)?;
             let icc = dec.icc_profile().map_err(corrupt)?;
-            decode_still(dec, bytes, icc, finish)
+            // EXIF orientation applies to JPEG (and WebP, above) only.
+            let orientation = if format == ImageFormat::Jpeg {
+                exif_orientation(bytes)
+            } else {
+                1
+            };
+            let frame = decode_still(dec)?;
+            Ok(finish(vec![frame], icc, orientation))
         }
     }
 }
 
+/// Turns decoded frames into output frames, each in order: convert to sRGB (per the
+/// ICC profile, untagged = sRGB), apply the EXIF orientation, premultiply to BGRA.
+/// Returns the frames and the oriented width and height.
+fn to_output(
+    frames: Vec<RgbaFrame>,
+    w: u32,
+    h: u32,
+    icc: Option<&[u8]>,
+    orientation: u16,
+) -> (Vec<Frame>, u32, u32) {
+    let converter = SrgbConverter::new(icc.map_or(ColorSource::Srgb, ColorSource::Icc));
+    let frames = frames
+        .into_iter()
+        .map(|mut f| {
+            converter.apply(&mut f.rgba);
+            f
+        })
+        .collect();
+    let (frames, w, h) = orient_frames(frames, w, h, orientation);
+    let frames = frames
+        .into_iter()
+        .map(|f| Frame {
+            bgra: premultiply_to_bgra(f.rgba),
+            delay_ms: f.delay_ms,
+        })
+        .collect();
+    (frames, w, h)
+}
+
 /// Apply an EXIF orientation to every frame; width/height swap for orientations 5-8.
-fn orient_frames(frames: Vec<Frame>, w: u32, h: u32, orientation: u16) -> (Vec<Frame>, u32, u32) {
+fn orient_frames(
+    frames: Vec<RgbaFrame>,
+    w: u32,
+    h: u32,
+    orientation: u16,
+) -> (Vec<RgbaFrame>, u32, u32) {
     let Some(o) =
         Orientation::from_exif(orientation as u8).filter(|o| *o != Orientation::NoTransforms)
     else {
@@ -267,7 +317,7 @@ fn orient_frames(frames: Vec<Frame>, w: u32, h: u32, orientation: u16) -> (Vec<F
             let mut img = DynamicImage::ImageRgba8(buf);
             img.apply_orientation(o);
             out_dims = (img.width(), img.height());
-            Frame {
+            RgbaFrame {
                 rgba: img.into_rgba8().into_raw(),
                 delay_ms: f.delay_ms,
             }
@@ -282,7 +332,7 @@ fn collect_frames(
     budget_bytes: u64,
     width: u32,
     height: u32,
-) -> Result<Vec<Frame>, DecodeError> {
+) -> Result<Vec<RgbaFrame>, DecodeError> {
     let mut used: u64 = 0;
     let mut out = Vec::new();
     for f in frames {
@@ -292,7 +342,7 @@ fn collect_frames(
             return Err(DecodeError::TooLarge { width, height });
         }
         let delay_ms = delay_ms(&f);
-        out.push(Frame {
+        out.push(RgbaFrame {
             rgba: f.into_buffer().into_raw(),
             delay_ms,
         });
@@ -303,34 +353,14 @@ fn collect_frames(
     Ok(out)
 }
 
-/// Decode a still image and apply EXIF orientation (JPEG and WebP only, read from the container).
-fn decode_still(
-    dec: impl ImageDecoder,
-    bytes: &[u8],
-    icc: Option<Vec<u8>>,
-    finish: impl FnOnce(Vec<Frame>, u32, u32, Option<Vec<u8>>) -> DecodedImage,
-) -> Result<DecodedImage, DecodeError> {
+/// Decode a still image to one straight-alpha RGBA8 frame.
+fn decode_still(dec: impl ImageDecoder) -> Result<RgbaFrame, DecodeError> {
     let (w0, h0) = dec.dimensions();
-    let mut img = DynamicImage::from_decoder(dec).map_err(|e| decode_err(e, w0, h0))?;
-    if matches!(
-        sniff_format(bytes),
-        Some(ImageFormat::Jpeg | ImageFormat::WebP)
-    ) {
-        if let Some(o) = Orientation::from_exif(exif_orientation(bytes) as u8) {
-            img.apply_orientation(o);
-        }
-    }
-    let rgba = img.into_rgba8();
-    let (w, h) = rgba.dimensions();
-    Ok(finish(
-        vec![Frame {
-            rgba: rgba.into_raw(),
-            delay_ms: 0,
-        }],
-        w,
-        h,
-        icc,
-    ))
+    let img = DynamicImage::from_decoder(dec).map_err(|e| decode_err(e, w0, h0))?;
+    Ok(RgbaFrame {
+        rgba: img.into_rgba8().into_raw(),
+        delay_ms: 0,
+    })
 }
 
 #[cfg(test)]
@@ -339,10 +369,16 @@ mod tests {
     use crate::test_fixtures as fixtures;
 
     #[test]
-    fn decodes_png_rgba() {
+    fn decodes_png() {
         let img = decode_bytes(&fixtures::png_2x1(), &DecodeLimits::default()).unwrap();
         assert_eq!((img.width, img.height, img.frames.len()), (2, 1, 1));
-        assert_eq!(&img.frames[0].rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&img.frames[0].bgra[0..4], &[0, 0, 255, 255]);
+    }
+    #[test]
+    fn decode_png_outputs_premultiplied_bgra() {
+        let png = fixtures::png_pixel([255, 0, 0, 128]);
+        let img = decode_bytes(&png, &DecodeLimits::default()).unwrap();
+        assert_eq!(img.frames[0].bgra, vec![0, 0, 128, 128]);
     }
     #[test]
     fn applies_exif_orientation_6() {
@@ -353,9 +389,9 @@ mod tests {
         .unwrap();
         assert_eq!((img.width, img.height), (8, 16));
         let i = ((2 * img.width + 4) * 4) as usize;
-        let top = &img.frames[0].rgba[i..i + 3];
+        let top = &img.frames[0].bgra[i..i + 3];
         assert!(
-            top[0] > 200 && top[2] < 60,
+            top[2] > 200 && top[0] < 60,
             "top pixel should be red, got {top:?}"
         );
     }
@@ -426,11 +462,11 @@ mod tests {
         // 2x1 frames: [red, blue]; orientation 6 (rotate 90 cw) -> 1x2, red on top.
         let px = [255, 0, 0, 255, 0, 0, 255, 255];
         let frames = vec![
-            Frame {
+            RgbaFrame {
                 rgba: px.to_vec(),
                 delay_ms: 10,
             },
-            Frame {
+            RgbaFrame {
                 rgba: px.to_vec(),
                 delay_ms: 20,
             },

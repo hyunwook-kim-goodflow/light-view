@@ -514,10 +514,9 @@ mod tests {
                 width: 400,
                 height: 300,
                 frames: vec![Frame {
-                    rgba: vec![0; 4],
+                    bgra: vec![0; 4],
                     delay_ms: 0,
                 }],
-                icc: None,
                 format: ImageFormat::Png,
                 byte_len: 0,
             })
