@@ -23,11 +23,9 @@ pub enum Redraw {
     Full,
 }
 
-/// What to draw in the image area.
+/// What to draw in the image area (the loading pill is drawn on top, see `loading`).
 pub enum Scene<'a> {
     Empty,
-    /// The current photo is still decoding after the loading delay.
-    Loading,
     /// `rect` is the on-screen box of the image turned clockwise by `quarters` × 90°.
     Image {
         rect: (f32, f32, f32, f32),
@@ -49,6 +47,8 @@ enum Content {
 struct Shown {
     path: PathBuf,
     content: Content,
+    /// The view rotation it is drawn with; kept while the next photo loads.
+    quarters: u8,
 }
 
 pub struct Viewer {
@@ -165,16 +165,17 @@ impl Viewer {
         }
         let old_size = std::mem::replace(&mut self.view_size, size);
         let dpi_changed = std::mem::replace(&mut self.dip, dip) != dip;
-        let (touched, quarters) = (self.touched, self.quarters);
+        let touched = self.touched;
         let Some(Shown {
             content: Content::Image { result, view },
+            quarters,
             ..
         }) = &mut self.shown
         else {
             return;
         };
         let Ok(img) = result.as_ref() else { return };
-        let image = image_dips(img, dip, quarters);
+        let image = image_dips(img, dip, *quarters);
         if !touched {
             *view = Viewport::initial(size, image);
         } else if dpi_changed {
@@ -215,6 +216,9 @@ impl Viewer {
                 }
                 let turn = if cmd == Command::RotateRight { 1 } else { 3 };
                 self.quarters = (self.quarters + turn) % 4;
+                if let Some(s) = &mut self.shown {
+                    s.quarters = self.quarters;
+                }
                 self.touched = false;
                 let (size, dip) = (self.view_size, self.dip);
                 self.set_view(size, dip);
@@ -299,7 +303,11 @@ impl Viewer {
             Ok(_) => Content::Message(CANNOT_OPEN.to_owned()),
             Err(e) => Content::Message(error_message(e)),
         };
-        self.shown = Some(Shown { path, content });
+        self.shown = Some(Shown {
+            path,
+            content,
+            quarters: self.quarters,
+        });
         self.generation += 1;
         self.frame = 0;
         self.touched = false;
@@ -317,7 +325,13 @@ impl Viewer {
         self.list.current().is_some() && !self.showing_current()
     }
 
-    /// The loading delay passed: show the loading text if still pending.
+    /// The current photo has been pending longer than the loading delay; the previous
+    /// photo stays on screen under a small loading note.
+    pub fn loading(&self) -> bool {
+        self.loading
+    }
+
+    /// The loading delay passed: show the loading note if still pending.
     pub fn loading_overdue(&mut self) -> Redraw {
         if !self.pending() || self.loading {
             return Redraw::None;
@@ -371,16 +385,14 @@ impl Viewer {
     }
 
     pub fn scene(&self) -> Scene<'_> {
-        if self.loading {
-            return Scene::Loading;
-        }
         match &self.shown {
             Some(Shown {
                 content: Content::Image { view, .. },
+                quarters,
                 ..
             }) => Scene::Image {
                 rect: view.image_rect(),
-                quarters: self.quarters,
+                quarters: *quarters,
             },
             Some(Shown {
                 content: Content::Message(text),
@@ -455,16 +467,25 @@ mod tests {
     use lv_core::decode::Frame;
     use lv_core::format::ImageFormat;
     use lv_core::prefetch::Decode;
-    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     const VIEW: (f32, f32) = (800.0, 600.0);
 
-    /// Every file decodes to a 400×300 still image.
-    struct FakeDecoder;
+    /// Every file decodes to a 400×300 still image. The gated path blocks until its
+    /// sender is used or dropped.
+    struct FakeDecoder {
+        gate: Option<(PathBuf, Mutex<Receiver<()>>)>,
+    }
 
     impl Decode for FakeDecoder {
-        fn decode(&self, _path: &Path) -> Result<DecodedImage, DecodeError> {
+        fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError> {
+            if let Some((gated, rx)) = &self.gate {
+                if gated == path {
+                    let _ = rx.lock().unwrap().recv();
+                }
+            }
             Ok(DecodedImage {
                 width: 400,
                 height: 300,
@@ -485,8 +506,22 @@ mod tests {
 
     /// A viewer on a.jpg … e.jpg, opened at `name`, and its ready notifications.
     fn viewer_at(name: &str) -> (Viewer, Receiver<PathBuf>) {
+        viewer_with(name, None)
+    }
+
+    /// Like `viewer_at`, but decoding `gated` waits for the returned sender.
+    fn gated_viewer_at(name: &str, gated: &str) -> (Viewer, Receiver<PathBuf>, Sender<()>) {
+        let (release, gate) = channel();
+        let (v, rx) = viewer_with(name, Some((p(gated), Mutex::new(gate))));
+        (v, rx, release)
+    }
+
+    fn viewer_with(
+        name: &str,
+        gate: Option<(PathBuf, Mutex<Receiver<()>>)>,
+    ) -> (Viewer, Receiver<PathBuf>) {
         let (tx, rx) = channel();
-        let prefetcher = Prefetcher::new(FakeDecoder, 1, u64::MAX, move |path| {
+        let prefetcher = Prefetcher::new(FakeDecoder { gate }, 1, u64::MAX, move |path| {
             let _ = tx.send(path);
         });
         let mut v = Viewer::new(prefetcher);
@@ -574,6 +609,36 @@ mod tests {
         v.set_view(VIEW, 0.5);
         let after = v.view().unwrap();
         assert!((after.scale() / after.fit_scale() - ratio).abs() < 1e-3);
+    }
+
+    #[test]
+    fn loading_keeps_the_previous_photo_on_screen() {
+        let (mut v, rx, release) = gated_viewer_at("c.jpg", "d.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::Next);
+        assert!(!v.loading());
+        assert_eq!(v.loading_overdue(), Redraw::Full);
+        assert!(v.loading());
+        let previous = Viewport::initial(VIEW, (400.0, 300.0)).image_rect();
+        assert!(matches!(v.scene(), Scene::Image { rect, quarters: 0 } if rect == previous));
+        drop(release);
+    }
+
+    #[test]
+    fn previous_rotated_photo_keeps_its_rotation_while_loading() {
+        let (mut v, rx, release) = gated_viewer_at("c.jpg", "d.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        v.apply(Command::Next);
+        assert_eq!(v.view_rotation_quarters(), 0);
+        assert_eq!(v.title(), "d.jpg · 4 / 5");
+        let Scene::Image { rect, quarters } = v.scene() else {
+            panic!("the previous photo should still be drawn");
+        };
+        // c turned once: a 300×400 box drawn with one quarter turn.
+        assert_eq!(quarters, 1);
+        assert!((rect.2 / rect.3 - 300.0 / 400.0).abs() < 1e-4);
+        drop(release);
     }
 
     #[test]
