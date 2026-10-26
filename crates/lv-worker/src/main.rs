@@ -5,7 +5,8 @@
 //! a clean EOF, 2 on a bad command line, a protocol error or a failed write (the app went
 //! away). The worker never touches the file system or the network: the app sends the bytes.
 //!
-//! Usage: `lv-worker --max-pixels <N>` (debug builds also take `--test-mode=hang|crash`).
+//! Usage: `lv-worker --max-pixels <N>` (debug builds also take
+//! `--test-mode=hang|crash|die-at-start`).
 
 use std::io::{self, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -26,7 +27,13 @@ enum TestMode {
     Hang,
     /// `abort()` on the first request.
     Crash,
+    /// Exit with code 3 before reading anything (a worker that cannot start).
+    DieAtStart,
 }
+
+/// Exit code of `--test-mode=die-at-start`.
+#[cfg(debug_assertions)]
+const EXIT_DIE_AT_START: u8 = 3;
 
 #[derive(Debug)]
 struct Config {
@@ -47,6 +54,10 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_ERROR);
         }
     };
+    #[cfg(debug_assertions)]
+    if config.test_mode == Some(TestMode::DieAtStart) {
+        return ExitCode::from(EXIT_DIE_AT_START);
+    }
     serve(&config)
 }
 
@@ -67,6 +78,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
             "--test-mode=hang" => test_mode = Some(TestMode::Hang),
             #[cfg(debug_assertions)]
             "--test-mode=crash" => test_mode = Some(TestMode::Crash),
+            #[cfg(debug_assertions)]
+            "--test-mode=die-at-start" => test_mode = Some(TestMode::DieAtStart),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -111,7 +124,7 @@ fn serve(config: &Config) -> ExitCode {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             },
             Some(TestMode::Crash) => std::process::abort(),
-            None => {}
+            Some(TestMode::DieAtStart) | None => {}
         }
 
         let response = decode(id, &data, max_pixels.min(config.max_pixels));
