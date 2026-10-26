@@ -46,6 +46,13 @@ struct Config {
 }
 
 fn main() -> ExitCode {
+    // libheif is built with ENABLE_PLUGIN_LOADING: heif_init (run by the first
+    // `LibHeif::new`) LoadLibraryA's every DLL in the folder LIBHEIF_PLUGIN_PATH names (its
+    // built-in plugin folder is empty). The app starts us with `SystemRoot` alone, but no
+    // inherited variable may point libheif at foreign code. LIBHEIF_SECURITY_LIMITS can
+    // switch off libheif's default limits; ours are set per decode, but drop it as well.
+    std::env::remove_var("LIBHEIF_PLUGIN_PATH");
+    std::env::remove_var("LIBHEIF_SECURITY_LIMITS");
     #[cfg(windows)]
     hardening::apply();
 
@@ -188,6 +195,9 @@ fn decode(id: u64, data: &[u8], max_pixels: u64) -> Response {
 mod hardening {
     //! Process-wide restrictions the worker puts on itself before reading any input.
 
+    use windows::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    };
     use windows::Win32::System::LibraryLoader::{
         SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
@@ -213,6 +223,7 @@ mod hardening {
     /// `heif.dll` and `libde265.dll` are static imports, already loaded by the time this
     /// runs, so the image load policy cannot block them.
     pub fn apply() {
+        quiet_system_errors();
         // SAFETY: plain flags argument; no pointers involved.
         let dirs = unsafe {
             SetDefaultDllDirectories(
@@ -251,6 +262,14 @@ mod hardening {
         }
     }
 
+    /// No "System Error" box or crash dialog for this process. The app's mode, inherited at
+    /// creation, already covers a DLL missing before `main`; this covers the rest even when
+    /// the worker is started by something else.
+    pub fn quiet_system_errors() {
+        // SAFETY: plain call with valid flags; it only changes this process's error mode.
+        unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+    }
+
     fn set_policy(policy: PROCESS_MITIGATION_POLICY, flags: u32) -> windows::core::Result<()> {
         // SAFETY: every policy used here takes a 4-byte structure that is just a flags
         // DWORD; `flags` outlives the call and the length matches.
@@ -281,6 +300,23 @@ mod tests {
         assert_eq!(request_cap(u64::MAX), MAX_PAYLOAD);
         // Small limits keep lv-core's 64 MiB floor.
         assert_eq!(request_cap(1000), (64 << 20) + REQUEST_FIXED_LEN);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_error_dialogs_are_off() {
+        use windows::Win32::System::Diagnostics::Debug::{
+            GetErrorMode, SetErrorMode, THREAD_ERROR_MODE,
+        };
+
+        // Start from the default mode: the test runner may have inherited a quiet one.
+        // SAFETY: plain calls; the previous mode is put back below.
+        let previous = unsafe { SetErrorMode(THREAD_ERROR_MODE(0)) };
+        hardening::quiet_system_errors();
+        // SAFETY: plain calls, as above.
+        let mode = unsafe { GetErrorMode() };
+        unsafe { SetErrorMode(previous) };
+        assert_eq!(mode & 0b11, 0b11, "error mode {mode:#x}");
     }
 
     #[test]
