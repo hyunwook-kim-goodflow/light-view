@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 
 `cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC·JPEG 회전 작업자), `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`이 함께 있어야 해요. 이 파일들을 한 폴더에 두면 그대로 실행돼요. 작업자는 이 DLL을 모두 정적으로 가져오므로 하나라도 없으면 HEIC도 열리지 않아요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
 
-네 파일 모두 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, 두 DLL은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio나 이 패키지가 설치된 컴퓨터에는 이미 있어요. 다른 컴퓨터로 옮겨 실행하려면 이 패키지를 먼저 설치해야 해요(설치 파일은 M5에서 만들어요).
+이 실행 파일과 DLL은 모두 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, `heif.dll`과 `libde265.dll`은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio나 이 패키지가 설치된 컴퓨터에는 이미 있어요. 다른 컴퓨터로 옮겨 실행하려면 이 패키지를 먼저 설치해야 해요(설치 파일은 M5에서 만들어요).
 
 ## 사용법
 

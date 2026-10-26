@@ -29,7 +29,8 @@
 //! - `0x82` `Failed`: `id: u64 | tag: u8 | fields`, with tag `0` `TooLarge`
 //!   (`width: u32 | height: u32`; `0 x 0` when the worker does not report the size), tag `1`
 //!   `Corrupt` (string), tag `2` `Unsupported` (none), tag `3` `NotPerfect` (none: the JPEG
-//!   cannot be rotated losslessly because its size is not a multiple of its MCU).
+//!   cannot be rotated losslessly because its size is not a multiple of its MCU), tag `4`
+//!   `HasTrailingData` (none: data after EOI or an MPF segment, ruling R7).
 //! - `0x83` `Bytes`: `id: u64 | data` (the rest of the payload), the answer to `RotateJpeg`.
 //!
 //! # Reading
@@ -129,6 +130,7 @@ const TAG_TOO_LARGE: u8 = 0;
 const TAG_CORRUPT: u8 = 1;
 const TAG_UNSUPPORTED: u8 = 2;
 const TAG_NOT_PERFECT: u8 = 3;
+const TAG_HAS_TRAILING_DATA: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -187,6 +189,9 @@ pub enum FailKind {
     /// `RotateJpeg` only: the image size is not a multiple of its MCU, so the pixels
     /// cannot be rotated losslessly.
     NotPerfect,
+    /// `RotateJpeg` only: data after EOI, an MPF segment, or no EOI found (ruling R7);
+    /// rotating would lose what follows the first image.
+    HasTrailingData,
 }
 
 #[derive(Debug)]
@@ -445,6 +450,7 @@ pub fn write_response(w: &mut impl Write, r: &Response) -> io::Result<()> {
                 }
                 FailKind::Unsupported => p.push(TAG_UNSUPPORTED),
                 FailKind::NotPerfect => p.push(TAG_NOT_PERFECT),
+                FailKind::HasTrailingData => p.push(TAG_HAS_TRAILING_DATA),
             }
             write_frame(w, KIND_FAILED, p.len() as u64)?;
             w.write_all(&p)
@@ -516,6 +522,7 @@ pub fn read_response(r: &mut impl Read, max_payload: u64) -> Result<Option<Respo
                 }
                 TAG_UNSUPPORTED => FailKind::Unsupported,
                 TAG_NOT_PERFECT => FailKind::NotPerfect,
+                TAG_HAS_TRAILING_DATA => FailKind::HasTrailingData,
                 _ => return Err(IpcError::Malformed("unknown fail tag")),
             };
             expect_consumed(&p)?;
@@ -713,11 +720,10 @@ mod tests {
             let r = Response::Bytes { id: 12, data };
             assert_eq!(rt_resp(&r), r);
         }
-        let r = Response::Failed {
-            id: 13,
-            kind: FailKind::NotPerfect,
-        };
-        assert_eq!(rt_resp(&r), r);
+        for kind in [FailKind::NotPerfect, FailKind::HasTrailingData] {
+            let r = Response::Failed { id: 13, kind };
+            assert_eq!(rt_resp(&r), r);
+        }
     }
 
     #[test]

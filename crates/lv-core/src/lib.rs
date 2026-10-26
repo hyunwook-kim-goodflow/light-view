@@ -6,6 +6,7 @@ pub mod decode;
 pub mod format;
 #[cfg(windows)]
 pub mod identity;
+pub mod jpeg_extent;
 pub mod listing;
 pub mod prefetch;
 pub mod settings;
