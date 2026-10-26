@@ -93,7 +93,8 @@ fn forward(path: Option<&Path>) -> bool {
         }
         return true;
     };
-    let data = encode_path(path);
+    // The primary has another working directory, so a relative path is resolved here.
+    let data = encode_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
     let cds = COPYDATASTRUCT {
         dwData: COPYDATA_OPEN,
         cbData: (data.len() * 2) as u32,
