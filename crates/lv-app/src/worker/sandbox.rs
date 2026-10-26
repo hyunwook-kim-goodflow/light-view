@@ -145,19 +145,26 @@ pub fn spawn(
         }
         Err(e) => return Err(e),
     };
-    // The child holds its own copies now; ours of its output ends would keep those pipes
-    // open after it dies. The stdin read end stays (no longer inheritable) as the monitor.
-    drop((stdout_child, stderr_child));
-    // SAFETY: `stdin_child` is a valid pipe handle we own.
-    unsafe { SetHandleInformation(raw(&stdin_child), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
-        .map_err(|e| format!("SetHandleInformation: {e}"))?;
-    // SAFETY: CreateProcessAsUserW returned these handles to us; we own them from here.
+    // SAFETY: CreateProcessAsUserW returned these handles to us; we own them from here, so
+    // every early return below closes them.
     let (process, thread) = unsafe {
         (
             OwnedHandle::from_raw_handle(info.hProcess.0),
             OwnedHandle::from_raw_handle(info.hThread.0),
         )
     };
+    // The child holds its own copies now; ours of its output ends would keep those pipes
+    // open after it dies. The stdin read end stays (no longer inheritable) as the monitor.
+    drop((stdout_child, stderr_child));
+    // SAFETY: `stdin_child` is a valid pipe handle we own.
+    if let Err(e) =
+        unsafe { SetHandleInformation(raw(&stdin_child), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+    {
+        // SAFETY: valid process handle; the suspended process never ran and is not in the
+        // Job yet, so it must not be left behind.
+        let _ = unsafe { TerminateProcess(raw(&process), 1) };
+        return Err(format!("SetHandleInformation: {e}"));
+    }
 
     // SAFETY: both handles are valid; the process is suspended and has run no code.
     if let Err(e) = unsafe { AssignProcessToJobObject(raw(&job), raw(&process)) } {

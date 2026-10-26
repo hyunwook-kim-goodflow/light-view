@@ -5,7 +5,8 @@
 //! the worker's reader thread (ruling R4): if no matching answer arrives within the timeout
 //! (10 s), or the worker dies or breaks the protocol, its Job is terminated, the slot is
 //! emptied and the call fails with `Corrupt("작업자가 응답하지 않아요")`; the next call starts
-//! a fresh worker.
+//! a fresh worker. A worker that died while idle, after answering, is replaced before the
+//! next request without failing it.
 //!
 //! A worker counts as started only once it has given a valid answer: failing to spawn, or
 //! dying, hanging or breaking the protocol on its first request, is a start failure, and
@@ -29,7 +30,7 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lv_core::decode::DecodeError;
+use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
 use lv_ipc::{read_response, write_request, FailKind, IpcError, Request, Response};
 
 use sandbox::{log, Sandboxed, StdinMonitor};
@@ -127,7 +128,14 @@ impl WorkerPool {
     }
 
     /// Decodes a HEIF file in a worker to premultiplied sRGB BGRA8 (width, height, pixels).
+    /// A file larger than the worker accepts is `FileTooLarge` without being sent: the
+    /// worker would refuse it unread and die, which would count against its slot.
     pub fn decode_heif(&self, data: Vec<u8>) -> Result<Decoded, DecodeError> {
+        if data.len() as u64 > request_data_cap(self.max_pixels) {
+            return Err(DecodeError::FileTooLarge {
+                bytes: data.len() as u64,
+            });
+        }
         loop {
             let mut guard = self.acquire()?;
             if self.ensure_worker(guard.slot()) {
@@ -169,8 +177,19 @@ impl WorkerPool {
         }
     }
 
-    /// Makes sure `slot` has a worker; false once the slot has given up.
+    /// Makes sure `slot` has a worker; false once the slot has given up. A started worker
+    /// that has exited since its last answer (killed from outside, say) is replaced
+    /// without counting a failure: no request of ours was in it.
     fn ensure_worker(&self, slot: &mut Slot) -> bool {
+        if let Some(worker) = slot
+            .worker
+            .take_if(|w| w.answered && w.sandboxed.has_exited())
+        {
+            log(&format!(
+                "worker {} exited while idle; starting a new one",
+                worker.sandboxed.pid
+            ));
+        }
         while slot.worker.is_none() {
             if slot.spawn_failures >= MAX_SPAWN_FAILURES {
                 return false;
@@ -362,6 +381,12 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
+/// Largest file a worker accepts in a request: the worker's request cap (ruling R10)
+/// without the frame's fixed fields, the same rule as lv-core's file size limit.
+fn request_data_cap(max_pixels: u64) -> u64 {
+    max_file_bytes(&DecodeLimits { max_pixels })
+}
+
 /// Largest response the app accepts: an `N`-pixel BGRA image plus room for the fixed fields
 /// (ruling R10).
 fn response_cap(max_pixels: u64) -> u64 {
@@ -485,7 +510,7 @@ struct WorkerInfo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::time::Instant;
@@ -503,14 +528,14 @@ mod tests {
     use windows::Win32::System::SystemServices::SECURITY_MANDATORY_LOW_RID;
     use windows::Win32::System::Threading::{
         GetProcessMitigationPolicy, OpenProcess, OpenProcessToken, ProcessChildProcessPolicy,
-        ProcessSystemCallDisablePolicy, WaitForSingleObject, PROCESS_QUERY_INFORMATION,
-        PROCESS_SYNCHRONIZE,
+        ProcessSystemCallDisablePolicy, TerminateProcess, WaitForSingleObject,
+        PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     };
 
     const MAX_PIXELS: u64 = 100_000_000;
 
     /// `lv-worker.exe` next to the test binary's profile folder (`target/<profile>`).
-    fn worker_exe() -> PathBuf {
+    pub(crate) fn worker_exe() -> PathBuf {
         let test_exe = std::env::current_exe().expect("current exe");
         // target/<profile>/deps/lv_app-<hash>.exe
         let profile_dir = test_exe
@@ -717,7 +742,51 @@ mod tests {
             hung.wait_for_exit(Duration::from_secs(5)),
             "hung worker still runs"
         );
+        // It hung after taking the request: counted, but the sandbox stays whole.
+        assert_eq!(pool.slot_states(), vec![(1, false)]);
         assert_decodes(&pool);
+    }
+
+    #[test]
+    fn oversized_request_is_rejected_before_sending() {
+        // With max_pixels 1 the worker takes at most 64 MiB of file bytes.
+        let pool = WorkerPool::start(worker_exe(), 1, 1);
+        let pid = single_worker(&pool).pid;
+        let data = vec![0u8; 64 << 20 | 1];
+        match pool.decode_heif(data) {
+            Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, (64 << 20) + 1),
+            Err(e) => panic!("expected FileTooLarge, got {e}"),
+            Ok(_) => panic!("expected FileTooLarge, got an image"),
+        }
+        // Nothing reached the worker: same process, no start failure, not degraded.
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        assert!(matches!(
+            pool.decode_heif(sample()),
+            Err(DecodeError::TooLarge {
+                width: 451,
+                height: 461
+            })
+        ));
+    }
+
+    #[test]
+    fn worker_killed_while_idle_is_replaced_without_failing() {
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        assert_decodes(&pool);
+        let old = single_worker(&pool).pid;
+        // Like `taskkill /f`: the worker dies between requests.
+        // SAFETY: plain call; the handle is owned by `Process` and closed on drop.
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, old) }
+            .expect("OpenProcess");
+        let killed = Process(handle);
+        // SAFETY: valid process handle with PROCESS_TERMINATE access.
+        unsafe { TerminateProcess(killed.0, 1) }.expect("TerminateProcess");
+        assert!(killed.wait_for_exit(Duration::from_secs(5)));
+        // The next request goes to a fresh worker and is not counted as a failure.
+        assert_decodes(&pool);
+        assert_ne!(single_worker(&pool).pid, old);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
     }
 
     #[test]

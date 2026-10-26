@@ -7,14 +7,13 @@ mod input;
 mod instance;
 mod placement;
 mod render;
+mod routing;
 mod theme;
 mod timing;
 mod toolbar;
 mod tooltip;
 mod viewer;
 mod window;
-// Created at startup from Task 6 on; until then only the tests use it.
-#[allow(dead_code)]
 mod worker;
 
 use std::path::PathBuf;

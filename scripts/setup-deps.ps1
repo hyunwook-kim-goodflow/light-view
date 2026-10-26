@@ -15,9 +15,15 @@
        (`cargo test`/`cargo run` also find them through libheif-sys's OUT_DIR, which cargo
        puts on PATH.)
     5. Prints the environment the build uses (pinned in .cargo\config.toml [env]).
+
+    With -CopyOnly it only does step 4, from an existing vcpkg_installed\ (for example after
+    `cargo clean`):
+        powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 #>
 [CmdletBinding()]
-param()
+param(
+    [switch]$CopyOnly
+)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -39,6 +45,29 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) {
         throw "'$Exe $($Arguments -join ' ')' failed with exit code $LASTEXITCODE"
     }
+}
+
+# Copies heif.dll, libde265.dll and the other DLLs they need next to the executables.
+function Copy-RuntimeDlls {
+    $binDir = Join-Path $TripletDir 'bin'
+    foreach ($required in @('heif.dll', 'libde265.dll')) {
+        if (-not (Test-Path (Join-Path $binDir $required))) {
+            throw "$required not found in $binDir"
+        }
+    }
+    $dlls = @(Get-ChildItem -Path $binDir -Filter '*.dll')
+    $targets = @('target\debug', 'target\release')
+    foreach ($rel in $targets) {
+        $dest = Join-Path $RepoRoot $rel
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        foreach ($dll in $dlls) { Copy-Item -Force -Path $dll.FullName -Destination $dest }
+    }
+    Write-Host "Copied $(($dlls | ForEach-Object { $_.Name }) -join ', ') to $($targets -join ', ')"
+}
+
+if ($CopyOnly) {
+    Copy-RuntimeDlls
+    return
 }
 
 # --- 1. vcpkg at the pinned commit -------------------------------------------------------
@@ -119,20 +148,7 @@ if ($violations.Count -gt 0) {
 Write-Host "Forbidden-codec check passed ($($forbidden -join ', ') absent)."
 
 # --- 4. Runtime DLLs ----------------------------------------------------------------------
-$binDir = Join-Path $TripletDir 'bin'
-foreach ($required in @('heif.dll', 'libde265.dll')) {
-    if (-not (Test-Path (Join-Path $binDir $required))) {
-        throw "$required not found in $binDir"
-    }
-}
-$dlls = @(Get-ChildItem -Path $binDir -Filter '*.dll')
-$targets = @('target\debug', 'target\release')
-foreach ($rel in $targets) {
-    $dest = Join-Path $RepoRoot $rel
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    foreach ($dll in $dlls) { Copy-Item -Force -Path $dll.FullName -Destination $dest }
-}
-Write-Host "Copied $(($dlls | ForEach-Object { $_.Name }) -join ', ') to $($targets -join ', ')"
+Copy-RuntimeDlls
 
 # --- 5. Build environment -----------------------------------------------------------------
 Write-Host ''
