@@ -1,11 +1,11 @@
 //! comctl32 tooltip control: one tool per toolbar button rect.
 
-use windows::core::PWSTR;
+use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW, TTF_SUBCLASS,
-    TTM_ADDTOOLW, TTM_DELTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+    InitCommonControlsEx, SetWindowTheme, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, TOOLTIPS_CLASSW,
+    TTF_SUBCLASS, TTM_ADDTOOLW, TTM_DELTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, SendMessageW, CW_USEDEFAULT, WINDOW_STYLE, WS_EX_TOPMOST, WS_POPUP,
@@ -41,6 +41,19 @@ pub fn create(owner: HWND) -> Option<HWND> {
             None,
         )
         .ok()
+    }
+}
+
+/// Dark mode (spec §4.1): the dark Explorer visual style, or the default style.
+pub fn set_dark(tooltip: HWND, dark: bool) {
+    let theme = if dark {
+        w!("DarkMode_Explorer")
+    } else {
+        PCWSTR::null()
+    };
+    // SAFETY: `tooltip` is our tooltip window; `theme` is static or null.
+    unsafe {
+        let _ = SetWindowTheme(tooltip, theme, PCWSTR::null());
     }
 }
 

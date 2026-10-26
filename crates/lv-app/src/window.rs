@@ -16,15 +16,16 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, SetWindowTextW, TranslateMessage, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOZORDER,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetWindowLongPtrW, GetWindowLongW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, TranslateMessage,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
+    IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::input::{self, Pointer};
@@ -129,6 +130,10 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         // Task 10 appends the position: "IMG_4821.HEIC · 12 / 128".
         let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
         let tooltip = tooltip::create(hwnd);
+        if let Some(tt) = tooltip {
+            let dark = app.borrow().dark;
+            tooltip::set_dark(tt, dark);
+        }
         // On failure, destroy the window before `app` goes away (no borrow is held).
         let renderer = match Renderer::new(hwnd) {
             Ok(r) => r,
@@ -380,6 +385,14 @@ fn handle(
 ) -> Option<LRESULT> {
     match msg {
         WM_ERASEBKGND => Some(LRESULT(1)),
+        WM_GETMINMAXINFO => {
+            if let Some(width) = min_window_width(hwnd) {
+                // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
+                let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                mmi.ptMinTrackSize.x = mmi.ptMinTrackSize.x.max(width);
+            }
+            Some(LRESULT(0))
+        }
         WM_SIZE => {
             app.try_borrow_mut().ok()?.on_size(hwnd);
             input::sync_tooltips(app, hwnd);
@@ -435,8 +448,15 @@ fn handle(
         WM_SETTINGCHANGE => {
             if is_color_set_change(lparam) {
                 let dark = system_prefers_dark();
-                app.try_borrow_mut().ok()?.dark = dark;
+                let tooltip = {
+                    let mut a = app.try_borrow_mut().ok()?;
+                    a.dark = dark;
+                    a.pointer.tooltip()
+                };
                 apply_title_bar(hwnd, dark);
+                if let Some(tt) = tooltip {
+                    tooltip::set_dark(tt, dark);
+                }
                 invalidate(hwnd);
             }
             None
@@ -499,6 +519,29 @@ pub fn invalidate(hwnd: HWND) {
     // SAFETY: plain call on our window.
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+/// Outer window width whose client area fits the widest toolbar
+/// (`toolbar::min_client_width`) at the window's DPI.
+fn min_window_width(hwnd: HWND) -> Option<i32> {
+    // SAFETY: plain calls on our window; `rc` is a live local.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            return None;
+        }
+        let client = (toolbar::min_client_width() * dpi as f32 / 96.0).ceil() as i32;
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: client,
+            bottom: 0,
+        };
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        AdjustWindowRectExForDpi(&mut rc, style, false, ex_style, dpi).ok()?;
+        Some(rc.right - rc.left)
     }
 }
 
