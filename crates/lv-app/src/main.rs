@@ -1,6 +1,7 @@
 // Release builds are GUI-subsystem (no console window); debug builds keep stderr.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod placement;
 mod render;
 mod theme;
 mod window;
