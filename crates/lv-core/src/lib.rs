@@ -4,6 +4,8 @@ pub mod color;
 pub mod command;
 pub mod decode;
 pub mod format;
+#[cfg(windows)]
+pub mod identity;
 pub mod listing;
 pub mod prefetch;
 pub mod settings;
