@@ -4,12 +4,15 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use lv_core::command::Command;
 use lv_core::decode::{decode_file, DecodeError, DecodeLimits, DecodedImage};
 use lv_core::settings::{load_settings, save_settings, Settings};
-use lv_core::viewport::Viewport;
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use lv_core::viewport::{Viewport, ZOOM_STEP};
+use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -18,15 +21,18 @@ use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, K
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SetWindowPlacement, SetWindowPos, SetWindowTextW, TranslateMessage, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOZORDER,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
+use crate::input::{self, Pointer};
 use crate::placement;
 use crate::render::Renderer;
 use crate::theme::{palette, system_prefers_dark};
+use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
+use crate::tooltip;
 
 const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
 const CANNOT_OPEN: &str = "이 사진은 열 수 없어요";
@@ -41,14 +47,22 @@ enum Content {
     Message(String),
 }
 
-struct App {
+pub struct App {
     renderer: Option<Renderer>,
     content: Content,
+    /// Size of the opened file in bytes, for the pinned bar's info text.
+    file_bytes: Option<u64>,
     dark: bool,
-    settings: Settings,
+    pub settings: Settings,
     settings_path: Option<PathBuf>,
     /// True while the saved placement is being applied at startup.
     restoring: bool,
+    /// Client area size in DIPs.
+    client_dips: (f32, f32),
+    /// DIPs per device pixel.
+    pub dip: f32,
+    icon_family: &'static str,
+    pub pointer: Pointer,
 }
 
 pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
@@ -57,13 +71,25 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
+    let title = initial
+        .as_deref()
+        .and_then(Path::file_name)
+        .map_or_else(|| "light-view".into(), |n| n.to_string_lossy().into_owned());
     let app = RefCell::new(App {
         renderer: None,
         content: initial.as_deref().map_or(Content::Empty, load_content),
+        file_bytes: initial
+            .as_deref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len()),
         dark: system_prefers_dark(),
         settings,
         settings_path,
         restoring: false,
+        client_dips: (0.0, 0.0),
+        dip: 1.0,
+        icon_family: "",
+        pointer: Pointer::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -100,6 +126,9 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         .context("CreateWindowExW")?;
 
         apply_title_bar(hwnd, app.borrow().dark);
+        // Task 10 appends the position: "IMG_4821.HEIC · 12 / 128".
+        let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
+        let tooltip = tooltip::create(hwnd);
         // On failure, destroy the window before `app` goes away (no borrow is held).
         let renderer = match Renderer::new(hwnd) {
             Ok(r) => r,
@@ -110,7 +139,9 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         };
         {
             let mut a = app.borrow_mut();
+            a.icon_family = toolbar::icon_family(&renderer);
             a.renderer = Some(renderer);
+            a.pointer.set_tooltip(tooltip);
             a.upload_image();
         }
 
@@ -131,7 +162,9 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
             let mut a = app.borrow_mut();
             a.reset_view();
             a.on_size(hwnd);
+            a.refresh_toolbar();
         }
+        input::sync_tooltips(&app, hwnd);
         let _ = InvalidateRect(hwnd, None, false);
 
         let mut msg = MSG::default();
@@ -194,7 +227,9 @@ impl App {
             r.resize(pw as u32, ph as u32);
         }
         let dip = dip_per_px(hwnd);
-        let view_dips = (pw as f32 * dip, ph as f32 * dip);
+        self.dip = dip;
+        self.client_dips = (pw as f32 * dip, ph as f32 * dip);
+        let view_dips = self.view_dips();
         if let Content::Image { img, view } = &mut self.content {
             match view {
                 Some(v) => v.resize(view_dips),
@@ -207,7 +242,68 @@ impl App {
         }
     }
 
+    /// The image area: the client area above a pinned toolbar.
+    fn view_dips(&self) -> (f32, f32) {
+        let (w, h) = self.client_dips;
+        let bar = if self.settings.toolbar_pinned {
+            pinned_bar_height()
+        } else {
+            0.0
+        };
+        (w, (h - bar).max(0.0))
+    }
+
+    /// The toolbar's layout input, or `None` when no file is open (no toolbar).
+    pub fn toolbar_input(&self) -> Option<ToolbarInput> {
+        if matches!(self.content, Content::Empty) {
+            return None;
+        }
+        Some(ToolbarInput {
+            view_w: self.client_dips.0,
+            view_h: self.client_dips.1,
+            pinned: self.settings.toolbar_pinned,
+            unsaved_rotation: false, // Task 10 tracks rotation
+        })
+    }
+
+    pub fn on_command(&mut self, command: Command) {
+        match command {
+            Command::ZoomIn => self.zoom(ZOOM_STEP),
+            Command::ZoomOut => self.zoom(1.0 / ZOOM_STEP),
+            // TODO(Task 10): navigate to the previous / next photo in the folder.
+            Command::Prev | Command::Next => {}
+            _ => {}
+        }
+    }
+
+    /// Zooms about the centre of the image area.
+    fn zoom(&mut self, factor: f32) {
+        let (w, h) = self.view_dips();
+        if let Content::Image { view: Some(v), .. } = &mut self.content {
+            v.zoom_at(factor, (w / 2.0, h / 2.0));
+        }
+    }
+
+    /// Pins or unpins the toolbar, saves the choice and resizes the image area.
+    pub fn toggle_pin(&mut self, hwnd: HWND) {
+        self.settings.toolbar_pinned = !self.settings.toolbar_pinned;
+        self.persist_settings();
+        self.on_size(hwnd);
+    }
+
     fn paint(&mut self) {
+        let toolbar = self.toolbar_input().filter(|_| self.pointer.shown);
+        let (info, zoom) = match &self.content {
+            Content::Image { img, view } => (
+                self.file_bytes
+                    .map(|b| toolbar::info_text(img.width, img.height, b))
+                    .unwrap_or_default(),
+                view.as_ref()
+                    .map(|v| toolbar::zoom_text(v.scale()))
+                    .unwrap_or_default(),
+            ),
+            _ => (String::new(), String::new()),
+        };
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -215,6 +311,17 @@ impl App {
             Content::Image { view: Some(v), .. } => r.draw_image(v.image_rect()),
             Content::Message(text) => r.draw_text_center(text, p.ink2),
             Content::Image { view: None, .. } | Content::Empty => {}
+        }
+        if let Some(input) = toolbar {
+            let view = ToolbarView {
+                input,
+                palette: p,
+                dark: self.dark,
+                icon_family: self.icon_family,
+                position: (1, 1), // Task 10 supplies the folder position
+                info: (&info, &zoom),
+            };
+            toolbar::draw(r, &view);
         }
         if let Err(e) = r.end() {
             eprintln!("light-view: EndDraw failed: {e}");
@@ -226,6 +333,10 @@ impl App {
             return;
         };
         self.settings.window = Some(wp);
+        self.persist_settings();
+    }
+
+    fn persist_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = save_settings(path, &self.settings) {
                 eprintln!("light-view: could not save settings: {e}");
@@ -271,6 +382,7 @@ fn handle(
         WM_ERASEBKGND => Some(LRESULT(1)),
         WM_SIZE => {
             app.try_borrow_mut().ok()?.on_size(hwnd);
+            input::sync_tooltips(app, hwnd);
             Some(LRESULT(0))
         }
         WM_PAINT => {
@@ -316,6 +428,7 @@ fn handle(
             }
             // The pixel size may not change, so rebuild the viewport explicitly.
             app.try_borrow_mut().ok()?.on_size(hwnd);
+            input::sync_tooltips(app, hwnd);
             invalidate(hwnd);
             Some(LRESULT(0))
         }
@@ -346,7 +459,7 @@ fn handle(
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
         }
-        _ => None,
+        _ => input::handle(app, hwnd, msg, wparam, lparam),
     }
 }
 
@@ -361,7 +474,11 @@ fn is_color_set_change(lparam: LPARAM) -> bool {
 
 fn apply_title_bar(hwnd: HWND, dark: bool) {
     let value = BOOL::from(dark);
-    // SAFETY: `value` is a live BOOL and the size passed matches it.
+    let paper = palette(dark).paper;
+    // COLORREF is 0x00BBGGRR.
+    let caption = COLORREF(u32::from(paper.0) | u32::from(paper.1) << 8 | u32::from(paper.2) << 16);
+    // SAFETY: `value` and `caption` are live locals and each size passed matches its
+    // value. DWMWA_CAPTION_COLOR fails on Windows 10; that error is ignored.
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -369,10 +486,16 @@ fn apply_title_bar(hwnd: HWND, dark: bool) {
             std::ptr::from_ref(&value).cast(),
             std::mem::size_of::<BOOL>() as u32,
         );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            std::ptr::from_ref(&caption).cast(),
+            std::mem::size_of::<COLORREF>() as u32,
+        );
     }
 }
 
-fn invalidate(hwnd: HWND) {
+pub fn invalidate(hwnd: HWND) {
     // SAFETY: plain call on our window.
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
