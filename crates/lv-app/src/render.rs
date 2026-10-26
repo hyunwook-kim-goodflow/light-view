@@ -57,11 +57,28 @@ pub struct TextRun<'a> {
     pub color: Rgb,
 }
 
-/// Premultiplied BGRA pixels; only alive while the bitmap is created from them.
-struct Pixels {
-    bgra: Vec<u8>,
+/// A frame's premultiplied BGRA pixels, borrowed while the bitmap is created from
+/// them. Only built by `Pixels::new`, which validates the length.
+struct Pixels<'a> {
+    bgra: &'a [u8],
     width: u32,
     height: u32,
+}
+
+impl<'a> Pixels<'a> {
+    /// `None` unless `bgra.len() == width * height * 4` and the stride `width * 4`
+    /// fits in u32 (no overflow), so D2D never reads past the buffer.
+    fn new(bgra: &'a [u8], width: u32, height: u32) -> Option<Self> {
+        width.checked_mul(4)?;
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        (bgra.len() == expected).then_some(Pixels {
+            bgra,
+            width,
+            height,
+        })
+    }
 }
 
 /// Device-dependent resources; dropped and rebuilt on `D2DERR_RECREATE_TARGET`.
@@ -149,17 +166,13 @@ impl Renderer {
         }
     }
 
-    /// Uploads `frame` of `img` as premultiplied BGRA, or clears the image. A frame whose
-    /// buffer length does not match `width * height * 4` is treated as no image. The
-    /// converted pixels are dropped once the bitmap exists.
+    /// Uploads `frame` of `img` (already premultiplied BGRA) as is, or clears the image.
+    /// A frame whose buffer length does not match `width * height * 4` is treated as no
+    /// image.
     pub fn set_image(&mut self, img: Option<&DecodedImage>, frame: usize) {
         let pixels = img.and_then(|img| {
             let f = img.frames.get(frame)?;
-            Some(Pixels {
-                bgra: premultiplied_bgra_for(&f.rgba, img.width, img.height)?,
-                width: img.width,
-                height: img.height,
-            })
+            Pixels::new(&f.bgra, img.width, img.height)
         });
         self.image = pixels.as_ref().map(|p| (p.width, p.height));
         // A lost device is rebuilt here so the bitmap can be created right away.
@@ -550,7 +563,7 @@ fn create_bitmap(target: &ID2D1HwndRenderTarget, p: &Pixels) -> Result<ID2D1Bitm
         width: p.width,
         height: p.height,
     };
-    // SAFETY: `Pixels` is only built by `premultiplied_bgra_for`, which guarantees
+    // SAFETY: `Pixels` is only built by `Pixels::new`, which guarantees
     // `p.bgra.len() == width * height * 4` and that the stride `width * 4` fits in u32;
     // D2D copies the data before returning.
     unsafe { target.CreateBitmap(size, Some(p.bgra.as_ptr().cast()), p.width * 4, &props) }
@@ -618,30 +631,6 @@ fn interpolation_for(device_scale: f32) -> D2D1_INTERPOLATION_MODE {
     }
 }
 
-/// Converts a `width` x `height` straight-alpha RGBA8 frame, or `None` if the buffer
-/// length does not match (or the size overflows), so D2D never reads past it.
-fn premultiplied_bgra_for(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    width.checked_mul(4)?;
-    let expected = (width as usize)
-        .checked_mul(height as usize)?
-        .checked_mul(4)?;
-    (rgba.len() == expected).then(|| rgba_to_premultiplied_bgra(rgba))
-}
-
-/// Straight-alpha RGBA8 to premultiplied BGRA8 (rounded).
-fn rgba_to_premultiplied_bgra(rgba: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; rgba.len() / 4 * 4];
-    for (src, dst) in rgba.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
-        let a = u32::from(src[3]);
-        let mul = |c: u8| ((u32::from(c) * a + 127) / 255) as u8;
-        dst[0] = mul(src[2]);
-        dst[1] = mul(src[1]);
-        dst[2] = mul(src[0]);
-        dst[3] = src[3];
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,13 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn premultiplies_and_swaps_to_bgra() {
-        let rgba = [255, 128, 0, 255, 200, 100, 50, 128, 10, 20, 30, 0];
-        let out = rgba_to_premultiplied_bgra(&rgba);
-        assert_eq!(out, vec![0, 128, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
-    }
-
-    #[test]
     fn upload_is_needed_only_for_a_set_image_without_bitmap() {
         // Device lost or rebuilt: the image is still set but has no bitmap.
         assert!(needs_upload_for(Some((4000, 3000)), false));
@@ -680,15 +662,14 @@ mod tests {
 
     #[test]
     fn frame_buffer_must_match_dimensions() {
-        let rgba = [1u8, 2, 3, 255, 4, 5, 6, 255];
-        assert_eq!(
-            premultiplied_bgra_for(&rgba, 2, 1),
-            Some(vec![3, 2, 1, 255, 6, 5, 4, 255])
-        );
-        assert_eq!(premultiplied_bgra_for(&rgba, 2, 2), None); // too short
-        assert_eq!(premultiplied_bgra_for(&rgba, 1, 1), None); // too long
-        assert_eq!(premultiplied_bgra_for(&rgba, u32::MAX, u32::MAX), None); // overflow
-        assert_eq!(premultiplied_bgra_for(&[], 0, 0), Some(vec![]));
+        let bgra = [3u8, 2, 1, 255, 6, 5, 4, 255];
+        let p = Pixels::new(&bgra, 2, 1).expect("exact length is accepted");
+        // Passed through untouched: no conversion on the UI thread.
+        assert_eq!((p.bgra, p.width, p.height), (&bgra[..], 2, 1));
+        assert!(Pixels::new(&bgra, 2, 2).is_none()); // too short
+        assert!(Pixels::new(&bgra, 1, 1).is_none()); // too long
+        assert!(Pixels::new(&bgra, u32::MAX, u32::MAX).is_none()); // overflow
+        assert!(Pixels::new(&[], 0, 0).is_some());
     }
 
     #[test]

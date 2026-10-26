@@ -36,13 +36,25 @@ pub fn sniff_format(head: &[u8]) -> Option<ImageFormat> {
         return Some(ImageFormat::Bmp);
     }
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        // Brands are read only inside the ftyp box. Size 0 means the box runs to the end
+        // of the file; a box under 16 bytes (or size 1, a 64-bit size) cannot hold the
+        // major brand and minor version where they are expected.
+        let box_end = match u32::from_be_bytes([head[0], head[1], head[2], head[3]]) {
+            0 => head.len(),
+            1..=15 => return None,
+            n => head.len().min(n as usize),
+        };
         let major = &head[8..12];
         if !HEIF_BRANDS.iter().any(|b| b.as_slice() == major) {
             return None;
         }
         if major == b"mif1" || major == b"msf1" {
             // Compatible brands start at offset 16, 4 bytes each.
-            let compat: Vec<&[u8]> = head.get(16..).unwrap_or(&[]).chunks_exact(4).collect();
+            let compat: Vec<&[u8]> = head
+                .get(16..box_end)
+                .unwrap_or(&[])
+                .chunks_exact(4)
+                .collect();
             let has = |brand: &[u8; 4]| compat.contains(&brand.as_slice());
             if has(b"avif") && !has(b"heic") && !has(b"heix") {
                 return None;
@@ -112,6 +124,24 @@ mod tests {
             Some(ImageFormat::Heif)
         );
         assert_eq!(sniff_format(b"\0\0\0\x1cftypmsf1\0\0\0\0avifmsf1"), None);
+    }
+
+    #[test]
+    fn ftyp_brands_limited_to_box() {
+        // A 20-byte ftyp box (one compatible brand); the next box happens to hold "avif".
+        assert_eq!(
+            sniff_format(b"\0\0\0\x14ftypmif1\0\0\0\0mif1\0\0\0\x08avif"),
+            Some(ImageFormat::Heif)
+        );
+        // An AVIF-only box is not rescued by a "heic" after it.
+        assert_eq!(
+            sniff_format(b"\0\0\0\x18ftypmif1\0\0\0\0avifmif1heic"),
+            None
+        );
+        // A box too short to hold its major brand and minor version is not HEIF.
+        assert_eq!(sniff_format(b"\0\0\0\x0cftypheic\0\0\0\0"), None);
+        // Size 0 means "to the end of the file": every brand read counts.
+        assert_eq!(sniff_format(b"\0\0\0\0ftypmif1\0\0\0\0avifmif1"), None);
     }
 
     #[test]

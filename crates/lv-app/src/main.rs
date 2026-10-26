@@ -7,12 +7,14 @@ mod input;
 mod instance;
 mod placement;
 mod render;
+mod routing;
 mod theme;
 mod timing;
 mod toolbar;
 mod tooltip;
 mod viewer;
 mod window;
+mod worker;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -20,6 +22,9 @@ use std::time::Instant;
 use anyhow::Context;
 use lv_core::settings::load_settings;
 use windows::core::w;
+use windows::Win32::System::Diagnostics::Debug::{
+    SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+};
 use windows::Win32::System::LibraryLoader::{
     SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -29,6 +34,7 @@ use crate::instance::{acquire_or_forward, Launch};
 
 fn main() -> anyhow::Result<()> {
     let start = Instant::now();
+    quiet_system_errors();
     // SAFETY: plain call with valid flags, made before any other DLL is loaded on demand.
     unsafe {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
@@ -59,4 +65,33 @@ fn main() -> anyhow::Result<()> {
         }
     };
     window::run(initial, settings, settings_path)
+}
+
+/// Turns off Windows' "System Error" boxes (a missing DLL, say) and the crash dialog for
+/// this process. HEIF workers inherit the mode (the sandbox does not pass
+/// CREATE_DEFAULT_ERROR_MODE), which matters because a worker missing `heif.dll` fails
+/// before its own code runs: it must exit and count as a start failure, not block on a
+/// dialog the user has to dismiss.
+fn quiet_system_errors() {
+    // SAFETY: plain call with valid flags; it only changes this process's error mode.
+    unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::System::Diagnostics::Debug::{
+        GetErrorMode, SetErrorMode, THREAD_ERROR_MODE,
+    };
+
+    #[test]
+    fn system_error_dialogs_are_off() {
+        // Start from the default mode: the test runner may have inherited a quiet one.
+        // SAFETY: plain calls; the previous mode is put back below.
+        let previous = unsafe { SetErrorMode(THREAD_ERROR_MODE(0)) };
+        super::quiet_system_errors();
+        // SAFETY: plain calls, as above.
+        let mode = unsafe { GetErrorMode() };
+        unsafe { SetErrorMode(previous) };
+        assert_eq!(mode & 0b11, 0b11, "error mode {mode:#x}");
+    }
 }
