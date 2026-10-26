@@ -27,7 +27,7 @@ cargo build --release
 
 스크립트가 하는 일:
 
-- vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 전역 설치는 하지 않아요.
+- vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 다운로드·바이너리 캐시도 `.vcpkg\` 안에만 두고, 전역 설치는 하지 않아요.
 - `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이)와 libde265를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
 - x265, x264, aom, dav1d, kvazaar, openjpeg, libjpeg-turbo가 설치돼 있으면 실패해요.
 - `heif.dll`, `libde265.dll`을 `target\debug`, `target\release`에 복사해요. `cargo clean` 뒤에는 다시 실행해요.
