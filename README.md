@@ -16,11 +16,23 @@
 
 ## 빌드
 
-Windows 10 22H2 이상 / Windows 11 (x64)과 Rust(MSVC 도구 체인)가 필요해요.
+Windows 10 22H2 이상 / Windows 11 (x64)과 Rust(MSVC 도구 체인), Visual Studio C++ 빌드 도구(MSVC), git이 필요해요.
+
+HEIC 디코더(libheif·libde265, M2에서 추가 중)는 C/C++ 라이브러리라 [vcpkg](https://github.com/microsoft/vcpkg)로 받아요. 처음 한 번, 그리고 `vcpkg.json`이 바뀔 때마다 아래 스크립트를 실행해요(Windows PowerShell 5.1에서 동작해요).
 
 ```
+powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
 cargo build --release
 ```
+
+스크립트가 하는 일:
+
+- vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 전역 설치는 하지 않아요.
+- `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이)와 libde265를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
+- x265, x264, aom, dav1d, kvazaar, openjpeg, libjpeg-turbo가 설치돼 있으면 실패해요.
+- `heif.dll`, `libde265.dll`을 `target\debug`, `target\release`에 복사해요. `cargo clean` 뒤에는 다시 실행해요.
+
+빌드 환경 변수(`VCPKG_ROOT`, `VCPKGRS_TRIPLET`, `VCPKGRS_DYNAMIC`)는 `.cargo\config.toml`에 고정돼 있어서 따로 설정할 필요가 없어요.
 
 실행 파일은 `target\release\lv-app.exe`에 만들어져요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
 
