@@ -1,0 +1,11 @@
+{
+  "$comment": "libheif's default feature 'hevc' pulls x265 (GPL encoder) and is disabled. libde265 (HEVC decoder) is an unconditional dependency of the libheif port at this baseline, so it has no feature to enable.",
+  "name": "light-view",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "libheif",
+      "default-features": false
+    }
+  ]
+}

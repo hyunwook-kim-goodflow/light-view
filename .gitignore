@@ -1,3 +1,5 @@
 .superpowers/
 target/
 testdata/private/
+/.vcpkg/
+/vcpkg_installed/

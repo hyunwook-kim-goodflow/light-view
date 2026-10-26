@@ -1,0 +1,7 @@
+# Build environment for libheif-sys (via the `vcpkg` crate).
+# Run `powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1` once before building.
+# .vcpkg\installed is a junction to vcpkg_installed\ created by that script.
+[env]
+VCPKG_ROOT = { value = ".vcpkg", relative = true }
+VCPKGRS_TRIPLET = "x64-windows"
+VCPKGRS_DYNAMIC = "1"
