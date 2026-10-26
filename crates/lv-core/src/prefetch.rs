@@ -69,8 +69,9 @@ impl State {
         self.cache.contains_key(&path)
     }
 
-    /// Evict until within budget: entries not wanted first (oldest-used first), then
-    /// wanted entries farthest from the current one first. `wanted[0]` is never evicted.
+    /// Evict until within budget: entries not wanted first (oldest-used first; normally
+    /// none, as `request` drops them), then wanted entries farthest from the current
+    /// one first. `wanted[0]` is never evicted.
     fn evict(&mut self, budget: u64) {
         let mut total: u64 = self.cache.values().map(|e| e.bytes).sum();
         if total <= budget {
@@ -149,11 +150,13 @@ impl Prefetcher {
     }
 
     /// `wanted[0]` is the current image and highest priority; the rest follow in order.
-    /// Pending work not in `wanted` is dropped; running work finishes but its result
-    /// is only cached if still wanted.
+    /// Cached entries and pending work not in `wanted` are dropped at once, so memory
+    /// holds only the wanted set; running work finishes but its result is only cached
+    /// if still wanted. The budget stays an upper cap on the wanted set.
     pub fn request(&self, wanted: &[PathBuf]) {
         let mut st = self.shared.lock();
         st.wanted = wanted.to_vec();
+        st.cache.retain(|path, _| wanted.contains(path));
         let mut queue = VecDeque::new();
         for path in wanted {
             if st.cache.contains_key(path) {
@@ -375,8 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn budget_evicts_unwanted_first_never_current() {
-        // Each 1x1 image is 4 bytes; budget holds two.
+    fn rerequest_keeps_still_wanted_entries() {
+        // Each 1x1 image is 4 bytes; budget holds two. b is dropped by the request.
         let h = harness(1, 8, &[], &[]);
         h.prefetcher.request(&[p("a"), p("b")]);
         h.wait_ready(2);
@@ -384,6 +387,18 @@ mod tests {
         h.wait_ready(1);
         assert!(h.prefetcher.get(&p("b")).is_none());
         assert!(h.prefetcher.get(&p("a")).is_some());
+        assert!(h.prefetcher.get(&p("c")).is_some());
+    }
+
+    #[test]
+    fn request_drops_unwanted_entries_immediately() {
+        let h = harness(1, u64::MAX, &[], &["b"]);
+        h.prefetcher.request(&[p("a"), p("b"), p("c")]);
+        h.wait_ready(3);
+        h.prefetcher.request(&[p("c")]);
+        // Far below the budget, yet only the wanted set stays (errors included).
+        assert!(h.prefetcher.get(&p("a")).is_none());
+        assert!(h.prefetcher.get(&p("b")).is_none());
         assert!(h.prefetcher.get(&p("c")).is_some());
     }
 

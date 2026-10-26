@@ -29,7 +29,7 @@ use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
-use crate::theme::{self, palette, system_prefers_dark};
+use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::viewer::{Scene, Viewer};
@@ -37,6 +37,8 @@ use crate::viewer::{Scene, Viewer};
 const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
 const LOADING: &str = "불러오는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
+const PILL_HEIGHT_DIP: f32 = 28.0;
+const PILL_PAD_DIP: f32 = 14.0;
 
 pub struct App {
     renderer: Option<Renderer>,
@@ -265,20 +267,15 @@ impl App {
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
+        let loading = self.viewer.loading();
         match self.viewer.scene() {
+            // The previous photo stays up while the next one loads.
             Scene::Image { rect, quarters } => r.draw_image(rect, quarters),
-            Scene::Message(text) => r.draw_text_center(text, p.ink2),
-            Scene::Loading => {
-                let run = TextRun {
-                    text: LOADING,
-                    family: "Segoe UI",
-                    size: LOADING_SIZE_DIP,
-                    bold: false,
-                    color: p.ink2,
-                };
-                r.draw_runs((0.0, 0.0, view_w, view_h), &[run], Align::Center);
-            }
-            Scene::Empty => {}
+            Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
+            Scene::Message(_) | Scene::Empty => {}
+        }
+        if loading {
+            draw_loading_pill(r, p, self.dark, (view_w, view_h));
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -316,6 +313,26 @@ impl App {
             }
         }
     }
+}
+
+/// A small "불러오는 중…" pill centred in the image area: surface fill, plus a
+/// hairline border in dark mode (no shadows there).
+fn draw_loading_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32)) {
+    let run = TextRun {
+        text: LOADING,
+        family: "Segoe UI",
+        size: LOADING_SIZE_DIP,
+        bold: false,
+        color: p.ink2,
+    };
+    let text_w = r.measure_runs(&[run]).unwrap_or(80.0);
+    let (w, h) = (text_w + 2.0 * PILL_PAD_DIP, PILL_HEIGHT_DIP);
+    let rect = ((view_w - w) / 2.0, (view_h - h) / 2.0, w, h);
+    r.fill_round_rect(rect, h / 2.0, p.surface);
+    if dark {
+        r.stroke_round_rect(rect, h / 2.0, p.hairline, 1.0);
+    }
+    r.draw_runs(rect, &[run], Align::Center);
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
