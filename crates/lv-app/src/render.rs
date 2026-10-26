@@ -183,16 +183,27 @@ impl Renderer {
         }
     }
 
-    /// `rect` is x, y, w, h in DIPs.
-    pub fn draw_image(&mut self, rect: (f32, f32, f32, f32)) {
+    /// `rect` (x, y, w, h in DIPs) is the on-screen box of the image after turning it
+    /// clockwise by `quarters` × 90° about its centre.
+    pub fn draw_image(&mut self, rect: (f32, f32, f32, f32), quarters: u8) {
         let (Some(d), Some(p)) = (&self.device, &self.pixels) else {
             return;
         };
         let Some(bitmap) = &d.bitmap else { return };
-        let mode = interpolation_for(rect.2 * self.dpi / 96.0 / p.width as f32);
-        let dest = to_rect_f(rect);
-        // SAFETY: `dest` is a live local; `bitmap` belongs to this device context.
-        unsafe { d.dc.DrawBitmap(bitmap, Some(&dest), 1.0, mode, None, None) };
+        let (dest, transform) = unrotated_dest(rect, quarters);
+        let mode = interpolation_for(dest.2 * self.dpi / 96.0 / p.width as f32);
+        let dest = to_rect_f(dest);
+        // SAFETY: `dest` and `transform` are live locals; `bitmap` belongs to this
+        // device context, which shares the render target's transform.
+        unsafe {
+            if let Some(m) = &transform {
+                d.target.SetTransform(m);
+            }
+            d.dc.DrawBitmap(bitmap, Some(&dest), 1.0, mode, None, None);
+            if transform.is_some() {
+                d.target.SetTransform(&Matrix3x2::identity());
+            }
+        }
     }
 
     /// Draws `text` centered in the whole client area.
@@ -547,6 +558,34 @@ fn text_alignment(align: Align) -> DWRITE_TEXT_ALIGNMENT {
     }
 }
 
+/// The unturned bitmap rect sharing `rect`'s centre, and the transform that turns it
+/// clockwise by `quarters` × 90° onto `rect` (none for 0).
+fn unrotated_dest(
+    (x, y, w, h): (f32, f32, f32, f32),
+    quarters: u8,
+) -> ((f32, f32, f32, f32), Option<Matrix3x2>) {
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (bw, bh) = if quarters % 2 == 1 { (h, w) } else { (w, h) };
+    let dest = (cx - bw / 2.0, cy - bh / 2.0, bw, bh);
+    // cos, sin of the clockwise angle (the y axis points down).
+    let (c, s) = match quarters % 4 {
+        0 => return (dest, None),
+        1 => (0.0, 1.0),
+        2 => (-1.0, 0.0),
+        _ => (0.0, -1.0),
+    };
+    // Row-vector convention: x' = x*M11 + y*M21 + M31, y' = x*M12 + y*M22 + M32.
+    let m = Matrix3x2 {
+        M11: c,
+        M12: s,
+        M21: -s,
+        M22: c,
+        M31: cx - cx * c + cy * s,
+        M32: cy - cx * s - cy * c,
+    };
+    (dest, Some(m))
+}
+
 fn to_rect_f((x, y, w, h): (f32, f32, f32, f32)) -> D2D_RECT_F {
     D2D_RECT_F {
         left: x,
@@ -592,6 +631,22 @@ fn rgba_to_premultiplied_bgra(rgba: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply(m: &Matrix3x2, (x, y): (f32, f32)) -> (f32, f32) {
+        (x * m.M11 + y * m.M21 + m.M31, x * m.M12 + y * m.M22 + m.M32)
+    }
+
+    #[test]
+    fn quarter_turn_maps_the_bitmap_onto_the_rotated_box() {
+        // A 400x300 image turned once clockwise occupies a 300x400 box.
+        let ((x, y, w, h), m) = unrotated_dest((100.0, 0.0, 300.0, 400.0), 1);
+        assert_eq!((x, y, w, h), (50.0, 50.0, 400.0, 300.0));
+        let m = m.expect("a transform for a quarter turn");
+        // Clockwise: the bitmap's top-left corner lands at the box's top-right.
+        assert_eq!(apply(&m, (x, y)), (400.0, 0.0));
+        assert_eq!(apply(&m, (x + w, y + h)), (100.0, 400.0));
+        assert!(unrotated_dest((0.0, 0.0, 4.0, 3.0), 0).1.is_none());
+    }
 
     #[test]
     fn premultiplies_and_swaps_to_bgra() {

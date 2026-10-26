@@ -1,7 +1,11 @@
 //! goodflow color tokens (spec §4.1) and the system light/dark preference.
 
-use windows::core::w;
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
 /// An opaque sRGB color.
@@ -79,6 +83,38 @@ pub fn system_prefers_dark() -> bool {
         )
     };
     status.is_ok() && value == 0
+}
+
+pub fn is_color_set_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+    // SAFETY: for WM_SETTINGCHANGE a non-null lparam is a NUL-terminated wide string.
+    let name = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
+    name.is_ok_and(|s| s == "ImmersiveColorSet")
+}
+
+pub fn apply_title_bar(hwnd: HWND, dark: bool) {
+    let value = BOOL::from(dark);
+    let paper = palette(dark).paper;
+    // COLORREF is 0x00BBGGRR.
+    let caption = COLORREF(u32::from(paper.0) | u32::from(paper.1) << 8 | u32::from(paper.2) << 16);
+    // SAFETY: `value` and `caption` are live locals and each size passed matches its
+    // value. DWMWA_CAPTION_COLOR fails on Windows 10; that error is ignored.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            std::ptr::from_ref(&value).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            std::ptr::from_ref(&caption).cast(),
+            std::mem::size_of::<COLORREF>() as u32,
+        );
+    }
 }
 
 #[cfg(test)]
