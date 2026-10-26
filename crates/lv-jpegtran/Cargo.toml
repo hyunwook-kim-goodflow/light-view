@@ -1,0 +1,9 @@
+[package]
+name = "lv-jpegtran"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Lossless JPEG rotation for light-view's worker through TurboJPEG (links turbojpeg.dll)."
+
+[dependencies]
+lv-ipc = { path = "../lv-ipc" }

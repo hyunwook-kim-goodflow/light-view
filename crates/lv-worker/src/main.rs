@@ -1,4 +1,4 @@
-//! light-view's HEIF decode worker.
+//! light-view's sandboxed worker: decodes HEIF files and rotates JPEGs losslessly.
 //!
 //! Reads [`Request`]s from stdin and writes [`Response`]s to stdout (see `lv-ipc`). stdout
 //! carries framed responses only; diagnostics go to stderr. Exit codes: 0 after `Shutdown` or
@@ -6,7 +6,7 @@
 //! away). The worker never touches the file system or the network: the app sends the bytes.
 //!
 //! Usage: `lv-worker --max-pixels <N>` (debug builds also take
-//! `--test-mode=hang|crash|die-at-start`).
+//! `--test-mode=hang|crash|die-at-start|wrong-kind`).
 
 use std::io::{self, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -16,9 +16,10 @@ use lv_core::color::{premultiply_to_bgra, to_srgb_in_place, ColorSource};
 use lv_core::decode::{max_file_bytes, DecodeLimits};
 use lv_heif::{decode_heif, ColorInfo, HeifError};
 use lv_ipc::{
-    max_request_data, max_response_pixels, read_request, write_response, FailKind, Request,
-    Response, REQUEST_FIXED_LEN,
+    max_bytes_response, max_request_data, max_response_pixels, read_request, write_response,
+    FailKind, Request, Response, REQUEST_FIXED_LEN,
 };
+use lv_jpegtran::{rotate_lossless, Quarter, TransformError};
 
 const EXIT_ERROR: u8 = 2;
 
@@ -32,6 +33,9 @@ enum TestMode {
     Crash,
     /// Exit with code 3 before reading anything (a worker that cannot start).
     DieAtStart,
+    /// Answer every request with the other kind of answer (`Bytes` for a decode, `Image`
+    /// for a rotation).
+    WrongKind,
 }
 
 /// Exit code of `--test-mode=die-at-start`.
@@ -90,6 +94,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
             "--test-mode=crash" => test_mode = Some(TestMode::Crash),
             #[cfg(debug_assertions)]
             "--test-mode=die-at-start" => test_mode = Some(TestMode::DieAtStart),
+            #[cfg(debug_assertions)]
+            "--test-mode=wrong-kind" => test_mode = Some(TestMode::WrongKind),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -100,8 +106,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     })
 }
 
-/// Largest request payload the worker accepts: the file bytes the app may send (ruling R10;
-/// the pool uses the same `max_request_data` rule) plus the request's fixed fields.
+/// Largest request payload the worker accepts, for a decode and a rotation alike: the file
+/// bytes the app may send (ruling R10; the pool uses the same `max_request_data` rule) plus
+/// the largest fixed part of a request.
 fn request_cap(max_pixels: u64) -> u64 {
     max_request_data(max_file_bytes(&DecodeLimits { max_pixels })) + REQUEST_FIXED_LEN
 }
@@ -117,13 +124,9 @@ fn serve(config: &Config) -> ExitCode {
     let mut input = io::stdin().lock();
     let mut output = BufWriter::new(io::stdout().lock());
     loop {
-        let (id, max_pixels, data) = match read_request(&mut input, cap) {
+        let request = match read_request(&mut input, cap) {
             Ok(None) | Ok(Some(Request::Shutdown)) => return ExitCode::SUCCESS,
-            Ok(Some(Request::DecodeHeif {
-                id,
-                max_pixels,
-                data,
-            })) => (id, max_pixels, data),
+            Ok(Some(request)) => request,
             Err(e) => {
                 eprintln!("lv-worker: protocol error, exiting: {e}");
                 return ExitCode::from(EXIT_ERROR);
@@ -136,11 +139,42 @@ fn serve(config: &Config) -> ExitCode {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             },
             Some(TestMode::Crash) => std::process::abort(),
+            Some(TestMode::WrongKind) => {
+                let id = request.id();
+                let response = match request {
+                    Request::RotateJpeg { .. } => Response::Image {
+                        id,
+                        width: 1,
+                        height: 1,
+                        bgra: vec![0; 4],
+                    },
+                    _ => Response::Bytes { id, data: vec![] },
+                };
+                if write_response(&mut output, &response)
+                    .and_then(|()| output.flush())
+                    .is_err()
+                {
+                    return ExitCode::from(EXIT_ERROR);
+                }
+                continue;
+            }
             Some(TestMode::DieAtStart) | None => {}
         }
 
-        let response = decode(id, &data, decode_limit(max_pixels, config.max_pixels));
-        drop(data);
+        let response = match request {
+            Request::DecodeHeif {
+                id,
+                max_pixels,
+                data,
+            } => decode(id, &data, decode_limit(max_pixels, config.max_pixels)),
+            Request::RotateJpeg {
+                id,
+                quarters,
+                max_pixels,
+                data,
+            } => rotate(id, quarters, &data, max_pixels.min(config.max_pixels)),
+            Request::Shutdown => return ExitCode::SUCCESS,
+        };
         if let Err(e) = write_response(&mut output, &response).and_then(|()| output.flush()) {
             eprintln!("lv-worker: cannot write response, exiting: {e}");
             return ExitCode::from(EXIT_ERROR);
@@ -191,6 +225,42 @@ fn decode(id: u64, data: &[u8], max_pixels: u64) -> Response {
     Response::Failed { id, kind }
 }
 
+/// Rotates one JPEG losslessly by `quarters` clockwise quarter turns. `lv-jpegtran` catches
+/// panics itself; crashes in TurboJPEG end the process. `TooLarge` carries no size (0 x 0):
+/// the app knows it from the header it read.
+fn rotate(id: u64, quarters: u8, data: &[u8], max_pixels: u64) -> Response {
+    let quarter = match quarters {
+        1 => Quarter::Cw90,
+        2 => Quarter::Cw180,
+        3 => Quarter::Cw270,
+        // lv-ipc only reads 1..=3.
+        _ => {
+            return Response::Failed {
+                id,
+                kind: FailKind::Corrupt(format!("{quarters} quarter turns")),
+            }
+        }
+    };
+    let kind = match rotate_lossless(data, quarter, max_pixels) {
+        Ok(rotated) if rotated.len() as u64 <= max_bytes_response(data.len() as u64) => {
+            return Response::Bytes { id, data: rotated }
+        }
+        Ok(rotated) => FailKind::Corrupt(format!(
+            "rotated JPEG is {} bytes, more than {} for a {}-byte input",
+            rotated.len(),
+            max_bytes_response(data.len() as u64),
+            data.len()
+        )),
+        Err(TransformError::NotPerfect) => FailKind::NotPerfect,
+        Err(TransformError::TooLarge) => FailKind::TooLarge {
+            width: 0,
+            height: 0,
+        },
+        Err(TransformError::Corrupt(msg)) => FailKind::Corrupt(msg),
+    };
+    Response::Failed { id, kind }
+}
+
 #[cfg(windows)]
 mod hardening {
     //! Process-wide restrictions the worker puts on itself before reading any input.
@@ -220,8 +290,9 @@ mod hardening {
     /// Restricts later DLL loads to the exe folder and System32, then applies the
     /// self-imposed mitigation policies. Failures are reported on stderr and ignored.
     ///
-    /// `heif.dll` and `libde265.dll` are static imports, already loaded by the time this
-    /// runs, so the image load policy cannot block them.
+    /// `heif.dll`, `libde265.dll`, `turbojpeg.dll` and the DLLs they import are static
+    /// imports, already loaded by the time this runs, so the image load policy cannot block
+    /// them.
     pub fn apply() {
         quiet_system_errors();
         // SAFETY: plain flags argument; no pointers involved.

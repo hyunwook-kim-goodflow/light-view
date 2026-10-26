@@ -19,13 +19,18 @@
 //! Requests (app to worker):
 //! - `0x01` `DecodeHeif`: `id: u64 | max_pixels: u64 | data` (`data` is the rest of the payload).
 //! - `0x02` `Shutdown`: empty payload.
+//! - `0x03` `RotateJpeg`: `id: u64 | max_pixels: u64 | quarters: u8 | data` (`data` is the
+//!   rest of the payload). `quarters` is the clockwise rotation in quarter turns, `1..=3`.
 //!
 //! Responses (worker to app):
 //! - `0x81` `Image`: `id: u64 | width: u32 | height: u32 | bgra` (the rest of the payload).
 //!   `width` and `height` must be non-zero and `width * height * 4` (checked u64) must equal
 //!   `bgra.len()`.
 //! - `0x82` `Failed`: `id: u64 | tag: u8 | fields`, with tag `0` `TooLarge`
-//!   (`width: u32 | height: u32`), tag `1` `Corrupt` (string), tag `2` `Unsupported` (none).
+//!   (`width: u32 | height: u32`; `0 x 0` when the worker does not report the size), tag `1`
+//!   `Corrupt` (string), tag `2` `Unsupported` (none), tag `3` `NotPerfect` (none: the JPEG
+//!   cannot be rotated losslessly because its size is not a multiple of its MCU).
+//! - `0x83` `Bytes`: `id: u64 | data` (the rest of the payload), the answer to `RotateJpeg`.
 //!
 //! # Reading
 //!
@@ -60,11 +65,16 @@ pub const MAGIC: [u8; 4] = *b"LVW1";
 pub const MAX_PAYLOAD: u64 = 1 << 30;
 /// Maximum byte length of a `Corrupt` message on the wire.
 pub const MAX_CORRUPT_LEN: usize = 4096;
+/// The most fixed bytes in front of a request's file bytes: `RotateJpeg`'s `id`,
+/// `max_pixels` and `quarters` (`DecodeHeif` has one byte less).
+pub const REQUEST_FIXED_LEN: u64 = 17;
 /// Fixed fields in front of a `DecodeHeif` request's file bytes (`id`, `max_pixels`).
-pub const REQUEST_FIXED_LEN: u64 = 16;
+const DECODE_FIXED_LEN: u64 = 16;
 /// Fixed fields in front of an `Image` response's pixels (`id`, `width`, `height`).
 pub const IMAGE_FIXED_LEN: u64 = 16;
-/// The most file bytes one `DecodeHeif` request can carry.
+/// Fixed field in front of a `Bytes` response's data (`id`).
+pub const BYTES_FIXED_LEN: u64 = 8;
+/// The most file bytes one request (`DecodeHeif` or `RotateJpeg`) can carry.
 pub const MAX_REQUEST_DATA: u64 = MAX_PAYLOAD - REQUEST_FIXED_LEN;
 /// The most pixels one `Image` response can carry (4 bytes each).
 pub const MAX_RESPONSE_PIXELS: u64 = (MAX_PAYLOAD - IMAGE_FIXED_LEN) / 4;
@@ -78,6 +88,13 @@ const MIN_DECODER_MEMORY: u64 = 256 * MIB;
 /// sides use this one rule, so a file the app sends is never one the worker refuses unread.
 pub fn max_request_data(file_cap: u64) -> u64 {
     file_cap.min(MAX_REQUEST_DATA)
+}
+
+/// The most bytes a `Bytes` answer to a request carrying `input_len` file bytes may hold:
+/// `input_len + 1 MiB` (a lossless JPEG transform keeps the markers and re-encodes the same
+/// coefficients, so the output stays close to the input), never above `MAX_PAYLOAD - 16`.
+pub fn max_bytes_response(input_len: u64) -> u64 {
+    input_len.saturating_add(MIB).min(MAX_PAYLOAD - 16)
 }
 
 /// The pixel limit a worker can honour: `max_pixels`, clamped so that the decoded image
@@ -103,12 +120,15 @@ pub fn worker_memory_limit(max_pixels: u64) -> u64 {
 
 const KIND_DECODE_HEIF: u8 = 0x01;
 const KIND_SHUTDOWN: u8 = 0x02;
+const KIND_ROTATE_JPEG: u8 = 0x03;
 const KIND_IMAGE: u8 = 0x81;
 const KIND_FAILED: u8 = 0x82;
+const KIND_BYTES: u8 = 0x83;
 
 const TAG_TOO_LARGE: u8 = 0;
 const TAG_CORRUPT: u8 = 1;
 const TAG_UNSUPPORTED: u8 = 2;
+const TAG_NOT_PERFECT: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -117,7 +137,24 @@ pub enum Request {
         max_pixels: u64,
         data: Vec<u8>,
     },
+    /// Rotate a JPEG losslessly by `quarters` (`1..=3`) clockwise quarter turns.
+    RotateJpeg {
+        id: u64,
+        quarters: u8,
+        max_pixels: u64,
+        data: Vec<u8>,
+    },
     Shutdown,
+}
+
+impl Request {
+    /// The request's id (`Shutdown` has none and reports 0).
+    pub fn id(&self) -> u64 {
+        match self {
+            Request::DecodeHeif { id, .. } | Request::RotateJpeg { id, .. } => *id,
+            Request::Shutdown => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,13 +169,24 @@ pub enum Response {
         id: u64,
         kind: FailKind,
     },
+    /// The rotated JPEG, the answer to `RotateJpeg`.
+    Bytes {
+        id: u64,
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailKind {
-    TooLarge { width: u32, height: u32 },
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
     Corrupt(String),
     Unsupported,
+    /// `RotateJpeg` only: the image size is not a multiple of its MCU, so the pixels
+    /// cannot be rotated losslessly.
+    NotPerfect,
 }
 
 #[derive(Debug)]
@@ -270,12 +318,30 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
             max_pixels,
             data,
         } => {
-            let len = REQUEST_FIXED_LEN
+            let len = DECODE_FIXED_LEN
                 .checked_add(data.len() as u64)
                 .ok_or_else(|| invalid("too long"))?;
             write_frame(w, KIND_DECODE_HEIF, len)?;
             w.write_all(&id.to_le_bytes())?;
             w.write_all(&max_pixels.to_le_bytes())?;
+            w.write_all(data)
+        }
+        Request::RotateJpeg {
+            id,
+            quarters,
+            max_pixels,
+            data,
+        } => {
+            if !(1..=3).contains(quarters) {
+                return Err(invalid("quarters must be 1..=3"));
+            }
+            let len = REQUEST_FIXED_LEN
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| invalid("too long"))?;
+            write_frame(w, KIND_ROTATE_JPEG, len)?;
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(&max_pixels.to_le_bytes())?;
+            w.write_all(&[*quarters])?;
             w.write_all(data)
         }
         Request::Shutdown => write_frame(w, KIND_SHUTDOWN, 0),
@@ -300,11 +366,27 @@ pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Reques
                 data,
             }))
         }
+        KIND_ROTATE_JPEG => {
+            let id = read_u64(&mut p)?;
+            let max_pixels = read_u64(&mut p)?;
+            let quarters = read_u8(&mut p)?;
+            if !(1..=3).contains(&quarters) {
+                return Err(IpcError::Malformed("quarters out of range"));
+            }
+            let rest = p.limit();
+            let data = read_exact_vec(&mut p, rest)?;
+            Ok(Some(Request::RotateJpeg {
+                id,
+                quarters,
+                max_pixels,
+                data,
+            }))
+        }
         KIND_SHUTDOWN => {
             expect_consumed(&p)?;
             Ok(Some(Request::Shutdown))
         }
-        KIND_IMAGE | KIND_FAILED => {
+        KIND_IMAGE | KIND_FAILED | KIND_BYTES => {
             Err(IpcError::Malformed("response kind where request expected"))
         }
         _ => Err(IpcError::Malformed("unknown kind")),
@@ -362,9 +444,18 @@ pub fn write_response(w: &mut impl Write, r: &Response) -> io::Result<()> {
                     p.extend_from_slice(msg.as_bytes());
                 }
                 FailKind::Unsupported => p.push(TAG_UNSUPPORTED),
+                FailKind::NotPerfect => p.push(TAG_NOT_PERFECT),
             }
             write_frame(w, KIND_FAILED, p.len() as u64)?;
             w.write_all(&p)
+        }
+        Response::Bytes { id, data } => {
+            let len = BYTES_FIXED_LEN
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| invalid("too long"))?;
+            write_frame(w, KIND_BYTES, len)?;
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(data)
         }
     }
 }
@@ -424,12 +515,19 @@ pub fn read_response(r: &mut impl Read, max_payload: u64) -> Result<Option<Respo
                     FailKind::Corrupt(msg)
                 }
                 TAG_UNSUPPORTED => FailKind::Unsupported,
+                TAG_NOT_PERFECT => FailKind::NotPerfect,
                 _ => return Err(IpcError::Malformed("unknown fail tag")),
             };
             expect_consumed(&p)?;
             Ok(Some(Response::Failed { id, kind }))
         }
-        KIND_DECODE_HEIF | KIND_SHUTDOWN => {
+        KIND_BYTES => {
+            let id = read_u64(&mut p)?;
+            let rest = p.limit();
+            let data = read_exact_vec(&mut p, rest)?;
+            Ok(Some(Response::Bytes { id, data }))
+        }
+        KIND_DECODE_HEIF | KIND_SHUTDOWN | KIND_ROTATE_JPEG => {
             Err(IpcError::Malformed("request kind where response expected"))
         }
         _ => Err(IpcError::Malformed("unknown kind")),
@@ -518,16 +616,25 @@ mod tests {
     fn unencodable_request_is_invalid_input_and_writes_nothing() {
         // One byte more than a frame can carry. Zeroed pages are not touched, so this
         // costs address space, not memory.
-        let data = vec![0u8; (MAX_REQUEST_DATA + 1) as usize];
-        let request = Request::DecodeHeif {
-            id: 1,
-            max_pixels: 1,
-            data,
-        };
-        let mut out = Vec::new();
-        let err = write_request(&mut out, &request).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(out.is_empty(), "nothing may be written before the error");
+        let requests = [
+            Request::DecodeHeif {
+                id: 1,
+                max_pixels: 1,
+                data: vec![0u8; (MAX_PAYLOAD - DECODE_FIXED_LEN + 1) as usize],
+            },
+            Request::RotateJpeg {
+                id: 1,
+                quarters: 1,
+                max_pixels: 1,
+                data: vec![0u8; (MAX_REQUEST_DATA + 1) as usize],
+            },
+        ];
+        for request in &requests {
+            let mut out = Vec::new();
+            let err = write_request(&mut out, request).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(out.is_empty(), "nothing may be written before the error");
+        }
     }
 
     #[test]
@@ -579,6 +686,129 @@ mod tests {
         for r in &resps {
             assert_eq!(&rt_resp(r), r);
         }
+    }
+
+    #[test]
+    fn rotate_and_bytes_roundtrip() {
+        for quarters in 1..=3 {
+            let r = Request::RotateJpeg {
+                id: 11,
+                quarters,
+                max_pixels: 50_000_000,
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            };
+            assert_eq!(read_request(&mut Cursor::new(req_bytes(&r))).unwrap(), r);
+        }
+        let empty = Request::RotateJpeg {
+            id: 0,
+            quarters: 2,
+            max_pixels: 0,
+            data: vec![],
+        };
+        assert_eq!(
+            read_request(&mut Cursor::new(req_bytes(&empty))).unwrap(),
+            empty
+        );
+        for data in [vec![], vec![1, 2, 3], vec![0xAB; 70_000]] {
+            let r = Response::Bytes { id: 12, data };
+            assert_eq!(rt_resp(&r), r);
+        }
+        let r = Response::Failed {
+            id: 13,
+            kind: FailKind::NotPerfect,
+        };
+        assert_eq!(rt_resp(&r), r);
+    }
+
+    #[test]
+    fn rotate_request_layout_and_fixed_len() {
+        let bytes = req_bytes(&Request::RotateJpeg {
+            id: 0x0102,
+            quarters: 3,
+            max_pixels: 0x0304,
+            data: vec![0xEE; 5],
+        });
+        let mut expected = frame(0x03, REQUEST_FIXED_LEN + 5, &[]);
+        expected.extend_from_slice(&0x0102u64.to_le_bytes());
+        expected.extend_from_slice(&0x0304u64.to_le_bytes());
+        expected.push(3);
+        expected.extend_from_slice(&[0xEE; 5]);
+        assert_eq!(bytes, expected);
+        // A DecodeHeif request carries one fixed byte less, so the cap fits both.
+        let decode = req_bytes(&Request::DecodeHeif {
+            id: 1,
+            max_pixels: 1,
+            data: vec![0; 5],
+        });
+        assert_eq!(decode.len() as u64, 13 + REQUEST_FIXED_LEN - 1 + 5);
+    }
+
+    #[test]
+    fn rotate_quarters_out_of_range_are_rejected() {
+        for quarters in [0u8, 4, 255] {
+            let r = Request::RotateJpeg {
+                id: 1,
+                quarters,
+                max_pixels: 1,
+                data: vec![1],
+            };
+            let mut out = Vec::new();
+            let err = write_request(&mut out, &r).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(out.is_empty(), "nothing may be written before the error");
+
+            let mut p = 1u64.to_le_bytes().to_vec();
+            p.extend_from_slice(&1u64.to_le_bytes());
+            p.push(quarters);
+            let bytes = frame(0x03, p.len() as u64, &p);
+            assert!(matches!(
+                read_request(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        // Shorter than its fixed fields.
+        let bytes = frame(0x03, 16, &[0; 16]);
+        assert!(matches!(
+            read_request(&mut Cursor::new(bytes)),
+            Err(IpcError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn bytes_response_cap() {
+        assert_eq!(max_bytes_response(0), MIB);
+        assert_eq!(max_bytes_response(5_000_000), 5_000_000 + MIB);
+        assert_eq!(max_bytes_response(MAX_REQUEST_DATA), MAX_PAYLOAD - 16);
+        assert_eq!(max_bytes_response(u64::MAX), MAX_PAYLOAD - 16);
+        const { assert!(MAX_PAYLOAD - 16 + BYTES_FIXED_LEN <= MAX_PAYLOAD) }
+        // The reader enforces the caller's cap on a Bytes frame like any other.
+        let resp = resp_bytes(&Response::Bytes {
+            id: 1,
+            data: vec![0; 100],
+        });
+        assert!(matches!(
+            super::read_response(&mut Cursor::new(&resp), 107),
+            Err(IpcError::TooLong(108))
+        ));
+        assert!(super::read_response(&mut Cursor::new(&resp), 108)
+            .unwrap()
+            .is_some());
+        // A Bytes frame shorter than its id is malformed.
+        let bytes = frame(0x83, 7, &[0; 7]);
+        assert!(matches!(
+            read_response(&mut Cursor::new(bytes)),
+            Err(IpcError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn unencodable_bytes_response_is_invalid_input_and_writes_nothing() {
+        // Zeroed pages are not touched: address space, not memory.
+        let data = vec![0u8; (MAX_PAYLOAD - BYTES_FIXED_LEN + 1) as usize];
+        let mut out = Vec::new();
+        let err = write_response(&mut out, &Response::Bytes { id: 1, data }).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(out.is_empty());
     }
 
     #[test]

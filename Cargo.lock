@@ -284,12 +284,20 @@ name = "lv-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "lv-jpegtran"
+version = "0.1.0"
+dependencies = [
+ "lv-ipc",
+]
+
+[[package]]
 name = "lv-worker"
 version = "0.1.0"
 dependencies = [
  "lv-core",
  "lv-heif",
  "lv-ipc",
+ "lv-jpegtran",
  "windows",
 ]
 

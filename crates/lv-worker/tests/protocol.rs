@@ -1,6 +1,6 @@
 //! Drives the real `lv-worker` executable over piped stdio.
 //!
-//! The worker resolves `heif.dll`/`libde265.dll` from its own folder only, so they must sit
+//! The worker resolves `heif.dll`/`libde265.dll`/`turbojpeg.dll` (and their DLLs) from its own folder only, so they must sit
 //! next to `target\debug\lv-worker.exe` (`scripts/setup-deps.ps1` copies them there).
 
 use std::io::{BufReader, Read, Write};
@@ -23,7 +23,13 @@ fn sample(name: &str) -> Vec<u8> {
 
 fn require_dlls() {
     let dir = PathBuf::from(WORKER).parent().unwrap().to_path_buf();
-    for dll in ["heif.dll", "libde265.dll"] {
+    for dll in [
+        "heif.dll",
+        "libde265.dll",
+        "turbojpeg.dll",
+        "spng.dll",
+        "z.dll",
+    ] {
         assert!(
             dir.join(dll).exists(),
             "{dll} is missing from {}: the worker only loads it from its own folder. \
@@ -241,6 +247,119 @@ fn too_large_returns_failed_too_large() {
     expect_too_large(w.decode(6, u64::MAX, sample("rainbow-451x461.heic")), 6);
 }
 
+fn jpeg_sample(name: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/jpeg")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// (width, height) from a baseline or progressive JPEG's SOF segment.
+fn jpeg_dims(jpeg: &[u8]) -> (u16, u16) {
+    let mut i = 2;
+    while i + 9 < jpeg.len() {
+        let code = jpeg[i + 1];
+        let len = usize::from(u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]));
+        if matches!(code, 0xC0..=0xC2) {
+            let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]);
+            let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]);
+            return (w, h);
+        }
+        i += 2 + len;
+    }
+    panic!("no SOF marker");
+}
+
+impl Worker {
+    fn rotate(&mut self, id: u64, quarters: u8, max_pixels: u64, data: Vec<u8>) -> Response {
+        self.send(&Request::RotateJpeg {
+            id,
+            quarters,
+            max_pixels,
+            data,
+        });
+        read_response(&mut self.stdout, RESPONSE_CAP)
+            .expect("valid response")
+            .expect("a response, not EOF")
+    }
+}
+
+#[test]
+fn rotate_over_pipes() {
+    let source = jpeg_sample("gradient-64x32.jpg");
+    let mut w = Worker::start();
+    for (id, quarters, dims) in [(1, 1, (32, 64)), (2, 2, (64, 32)), (3, 3, (32, 64))] {
+        match w.rotate(id, quarters, MAX_PIXELS, source.clone()) {
+            Response::Bytes { id: got, data } => {
+                assert_eq!(got, id);
+                assert_eq!(&data[..2], &[0xFF, 0xD8]);
+                assert_eq!(jpeg_dims(&data), dims, "{quarters} quarters");
+                assert!(data.len() as u64 <= lv_ipc::max_bytes_response(source.len() as u64));
+            }
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+    // Partial MCUs on both edges: not perfect.
+    assert_eq!(
+        w.rotate(4, 1, MAX_PIXELS, jpeg_sample("gradient-65x33.jpg")),
+        Response::Failed {
+            id: 4,
+            kind: FailKind::NotPerfect
+        }
+    );
+    // Not a JPEG.
+    match w.rotate(5, 1, MAX_PIXELS, b"not a jpeg".to_vec()) {
+        Response::Failed {
+            id: 5,
+            kind: FailKind::Corrupt(msg),
+        } => assert!(!msg.is_empty()),
+        other => panic!("expected Failed(Corrupt), got {other:?}"),
+    }
+    // The request's pixel limit (64x32 = 2048 pixels).
+    assert_eq!(
+        w.rotate(6, 1, 2047, source.clone()),
+        Response::Failed {
+            id: 6,
+            kind: FailKind::TooLarge {
+                width: 0,
+                height: 0
+            }
+        }
+    );
+    // The command-line limit wins over a larger per-request limit.
+    let mut small = Worker::spawn(&["--max-pixels", "2047"]);
+    assert!(matches!(
+        small.rotate(7, 1, u64::MAX, source.clone()),
+        Response::Failed {
+            id: 7,
+            kind: FailKind::TooLarge { .. }
+        }
+    ));
+    // Still serving, and the HEIF path is unaffected.
+    assert!(matches!(
+        w.rotate(8, 1, MAX_PIXELS, source),
+        Response::Bytes { id: 8, .. }
+    ));
+    assert!(matches!(
+        w.decode(9, MAX_PIXELS, sample("rainbow-451x461.heic")),
+        Response::Image { id: 9, .. }
+    ));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn test_mode_wrong_kind_answers_with_the_other_kind() {
+    let mut w = Worker::spawn(&["--max-pixels", "1000", "--test-mode=wrong-kind"]);
+    assert!(matches!(
+        w.decode(1, 1000, sample("rainbow-451x461.heic")),
+        Response::Bytes { id: 1, .. }
+    ));
+    assert!(matches!(
+        w.rotate(2, 1, 1000, jpeg_sample("gradient-64x32.jpg")),
+        Response::Image { id: 2, .. }
+    ));
+}
+
 #[test]
 fn shutdown_exits_zero() {
     let mut w = Worker::start();
@@ -284,11 +403,11 @@ fn truncated_frame_exits_two() {
     assert_eq!(w.wait().code(), Some(2));
 }
 
-/// R10: request cap = min(max(N * 4 + 1 MiB, 64 MiB), MAX_PAYLOAD - 16) + 16; with
-/// N = 1000 that is 64 MiB + 16.
+/// R10: request cap = min(max(N * 4 + 1 MiB, 64 MiB), MAX_PAYLOAD - 17) + 17 (the largest
+/// fixed part, RotateJpeg's); with N = 1000 that is 64 MiB + 17.
 #[test]
 fn oversized_request_exits_two() {
-    let cap: u64 = 64 * 1024 * 1024 + 16;
+    let cap: u64 = 64 * 1024 * 1024 + 17;
     let header = |len: u64| {
         let mut h = b"LVW1".to_vec();
         h.push(0x01);
@@ -371,6 +490,7 @@ fn test_mode_is_rejected_in_release() {
         "--test-mode=crash",
         "--test-mode=hang",
         "--test-mode=die-at-start",
+        "--test-mode=wrong-kind",
     ] {
         let mut w = Worker::spawn(&["--max-pixels", "1000", mode]);
         assert_eq!(w.wait().code(), Some(2), "{mode}");
