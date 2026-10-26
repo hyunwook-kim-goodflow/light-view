@@ -19,11 +19,12 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_RANGE, DWRITE_WORD_WRAPPING_NO_WRAP,
+    IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
@@ -346,12 +347,64 @@ impl Renderer {
         let (Some(d), Some(first)) = (&self.device, runs.first()) else {
             return Ok(());
         };
-        let text: String = runs.iter().map(|r| r.text).collect();
-        let wide: Vec<u16> = text.encode_utf16().collect();
         let (x, y, w, h) = rect;
         if w <= 0.0 || h <= 0.0 {
             return Ok(());
         }
+        let layout = self.text_layout(runs, align, (w, h), Some(&d.target))?;
+        // SAFETY: plain calls on live COM objects; the transform, color and layout
+        // are live locals.
+        unsafe {
+            if mirrored {
+                // x' = 2x + w - x: reflects about the rect's vertical center line.
+                let m = Matrix3x2 {
+                    M11: -1.0,
+                    M22: 1.0,
+                    M31: 2.0 * x + w,
+                    ..Default::default()
+                };
+                d.target.SetTransform(&m);
+            }
+            d.brush.SetColor(&first.color.to_d2d());
+            d.target.DrawTextLayout(
+                D2D_POINT_2F { x, y },
+                &layout,
+                &d.brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+            if mirrored {
+                d.target.SetTransform(&Matrix3x2::identity());
+            }
+        }
+        Ok(())
+    }
+
+    /// Width in DIPs of `runs` laid out as one unwrapped line, or `None` on failure.
+    pub fn measure_runs(&self, runs: &[TextRun]) -> Option<f32> {
+        if runs.is_empty() {
+            return Some(0.0);
+        }
+        let layout = self
+            .text_layout(runs, Align::Leading, (f32::MAX, f32::MAX), None)
+            .ok()?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: `metrics` is a live local the layout writes into.
+        unsafe { layout.GetMetrics(&mut metrics) }.ok()?;
+        Some(metrics.widthIncludingTrailingWhitespace)
+    }
+
+    /// One unwrapped, vertically centered line of `runs` in a `size` box. With a
+    /// `target`, each run gets a brush of its color as its drawing effect.
+    fn text_layout(
+        &self,
+        runs: &[TextRun],
+        align: Align,
+        (w, h): (f32, f32),
+        target: Option<&ID2D1HwndRenderTarget>,
+    ) -> Result<IDWriteTextLayout> {
+        let first = runs[0];
+        let text: String = runs.iter().map(|r| r.text).collect();
+        let wide: Vec<u16> = text.encode_utf16().collect();
         // SAFETY: plain calls on live COM objects; every string, range and brush passed
         // is a live local that outlives the call using it.
         unsafe {
@@ -378,32 +431,14 @@ impl Renderer {
                 layout.SetFontFamilyName(&HSTRING::from(run.family), range)?;
                 layout.SetFontSize(run.size, range)?;
                 layout.SetFontWeight(weight(run.bold), range)?;
-                let brush = d.target.CreateSolidColorBrush(&run.color.to_d2d(), None)?;
-                layout.SetDrawingEffect(&brush, range)?;
+                if let Some(t) = target {
+                    let brush = t.CreateSolidColorBrush(&run.color.to_d2d(), None)?;
+                    layout.SetDrawingEffect(&brush, range)?;
+                }
                 start += length;
             }
-            if mirrored {
-                // x' = 2x + w - x: reflects about the rect's vertical center line.
-                let m = Matrix3x2 {
-                    M11: -1.0,
-                    M22: 1.0,
-                    M31: 2.0 * x + w,
-                    ..Default::default()
-                };
-                d.target.SetTransform(&m);
-            }
-            d.brush.SetColor(&first.color.to_d2d());
-            d.target.DrawTextLayout(
-                D2D_POINT_2F { x, y },
-                &layout,
-                &d.brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-            if mirrored {
-                d.target.SetTransform(&Matrix3x2::identity());
-            }
+            Ok(layout)
         }
-        Ok(())
     }
 
     /// Presents the frame. On device loss the device resources are dropped, the window

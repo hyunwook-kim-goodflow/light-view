@@ -48,6 +48,8 @@ const PAD: f32 = 6.0;
 const FLOAT_MARGIN: f32 = 12.0;
 const PINNED_BAR_H: f32 = 56.0;
 const INFO_MIN_VIEW_W: f32 = 560.0;
+/// Gap between a side info text and the window edge or the button group.
+const INFO_INSET: f32 = 12.0;
 
 impl ToolButton {
     fn width(self) -> f32 {
@@ -196,6 +198,49 @@ pub fn info_visible(view_w: f32) -> bool {
     view_w >= INFO_MIN_VIEW_W
 }
 
+/// The pinned bar's side text rects (left of and right of the button group, inset
+/// from the window edge and the group), or `None` when they are not shown.
+pub fn info_rects(input: &ToolbarInput) -> Option<(Rect, Rect)> {
+    if !input.pinned || !info_visible(input.view_w) {
+        return None;
+    }
+    let bar = bar_rect(input);
+    let l = layout(input);
+    let (first, last) = (l[0].1, l[l.len() - 1].1);
+    let left = Rect {
+        x: INFO_INSET,
+        y: bar.y,
+        w: (first.x - 2.0 * INFO_INSET).max(0.0),
+        h: bar.h,
+    };
+    let right_x = last.x + last.w + INFO_INSET;
+    let right = Rect {
+        x: right_x,
+        y: bar.y,
+        w: (input.view_w - INFO_INSET - right_x).max(0.0),
+        h: bar.h,
+    };
+    Some((left, right))
+}
+
+/// A side text is drawn only when its whole measured width fits its rect; it is
+/// never shown clipped.
+pub fn text_fits(text_w: f32, side: &Rect) -> bool {
+    text_w <= side.w
+}
+
+/// Smallest client width (DIPs) at which the widest toolbar (with Save) fits, as a
+/// floating pill with a `FLOAT_MARGIN` on each side; the pinned group is narrower.
+pub fn min_client_width() -> f32 {
+    let widest = ToolbarInput {
+        view_w: 0.0,
+        view_h: 0.0,
+        pinned: false,
+        unsaved_rotation: true,
+    };
+    bar_rect(&widest).w + 2.0 * FLOAT_MARGIN
+}
+
 /// Left info text, e.g. "4032×3024 · 2.4 MB".
 pub fn info_text(width: u32, height: u32, bytes: u64) -> String {
     format!("{width}×{height} · {}", size_text(bytes))
@@ -246,7 +291,6 @@ const UI_FAMILY: &str = "Segoe UI";
 const SERIF_FAMILY: &str = "Georgia";
 const ICON_SIZE: f32 = 16.0;
 const INFO_SIZE: f32 = 12.0;
-const INFO_INSET: f32 = 12.0;
 /// Diameter of the Save fill and the pinned Pin ring inside a 44 DIP button.
 const CHIP: f32 = 32.0;
 
@@ -309,22 +353,17 @@ pub fn draw(r: &mut Renderer, v: &ToolbarView) {
     if v.input.pinned {
         r.fill_round_rect(tuple(bar), 0.0, p.surface);
         r.fill_round_rect((bar.x, bar.y, bar.w, 1.0), 0.0, p.hairline);
-        if info_visible(v.input.view_w) {
-            let first = buttons[0].1;
-            let last = buttons[buttons.len() - 1].1;
-            let left = (INFO_INSET, bar.y, first.x - 2.0 * INFO_INSET, bar.h);
-            let right_x = last.x + last.w + INFO_INSET;
-            let right = (right_x, bar.y, bar.w - INFO_INSET - right_x, bar.h);
-            r.draw_runs(
-                left,
-                &[ui_run(v.info.0, p.ink2, INFO_SIZE, false)],
-                Align::Leading,
-            );
-            r.draw_runs(
-                right,
-                &[ui_run(v.info.1, p.ink2, INFO_SIZE, false)],
-                Align::Trailing,
-            );
+        if let Some((left, right)) = info_rects(&v.input) {
+            let sides = [
+                (left, v.info.0, Align::Leading),
+                (right, v.info.1, Align::Trailing),
+            ];
+            for (rect, text, align) in sides {
+                let runs = [ui_run(text, p.ink2, INFO_SIZE, false)];
+                if r.measure_runs(&runs).is_some_and(|w| text_fits(w, &rect)) {
+                    r.draw_runs(tuple(rect), &runs, align);
+                }
+            }
         }
     } else {
         let radius = bar.h / 2.0;
@@ -534,6 +573,74 @@ mod tests {
                 h: 56.0
             }
         );
+    }
+
+    #[test]
+    fn info_rects_sit_beside_the_group_and_only_when_pinned_and_wide() {
+        let mut i = ToolbarInput {
+            view_w: 1200.0,
+            view_h: 800.0,
+            pinned: true,
+            unsaved_rotation: false,
+        };
+        let (left, right) = info_rects(&i).unwrap();
+        let l = layout(&i);
+        assert_eq!(left.x, 12.0);
+        assert_eq!(left.x + left.w, l[0].1.x - 12.0);
+        let last = l[l.len() - 1].1;
+        assert_eq!(right.x, last.x + last.w + 12.0);
+        assert_eq!(right.x + right.w, 1200.0 - 12.0);
+        assert_eq!(left.y, 800.0 - 56.0);
+        i.view_w = 559.0;
+        assert_eq!(info_rects(&i), None);
+        i.view_w = 1200.0;
+        i.pinned = false;
+        assert_eq!(info_rects(&i), None);
+    }
+
+    #[test]
+    fn side_text_is_drawn_only_when_it_fits_entirely() {
+        let i = ToolbarInput {
+            view_w: 640.0,
+            view_h: 600.0,
+            pinned: true,
+            unsaved_rotation: false,
+        };
+        let (left, _) = info_rects(&i).unwrap(); // 640 - 508 = 132; 66 - 24 = 42 wide
+        assert!(text_fits(42.0, &left));
+        assert!(!text_fits(42.5, &left));
+        let wide = info_rects(&ToolbarInput {
+            view_w: 1200.0,
+            ..i
+        })
+        .unwrap()
+        .0;
+        assert!(text_fits(110.0, &wide)); // "4032×3024 · 2.4 MB" at 12 DIP
+    }
+
+    #[test]
+    fn min_width_fits_the_widest_toolbar_with_margins() {
+        let w = min_client_width();
+        assert_eq!(w, 584.0 + 2.0 * 6.0 + 2.0 * 12.0);
+        for pinned in [false, true] {
+            let i = ToolbarInput {
+                view_w: w,
+                view_h: 600.0,
+                pinned,
+                unsaved_rotation: true,
+            };
+            let l = layout(&i);
+            assert!(l[0].1.x >= 12.0 + 6.0 - 1e-3);
+            let last = l[l.len() - 1].1;
+            assert!(last.x + last.w <= w - 12.0 - 6.0 + 1e-3);
+        }
+        let pill = bar_rect(&ToolbarInput {
+            view_w: w,
+            view_h: 600.0,
+            pinned: false,
+            unsaved_rotation: true,
+        });
+        assert!((pill.x - 12.0).abs() < 1e-3);
     }
 
     #[test]

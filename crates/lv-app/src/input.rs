@@ -56,6 +56,10 @@ impl Pointer {
         self.tooltip = tooltip;
     }
 
+    pub fn tooltip(&self) -> Option<HWND> {
+        self.tooltip
+    }
+
     fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
