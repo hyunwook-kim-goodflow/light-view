@@ -8,10 +8,15 @@
 //! a fresh worker.
 //!
 //! A worker counts as started only once it has given a valid answer: failing to spawn, or
-//! dying, hanging or breaking the protocol on its first request, is a start failure. After
-//! one, the slot starts its workers without the best-effort creation mitigations (in case
-//! they are what kills the worker); after three in a row it gives up. Once every slot has,
-//! `decode_heif` answers `Unsupported` at once.
+//! dying, hanging or breaking the protocol on its first request, is a start failure, and
+//! after three in a row the slot gives up. Once every slot has, `decode_heif` answers
+//! `Unsupported` at once.
+//!
+//! Only a worker that was already dead or stuck *before it took its request* (it had exited
+//! before we sent, or left the request unread in its stdin pipe) makes the slot drop the
+//! best-effort creation mitigations for later workers, in case they are what kills it. A
+//! worker that dies after reading its first request may have been killed by the file, and a
+//! hostile file must not be able to weaken the sandbox for the next one (ruling R11a).
 
 mod sandbox;
 
@@ -27,7 +32,7 @@ use std::time::{Duration, Instant};
 use lv_core::decode::DecodeError;
 use lv_ipc::{read_response, write_request, FailKind, IpcError, Request, Response};
 
-use sandbox::{log, Sandboxed};
+use sandbox::{log, Sandboxed, StdinMonitor};
 
 /// How long a worker may take to answer one request, and a caller may wait for a free slot.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +41,8 @@ const MAX_SPAWN_FAILURES: u32 = 3;
 const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
 /// Longest worker stderr line copied into the log, in bytes.
 const MAX_LOG_LINE: usize = 4096;
+/// How long a failed first request waits for the writer thread to report its write.
+const WRITE_SETTLE: Duration = Duration::from_secs(1);
 
 type Decoded = (u32, u32, Vec<u8>);
 
@@ -64,7 +71,8 @@ struct Slot {
     /// Consecutive start failures; reset by a worker's first valid answer.
     spawn_failures: u32,
     started_once: bool,
-    /// Workers start without the best-effort mitigations (after a start failure).
+    /// Workers start without the best-effort mitigations (sticky; set only when a worker
+    /// was dead before it took its request).
     degraded: bool,
 }
 
@@ -73,7 +81,10 @@ struct Worker {
     /// Has given at least one valid answer, so it counts as started.
     answered: bool,
     requests: Sender<Request>,
+    /// One entry per request from the writer thread: whether the write and flush succeeded.
+    written: Receiver<bool>,
     responses: Receiver<Result<Option<Response>, IpcError>>,
+    stdin_monitor: StdinMonitor,
 }
 
 impl WorkerPool {
@@ -187,7 +198,7 @@ impl WorkerPool {
             }
             Err(e) => {
                 let why = format!("cannot start {}: {e}", self.exe.display());
-                start_failed(slot, &why);
+                start_failed(slot, &why, true);
             }
         }
     }
@@ -204,6 +215,7 @@ impl WorkerPool {
             max_pixels: self.max_pixels,
             data,
         };
+        let dead_before_send = worker.sandboxed.has_exited();
         let outcome = if worker.requests.send(request).is_err() {
             Err("the writer thread is gone".to_string())
         } else {
@@ -221,18 +233,20 @@ impl WorkerPool {
             Ok(result) => {
                 worker.answered = true;
                 slot.spawn_failures = 0;
+                // Write reports only matter for the first request; don't let them pile up.
+                while worker.written.try_recv().is_ok() {}
                 result
             }
             Err(why) => {
                 let (pid, answered) = (worker.sandboxed.pid, worker.answered);
+                // Checked before the worker (and with it the stdin monitor) is dropped.
+                let degrade = !answered && (dead_before_send || !took_request(worker));
                 slot.worker = None; // terminates its Job
                 if answered {
                     log(&format!("worker {pid} dropped: {why}"));
                 } else {
-                    start_failed(
-                        slot,
-                        &format!("worker {pid} failed its first request: {why}"),
-                    );
+                    let why = format!("worker {pid} failed its first request: {why}");
+                    start_failed(slot, &why, degrade);
                 }
                 Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
             }
@@ -290,14 +304,28 @@ impl WorkerPool {
     }
 }
 
-/// Records a failed start; the slot's next workers go without the best-effort mitigations.
-fn start_failed(slot: &mut Slot, why: &str) {
+/// Whether a worker that failed its first request had read that request in full. False when
+/// the bytes are still in its stdin pipe, or the writer could not put them there (failed, or
+/// is still blocked on a full pipe). If the pipe cannot be inspected, assume the worker read
+/// it: wrongly keeping the mitigations only costs a start failure, wrongly dropping them
+/// weakens the sandbox.
+fn took_request(worker: &Worker) -> bool {
+    match worker.written.recv_timeout(WRITE_SETTLE) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return false,
+    }
+    !matches!(worker.stdin_monitor.unread(), Ok(n) if n > 0)
+}
+
+/// Records a failed start. With `degrade`, the slot's next workers go without the
+/// best-effort mitigations.
+fn start_failed(slot: &mut Slot, why: &str, degrade: bool) {
     slot.spawn_failures += 1;
     log(&format!(
         "start failure {} of {MAX_SPAWN_FAILURES}: {why}",
         slot.spawn_failures
     ));
-    if !slot.degraded {
+    if degrade && !slot.degraded {
         slot.degraded = true;
         log("this slot now starts workers without win32k lockdown and the child process policy");
     }
@@ -372,11 +400,13 @@ impl Worker {
             .map_err(|e| format!("reader thread: {e}"))?;
 
         let (requests, request_rx) = mpsc::channel::<Request>();
+        let (written_tx, written) = mpsc::channel();
         let mut stdin = BufWriter::new(pipes.stdin);
         named("writer")
             .spawn(move || {
                 for request in request_rx {
                     let sent = write_request(&mut stdin, &request).and_then(|()| stdin.flush());
+                    let _ = written_tx.send(sent.is_ok());
                     if sent.is_err() {
                         break;
                     }
@@ -388,7 +418,9 @@ impl Worker {
             sandboxed,
             answered: false,
             requests,
+            written,
             responses,
+            stdin_monitor: pipes.stdin_monitor,
         })
     }
 }
@@ -747,7 +779,32 @@ mod tests {
     }
 
     #[test]
-    fn first_answer_resets_start_failures() {
+    fn death_before_request_degrades_and_first_answer_resets() {
+        // Deterministic: the worker exits without reading stdin, and the pool holds a second
+        // read end of that pipe, so the request always stays unread in the pipe buffer.
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            1,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &["--test-mode=die-at-start"],
+            &[],
+        );
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        assert_not_responding(pool.decode_heif(sample()));
+        assert_eq!(pool.slot_states(), vec![(1, true)]);
+        assert_decodes(&pool);
+        assert_eq!(pool.slot_states(), vec![(0, true)]);
+        assert!(
+            !win32k_lockdown(&pool),
+            "degraded slot still sets win32k lockdown"
+        );
+    }
+
+    #[test]
+    fn crash_during_first_decode_does_not_degrade() {
+        // Deterministic: crash mode aborts only after `read_request` has read the whole
+        // frame, so the stdin pipe is empty and the writer's flush has returned by then.
         let pool = WorkerPool::start_with(
             worker_exe(),
             1,
@@ -756,14 +813,23 @@ mod tests {
             &["--test-mode=crash"],
             &[],
         );
-        assert_eq!(pool.slot_states(), vec![(0, false)]);
         assert_not_responding(pool.decode_heif(sample()));
-        assert_eq!(pool.slot_states(), vec![(1, true)]);
+        assert_eq!(
+            pool.slot_states(),
+            vec![(1, false)],
+            "counted, not degraded"
+        );
         assert_decodes(&pool);
-        assert_eq!(pool.slot_states(), vec![(0, true)]);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        assert!(
+            win32k_lockdown(&pool),
+            "a crash while decoding weakened the sandbox"
+        );
+    }
 
-        // The replacement started without the best-effort win32k lockdown.
-        let process = Process::open(single_worker(&pool).pid);
+    /// Whether the pool's only worker runs with win32k system calls disabled.
+    fn win32k_lockdown(pool: &WorkerPool) -> bool {
+        let process = Process::open(single_worker(pool).pid);
         let mut flags = 0u32;
         // SAFETY: ProcessSystemCallDisablePolicy is a single flags DWORD.
         unsafe {
@@ -775,7 +841,7 @@ mod tests {
             )
         }
         .expect("GetProcessMitigationPolicy");
-        assert_eq!(flags & 1, 0, "degraded slot still sets win32k lockdown");
+        flags & 1 == 1
     }
 
     #[test]
