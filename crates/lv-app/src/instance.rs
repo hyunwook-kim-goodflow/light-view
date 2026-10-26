@@ -136,8 +136,14 @@ fn find_primary_window() -> Option<HWND> {
 /// WM_COPYDATA from another launch: opens the path if it is an existing file (or a
 /// folder, like a drop) and brings the window forward. The sender is not trusted.
 pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
-    // SAFETY: for WM_COPYDATA, lparam points to a COPYDATASTRUCT whose lpData holds
-    // cbData readable bytes for the duration of this message.
+    // Any process can send WM_COPYDATA; a null lparam must not be dereferenced.
+    if lparam.0 == 0 {
+        return LRESULT(0);
+    }
+    // SAFETY: lparam is non-null (checked above). For WM_COPYDATA the system marshals
+    // the sender's COPYDATASTRUCT into this process, so a non-null lparam points to a
+    // valid COPYDATASTRUCT whose lpData (when non-null) holds cbData readable bytes for
+    // the duration of this message.
     let path = unsafe {
         let cds = &*(lparam.0 as *const COPYDATASTRUCT);
         let bytes = if cds.lpData.is_null() || cds.cbData == 0 {
