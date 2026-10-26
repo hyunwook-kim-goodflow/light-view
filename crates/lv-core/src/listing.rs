@@ -48,7 +48,10 @@ pub fn natural_cmp(a: &OsStr, b: &OsStr) -> Ordering {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    let norm = |p: &Path| -> Vec<String> {
+        p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()
+    };
+    norm(a) == norm(b)
 }
 
 /// Supported image files of one folder, sorted like Explorer, with a cursor.
@@ -80,7 +83,9 @@ impl FolderList {
 
     /// Lists the files (not sub-folders) in the parent folder of `file`.
     pub fn scan(file: &Path) -> std::io::Result<FolderList> {
-        let dir = file.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let file = std::path::absolute(file)?;
+        let file = file.as_path();
+        let dir = file.parent().unwrap_or(file);
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -144,7 +149,7 @@ impl FolderList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn p(s: &str) -> PathBuf { PathBuf::from(format!(r"C:\pics\{s}")) }
 
@@ -191,5 +196,23 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub.jpg")).unwrap();
         let l = FolderList::scan(&dir.path().join("10.jpg")).unwrap();
         assert_eq!(l.position(), Some((2, 2)));
+    }
+    #[test]
+    fn scan_with_forward_slashes_has_no_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.jpg", "b.jpg"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        let f = PathBuf::from(dir.path().join("a.jpg").to_string_lossy().replace("\\", "/"));
+        let l = FolderList::scan(&f).unwrap();
+        assert_eq!(l.position(), Some((1, 2)));
+    }
+    #[test]
+    fn scan_with_relative_path_has_no_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.jpg", "b.jpg"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let r = FolderList::scan(Path::new("a.jpg"));
+        std::env::set_current_dir(old).unwrap();
+        assert_eq!(r.unwrap().position(), Some((1, 2)));
     }
 }
