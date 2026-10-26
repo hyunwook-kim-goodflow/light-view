@@ -281,6 +281,16 @@ name = "lv-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "lv-worker"
+version = "0.1.0"
+dependencies = [
+ "lv-core",
+ "lv-heif",
+ "lv-ipc",
+ "windows",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lv-core", "crates/lv-app", "crates/lv-heif", "crates/lv-ipc"]
+members = ["crates/lv-core", "crates/lv-app", "crates/lv-heif", "crates/lv-ipc", "crates/lv-worker"]
 
 [workspace.package]
 edition = "2021"
