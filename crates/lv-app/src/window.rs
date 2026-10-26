@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use lv_core::settings::{load_settings, save_settings, Settings};
+use lv_core::settings::{save_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
     WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW,
     WS_OVERLAPPEDWINDOW,
 };
@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::commands::{self, HwndCell};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
+use crate::instance;
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
@@ -34,7 +35,7 @@ use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::viewer::{Scene, Viewer};
 
-const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
+pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
 const LOADING: &str = "불러오는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
@@ -59,12 +60,11 @@ pub struct App {
     pub pointer: Pointer,
 }
 
-pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
-    let settings_path = settings_path();
-    let settings = settings_path
-        .as_deref()
-        .map(load_settings)
-        .unwrap_or_default();
+pub fn run(
+    initial: Option<PathBuf>,
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let hwnd_cell = HwndCell::default();
     let app = RefCell::new(App {
         renderer: None,
@@ -455,6 +455,7 @@ fn handle(
             }
             Some(LRESULT(0))
         }
+        WM_COPYDATA => Some(instance::on_copy_data(app, hwnd, lparam)),
         WM_DESTROY => {
             // SAFETY: plain call.
             unsafe { PostQuitMessage(0) };
@@ -488,7 +489,7 @@ fn dip_per_px(hwnd: HWND) -> f32 {
 }
 
 /// `%APPDATA%\light-view\settings.toml`, or `None` if the folder cannot be resolved.
-fn settings_path() -> Option<PathBuf> {
+pub fn settings_path() -> Option<PathBuf> {
     // SAFETY: on success the returned PWSTR is a NUL-terminated string we own and free
     // with CoTaskMemFree after copying it.
     let dir = unsafe {
