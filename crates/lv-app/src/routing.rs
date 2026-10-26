@@ -147,6 +147,76 @@ mod tests {
         );
     }
 
+    /// Every supported file under `testdata/private/` (the user's own photos, not in git)
+    /// goes through the real worker pool. Run with
+    /// `cargo test -p lv-app -- --ignored --nocapture real_samples`. Paths are printed
+    /// relative to that folder, and only into the test output.
+    #[test]
+    #[ignore = "needs the user's own photos in testdata/private/"]
+    fn real_samples() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private");
+        if !root.is_dir() {
+            println!("testdata/private 없음 — 건너뜀");
+            return;
+        }
+        let mut files = Vec::new();
+        collect_supported(&root, &mut files);
+        files.sort();
+        let decoder = RoutingDecoder::with_worker(limits(), Some(worker_exe()), 2);
+        let (mut ok, mut failed) = (0usize, 0usize);
+        for file in &files {
+            let name = file.strip_prefix(&root).unwrap_or(file).display();
+            let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            let started = std::time::Instant::now();
+            match decoder.decode(file) {
+                Ok(image) => {
+                    ok += 1;
+                    println!(
+                        "ok     {name}: {:?} {}x{} {size} bytes, {} ms",
+                        image.format,
+                        image.width,
+                        image.height,
+                        started.elapsed().as_millis()
+                    );
+                }
+                Err(e) => {
+                    failed += 1;
+                    let kind = match &e {
+                        DecodeError::Unsupported => "Unsupported",
+                        DecodeError::TooLarge { .. } => "TooLarge",
+                        DecodeError::FileTooLarge { .. } => "FileTooLarge",
+                        DecodeError::Corrupt(_) => "Corrupt",
+                        DecodeError::Io(_) => "Io",
+                    };
+                    let dims = match &e {
+                        DecodeError::TooLarge { width, height } => format!(" {width}x{height}"),
+                        _ => String::new(),
+                    };
+                    println!("FAILED {name}: {kind}{dims} ({e}), {size} bytes");
+                }
+            }
+        }
+        println!(
+            "real_samples: {} files, {ok} ok, {failed} failed",
+            files.len()
+        );
+        assert_eq!(failed, 0, "some private samples did not decode");
+    }
+
+    fn collect_supported(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_supported(&path, out);
+            } else if lv_core::format::is_supported_extension(&path) {
+                out.push(path);
+            }
+        }
+    }
+
     #[test]
     fn oversized_heif_is_rejected_unread() {
         // max_pixels 1: files over 64 MiB are refused.
