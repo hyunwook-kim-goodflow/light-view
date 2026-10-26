@@ -94,6 +94,10 @@ pub enum PoolError {
     /// `RotateJpeg` only: the JPEG's size is not a multiple of its MCU, so its pixels cannot
     /// be rotated losslessly (the save falls back to the EXIF orientation).
     NotPerfect,
+    /// `RotateJpeg` only (ruling R7): data after EOI, an MPF segment, or no EOI found. The
+    /// rotation would lose what follows the first image (MPF images, gain maps, motion-photo
+    /// video), so the save must fall back to the EXIF orientation and keep the bytes.
+    HasTrailingData,
 }
 
 impl From<DecodeError> for PoolError {
@@ -107,6 +111,7 @@ impl std::fmt::Display for PoolError {
         match self {
             PoolError::Failed(e) => e.fmt(f),
             PoolError::NotPerfect => write!(f, "the JPEG cannot be rotated losslessly"),
+            PoolError::HasTrailingData => write!(f, "the JPEG holds more than one image"),
         }
     }
 }
@@ -290,9 +295,9 @@ impl WorkerPool {
             }) => Ok((width, height, bgra)),
             Err(PoolError::Failed(e)) => Err(e),
             // `check` only lets an `Image` answer or a decode failure through for a decode.
-            Ok(Reply::Bytes { .. }) | Err(PoolError::NotPerfect) => {
-                Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
-            }
+            Ok(Reply::Bytes { .. })
+            | Err(PoolError::NotPerfect)
+            | Err(PoolError::HasTrailingData) => Err(DecodeError::Corrupt(NOT_RESPONDING.into())),
         }
     }
 
@@ -300,6 +305,11 @@ impl WorkerPool {
     /// the deadline its size calls for. The size comes from the JPEG's own frame header:
     /// a file without one is `Corrupt` and one over the pixel limit is `TooLarge`, both
     /// without being sent.
+    ///
+    /// Contract (ruling R7): input with data after EOI or an MPF APP2 (`"MPF\0"`) segment
+    /// must not be pixel-rotated, since the rotation keeps only the first image. Such input
+    /// (and input whose EOI cannot be found) is refused with
+    /// [`PoolError::HasTrailingData`] before being sent; the worker checks again.
     #[allow(dead_code, reason = "the rotation save pipeline (M3 task 6) calls it")]
     pub fn rotate_jpeg(&self, quarters: u8, data: Vec<u8>) -> Result<Reply, PoolError> {
         let Some((width, height)) = jpeg_dimensions(&data) else {
@@ -308,6 +318,9 @@ impl WorkerPool {
         let pixels = u64::from(width) * u64::from(height);
         if pixels > self.max_pixels {
             return Err(DecodeError::TooLarge { width, height }.into());
+        }
+        if lv_core::jpeg_extent::check_single_image(&data).is_err() {
+            return Err(PoolError::HasTrailingData);
         }
         let request = PoolRequest::RotateJpeg { quarters, data };
         match self.request(request, rotate_deadline(pixels)) {
@@ -578,11 +591,20 @@ impl WorkerPool {
                     ..
                 },
             ) => Ok(Err(PoolError::NotPerfect)),
+            (
+                Expect::Bytes { .. },
+                Response::Failed {
+                    kind: FailKind::HasTrailingData,
+                    ..
+                },
+            ) => Ok(Err(PoolError::HasTrailingData)),
             (_, Response::Failed { kind, .. }) => Ok(Err(PoolError::Failed(match kind {
                 FailKind::TooLarge { width, height } => DecodeError::TooLarge { width, height },
                 FailKind::Corrupt(msg) => DecodeError::Corrupt(msg),
                 FailKind::Unsupported => DecodeError::Unsupported,
-                FailKind::NotPerfect => return Err("NotPerfect answer to a decode".to_string()),
+                FailKind::NotPerfect | FailKind::HasTrailingData => {
+                    return Err(format!("{kind:?} answer to a decode"))
+                }
             }))),
             (Expect::Image, Response::Bytes { .. }) => Err("a JPEG answer to a decode".to_string()),
             (Expect::Bytes { .. }, Response::Image { .. }) => {
@@ -1458,6 +1480,58 @@ pub(crate) mod tests {
             ));
         }
         // Nothing reached the worker.
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+    }
+
+    /// `name` with an MPF APP2 segment right after its APP0.
+    fn with_mpf(name: &str) -> Vec<u8> {
+        let jpeg = jpeg_sample(name);
+        let app0_end = 4 + usize::from(u16::from_be_bytes([jpeg[4], jpeg[5]]));
+        let mpf = b"MPF\0MM\0\x2a\0\0\0\x08";
+        let mut out = jpeg[..app0_end].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE2, 0, (mpf.len() + 2) as u8]);
+        out.extend_from_slice(mpf);
+        out.extend_from_slice(&jpeg[app0_end..]);
+        out
+    }
+
+    #[test]
+    fn rotate_refuses_trailing_data_before_sending() {
+        // Ruling R7: TurboJPEG would drop everything after EOI.
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        let mut trailer = jpeg_sample("gradient-64x32.jpg");
+        trailer.extend_from_slice(&jpeg_sample("gradient-64x32.jpg"));
+        let mut truncated = jpeg_sample("gradient-64x32.jpg");
+        truncated.truncate(truncated.len() - 2);
+        for data in [trailer, with_mpf("gradient-64x32.jpg"), truncated] {
+            assert!(matches!(
+                pool.rotate_jpeg(1, data),
+                Err(PoolError::HasTrailingData)
+            ));
+        }
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        // A plain JPEG still rotates.
+        assert_rotated(
+            pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
+            (32, 64),
+        );
+    }
+
+    #[test]
+    fn worker_refusal_of_trailing_data_is_an_answer() {
+        // Sent past the app's own check: the worker refuses too, as an answer.
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        let mut data = jpeg_sample("gradient-64x32.jpg");
+        data.push(0);
+        let request = PoolRequest::RotateJpeg { quarters: 1, data };
+        assert!(matches!(
+            pool.request(request, rotate_deadline(64 * 32)),
+            Err(PoolError::HasTrailingData)
+        ));
         assert_eq!(single_worker(&pool).pid, pid);
         assert_eq!(pool.slot_states(), vec![(0, false)]);
     }

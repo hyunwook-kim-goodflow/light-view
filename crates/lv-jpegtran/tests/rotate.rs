@@ -322,7 +322,8 @@ fn progressive_stays_progressive() {
 #[test]
 fn garbage_is_corrupt() {
     let source = jpeg(16, 8, BASELINE_422);
-    let truncated = &source[..source.len() / 2];
+    // The header and scan data, but not the EOI.
+    let truncated = &source[..source.len() - 2];
     let mut bad_scan = source.clone();
     let len = bad_scan.len();
     bad_scan[len - 6..len - 2].copy_from_slice(&[0xFF, 0xC4, 0xFF, 0xC4]);
@@ -330,14 +331,49 @@ fn garbage_is_corrupt() {
         ("empty", &[][..]),
         ("text", &b"not a jpeg at all"[..]),
         ("SOI only", &[0xFF, 0xD8][..]),
-        ("truncated", truncated),
-        ("broken scan", &bad_scan[..]),
     ] {
         match rotate_lossless(data, Quarter::Cw90, BIG) {
             Err(TransformError::Corrupt(msg)) => assert!(!msg.is_empty(), "{name}"),
             other => panic!("{name}: expected Corrupt, got {other:?}"),
         }
     }
+    // A readable header but no EOI to be found: whatever follows cannot be ruled out.
+    for (name, data) in [("truncated", truncated), ("broken scan", &bad_scan[..])] {
+        assert_eq!(
+            rotate_lossless(data, Quarter::Cw90, BIG),
+            Err(TransformError::HasTrailingData),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn data_after_eoi_is_refused() {
+    // Ruling R7: TurboJPEG would drop everything after EOI (gain maps, MPF images, video).
+    let source = jpeg(16, 8, BASELINE_422);
+    for trailer in [&[0u8][..], &source[..], b"ftypmp42 motion photo video"] {
+        let mut data = source.clone();
+        data.extend_from_slice(trailer);
+        assert_eq!(
+            rotate_lossless(&data, Quarter::Cw90, BIG),
+            Err(TransformError::HasTrailingData)
+        );
+    }
+    assert!(rotate_lossless(&source, Quarter::Cw90, BIG).is_ok());
+}
+
+#[test]
+fn mpf_segment_is_refused() {
+    let source = jpeg(16, 8, BASELINE_422);
+    let p = parts(&source);
+    let app0_end = 2 + 2 + 2 + p[1].1.len();
+    let mut data = source[..app0_end].to_vec();
+    data.extend(segment(0xE2, b"MPF\0MM\0\x2a\0\0\0\x08"));
+    data.extend_from_slice(&source[app0_end..]);
+    assert_eq!(
+        rotate_lossless(&data, Quarter::Cw90, BIG),
+        Err(TransformError::HasTrailingData)
+    );
 }
 
 #[test]

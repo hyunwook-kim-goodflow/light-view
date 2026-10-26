@@ -252,6 +252,7 @@ fn rotate(id: u64, quarters: u8, data: &[u8], max_pixels: u64) -> Response {
             data.len()
         )),
         Err(TransformError::NotPerfect) => FailKind::NotPerfect,
+        Err(TransformError::HasTrailingData) => FailKind::HasTrailingData,
         Err(TransformError::TooLarge) => FailKind::TooLarge {
             width: 0,
             height: 0,

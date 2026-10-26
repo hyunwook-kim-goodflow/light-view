@@ -11,6 +11,12 @@
 //! (baseline or progressive, Huffman or arithmetic), with optimized Huffman tables so that it
 //! stays about as large as the input (`lv_ipc::max_bytes_response`).
 //!
+//! TurboJPEG rebuilds the file from the coefficients and the saved markers and stops at EOI,
+//! so anything after EOI (MPF secondary images, Ultra HDR / iOS gain maps, motion-photo
+//! video) would be lost, and an MPF APP2 segment copied with offsets pointing at nothing.
+//! Such files are refused with [`TransformError::HasTrailingData`] (ruling R7, checked by
+//! `lv_core::jpeg_extent`); the app keeps their bytes and changes the EXIF orientation only.
+//!
 //! # Memory
 //!
 //! A quarter turn keeps two full sets of DCT coefficients in memory: the source's and the
@@ -47,6 +53,9 @@ pub enum TransformError {
     Corrupt(String),
     /// More pixels than `max_pixels`, or more coefficient memory than its budget.
     TooLarge,
+    /// Data after EOI, an MPF segment, or no EOI to be found (ruling R7): rotating would
+    /// lose what follows the first image, so the pixels must stay as they are.
+    HasTrailingData,
 }
 
 /// Most progressive scans accepted (libjpeg-turbo's suggested guard against crafted
@@ -59,6 +68,10 @@ const MAX_MEMORY_MB: u64 = 2047;
 
 /// Rotates `jpeg` losslessly by `q`. Fails with `TooLarge` before touching the image data
 /// when the header reports more than `max_pixels` pixels.
+///
+/// Contract (ruling R7): `jpeg` must be one image and nothing else. Input with data after
+/// EOI or an MPF APP2 (`"MPF\0"`) segment must not be pixel-rotated; it is refused with
+/// `HasTrailingData` (as is input whose EOI cannot be found).
 pub fn rotate_lossless(
     jpeg: &[u8],
     q: Quarter,
@@ -113,6 +126,9 @@ fn rotate(jpeg: &[u8], q: Quarter, max_pixels: u64) -> Result<Vec<u8>, Transform
     let colorspace = tj.get(ffi::TJPARAM_COLORSPACE);
     if coefficient_bytes(width, height, subsamp, colorspace) > budget {
         return Err(TransformError::TooLarge);
+    }
+    if lv_core::jpeg_extent::check_single_image(jpeg).is_err() {
+        return Err(TransformError::HasTrailingData);
     }
     if let Some(mcu) = mcu_size(subsamp) {
         if !is_perfect(width, height, mcu, q) {

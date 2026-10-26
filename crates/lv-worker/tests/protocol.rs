@@ -307,6 +307,16 @@ fn rotate_over_pipes() {
             kind: FailKind::NotPerfect
         }
     );
+    // Data after EOI (ruling R7): refused, the bytes would be lost.
+    let mut trailer = source.clone();
+    trailer.extend_from_slice(b"motion photo video");
+    assert_eq!(
+        w.rotate(10, 1, MAX_PIXELS, trailer),
+        Response::Failed {
+            id: 10,
+            kind: FailKind::HasTrailingData
+        }
+    );
     // Not a JPEG.
     match w.rotate(5, 1, MAX_PIXELS, b"not a jpeg".to_vec()) {
         Response::Failed {
