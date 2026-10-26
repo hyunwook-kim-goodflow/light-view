@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 
+pub mod command;
 pub mod decode;
 pub mod format;
 pub mod listing;
