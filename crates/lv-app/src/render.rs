@@ -114,11 +114,13 @@ impl Renderer {
         }
     }
 
-    /// Uploads `frame` of `img` as premultiplied BGRA, or clears the image.
+    /// Uploads `frame` of `img` as premultiplied BGRA, or clears the image. A frame whose
+    /// buffer length does not match `width * height * 4` is treated as no image.
     pub fn set_image(&mut self, img: Option<&DecodedImage>, frame: usize) {
         self.pixels = img.and_then(|img| {
-            img.frames.get(frame).map(|f| Pixels {
-                bgra: rgba_to_premultiplied_bgra(&f.rgba),
+            let f = img.frames.get(frame)?;
+            Some(Pixels {
+                bgra: premultiplied_bgra_for(&f.rgba, img.width, img.height)?,
                 width: img.width,
                 height: img.height,
             })
@@ -285,8 +287,9 @@ fn create_bitmap(target: &ID2D1HwndRenderTarget, p: &Pixels) -> Result<ID2D1Bitm
         width: p.width,
         height: p.height,
     };
-    // SAFETY: `p.bgra` holds exactly width*height*4 bytes with a stride of width*4,
-    // and D2D copies the data before returning.
+    // SAFETY: `Pixels` is only built by `premultiplied_bgra_for`, which guarantees
+    // `p.bgra.len() == width * height * 4` and that the stride `width * 4` fits in u32;
+    // D2D copies the data before returning.
     unsafe { target.CreateBitmap(size, Some(p.bgra.as_ptr().cast()), p.width * 4, &props) }
 }
 
@@ -306,6 +309,16 @@ fn interpolation_for(device_scale: f32) -> D2D1_INTERPOLATION_MODE {
     } else {
         D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC
     }
+}
+
+/// Converts a `width` x `height` straight-alpha RGBA8 frame, or `None` if the buffer
+/// length does not match (or the size overflows), so D2D never reads past it.
+fn premultiplied_bgra_for(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    width.checked_mul(4)?;
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    (rgba.len() == expected).then(|| rgba_to_premultiplied_bgra(rgba))
 }
 
 /// Straight-alpha RGBA8 to premultiplied BGRA8 (rounded).
@@ -331,6 +344,19 @@ mod tests {
         let rgba = [255, 128, 0, 255, 200, 100, 50, 128, 10, 20, 30, 0];
         let out = rgba_to_premultiplied_bgra(&rgba);
         assert_eq!(out, vec![0, 128, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn frame_buffer_must_match_dimensions() {
+        let rgba = [1u8, 2, 3, 255, 4, 5, 6, 255];
+        assert_eq!(
+            premultiplied_bgra_for(&rgba, 2, 1),
+            Some(vec![3, 2, 1, 255, 6, 5, 4, 255])
+        );
+        assert_eq!(premultiplied_bgra_for(&rgba, 2, 2), None); // too short
+        assert_eq!(premultiplied_bgra_for(&rgba, 1, 1), None); // too long
+        assert_eq!(premultiplied_bgra_for(&rgba, u32::MAX, u32::MAX), None); // overflow
+        assert_eq!(premultiplied_bgra_for(&[], 0, 0), Some(vec![]));
     }
 
     #[test]
