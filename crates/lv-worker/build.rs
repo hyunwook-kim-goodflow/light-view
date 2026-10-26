@@ -1,6 +1,6 @@
 //! Makes the loader resolve the worker's static DLL imports (`heif.dll` and, through it,
-//! `libde265.dll`) from the executable's own folder and System32 only — never the working
-//! folder or PATH.
+//! `libde265.dll`; `turbojpeg.dll` and, through it, `spng.dll` and `z.dll`) from the
+//! executable's own folder and System32 only — never the working folder or PATH.
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")

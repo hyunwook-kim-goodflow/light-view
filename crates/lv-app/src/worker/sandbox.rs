@@ -66,8 +66,14 @@ pub struct Sandboxed {
 impl Sandboxed {
     /// Whether the process has already ended.
     pub fn has_exited(&self) -> bool {
-        // SAFETY: valid process handle owned by `self`; a zero timeout only polls.
-        unsafe { WaitForSingleObject(raw(&self.process), 0) == WAIT_OBJECT_0 }
+        self.wait_for_exit(std::time::Duration::ZERO)
+    }
+
+    /// Waits at most `timeout` for the process to end; whether it has.
+    pub fn wait_for_exit(&self, timeout: std::time::Duration) -> bool {
+        let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+        // SAFETY: valid process handle owned by `self`; the wait is bounded.
+        unsafe { WaitForSingleObject(raw(&self.process), ms) == WAIT_OBJECT_0 }
     }
 }
 

@@ -20,6 +20,21 @@ HEIC/HEIF 사진은 별도 프로세스 `lv-worker.exe`가 아래 두 C/C++ 라�
 - 라이선스 전문: GNU Lesser General Public License v3 <https://www.gnu.org/licenses/lgpl-3.0.txt>, 이것이 참조하는 GNU General Public License v3 <https://www.gnu.org/licenses/gpl-3.0.txt>. 두 라이브러리의 저작권·라이선스 원문은 소스 저장소의 `COPYING` 파일에 있어요.
 - HEVC에는 특허 풀이 있어요. README의 안내를 보세요.
 
+## libjpeg-turbo (IJG + BSD-3-Clause + Zlib)
+
+JPEG 사진의 무손실 회전은 `lv-worker.exe`가 libjpeg-turbo의 TurboJPEG API로 해요. **DLL로 동적 링크**하고, 앱(`lv-app.exe`)은 링크하지 않아요. `turbojpeg.dll`이 libspng(`spng.dll`)를, libspng가 zlib(`z.dll`)을 불러와서 함께 배포해요. 같은 빌드에서 나온 `jpeg62.dll`(libjpeg API)도 같은 폴더에 들어가요.
+
+| 구성 요소 | 버전 | 배포 파일 | 라이선스 | 소스 |
+|---|---|---|---|---|
+| libjpeg-turbo | 3.2.0 | `turbojpeg.dll`, `jpeg62.dll` | IJG License, BSD-3-Clause, Zlib (SIMD 코드) | <https://github.com/libjpeg-turbo/libjpeg-turbo/tree/3.2.0> |
+| libspng | 0.7.4 | `spng.dll` | BSD-2-Clause AND libpng-2.0 (libpng에서 가져온 SIMD 코드) | <https://github.com/randy408/libspng/tree/v0.7.4> |
+| zlib | 1.3.2 | `z.dll` | Zlib | <https://github.com/madler/zlib/tree/v1.3.2> |
+
+- This software is based in part on the work of the Independent JPEG Group.
+- libjpeg-turbo: Copyright (C) 2009-2026 D. R. Commander 외. libjpeg 부분: copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding. TurboJPEG API는 libjpeg API를 감싸므로 IJG License와 BSD-3-Clause가 함께 적용돼요. 라이선스 원문은 소스의 `LICENSE.md`와 `README.ijg`에 있어요.
+- libspng: Copyright (c) 2018-2023 Randy; libpng 부분은 The PNG Reference Library Authors 외. zlib: (C) 1995-2026 Jean-loup Gailly and Mark Adler. 원문은 각 소스의 `LICENSE`와 `zlib.h`에 있어요.
+- 빌드: 위와 같은 vcpkg 커밋의 포트(<https://github.com/microsoft/vcpkg/tree/9eec002df1cd109f8f104cd966a763daf9751489/ports/libjpeg-turbo>, `ports/libspng`, `ports/zlib`)로 `x64-windows`(DLL)에서 빌드했어요. libheif의 `jpeg` 기능은 끄고 빌드해요(`scripts/setup-deps.ps1`이 확인해요).
+
 ## Rust 크레이트 (주요 항목)
 
 빌드에 쓰는 버전은 `Cargo.lock`에 고정돼 있어요.
