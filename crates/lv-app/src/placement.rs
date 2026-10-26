@@ -1,15 +1,18 @@
 //! Window placement: save/restore via WINDOWPLACEMENT with an off-monitor fallback.
 
 use lv_core::settings::WindowPlacement;
+
+use crate::toolbar;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONULL,
     MONITOR_DEFAULTTOPRIMARY,
 };
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowPlacement, IsZoomed, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWNORMAL,
-    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    GetWindowLongW, GetWindowPlacement, IsZoomed, GWL_EXSTYLE, GWL_STYLE, SW_SHOWMAXIMIZED,
+    SW_SHOWMINIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WPF_RESTORETOMAXIMIZED,
 };
 
 const DEFAULT_SIZE_DIP: (i32, i32) = (1200, 800);
@@ -148,6 +151,29 @@ fn restore_rect(
         y: (work.1 - h) / 2,
         w,
         h,
+    }
+}
+
+/// Outer window width whose client area fits the widest toolbar
+/// (`toolbar::min_client_width`) at the window's DPI.
+pub fn min_window_width(hwnd: HWND) -> Option<i32> {
+    // SAFETY: plain calls on our window; `rc` is a live local.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            return None;
+        }
+        let client = (toolbar::min_client_width() * dpi as f32 / 96.0).ceil() as i32;
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: client,
+            bottom: 0,
+        };
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        AdjustWindowRectExForDpi(&mut rc, style, false, ex_style, dpi).ok()?;
+        Some(rc.right - rc.left)
     }
 }
 

@@ -1,12 +1,15 @@
 // Release builds are GUI-subsystem (no console window); debug builds keep stderr.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
+mod fullscreen;
 mod input;
 mod placement;
 mod render;
 mod theme;
 mod toolbar;
 mod tooltip;
+mod viewer;
 mod window;
 
 use std::path::PathBuf;

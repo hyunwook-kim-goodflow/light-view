@@ -1,17 +1,26 @@
-//! Pointer input for the toolbar: auto-hide timer, hover, button clicks, tooltips.
+//! Pointer input: toolbar auto-hide, hover, button clicks and tooltips; the wheel,
+//! double-click zoom and drag-to-pan on the image.
 
 use std::cell::RefCell;
 use std::time::Instant;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use lv_core::command::{command_for_wheel, Command};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, SetTimer, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_TIMER,
+    GetCursorPos, KillTimer, LoadCursorW, SetCursor, SetTimer, HTCLIENT, IDC_HAND, WHEEL_DELTA,
+    WM_CAPTURECHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_SETCURSOR, WM_TIMER,
 };
 
+use crate::commands;
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
+use crate::viewer::Redraw;
 use crate::window::{invalidate, App};
 
 const TIMER_ID: usize = 1;
@@ -30,6 +39,10 @@ pub struct Pointer {
     /// Whether the toolbar is currently drawn.
     pub shown: bool,
     pressed: Option<ToolButton>,
+    /// Last pointer position in pixels while dragging the image.
+    drag: Option<(i32, i32)>,
+    /// Wheel movement not yet turned into whole notches.
+    wheel: i32,
     tooltip: Option<HWND>,
     tools: Vec<Tool>,
 }
@@ -45,6 +58,8 @@ impl Default for Pointer {
             timer_on: false,
             shown: false,
             pressed: None,
+            drag: None,
+            wheel: 0,
             tooltip: None,
             tools: Vec::new(),
         }
@@ -96,6 +111,20 @@ impl App {
 
     fn to_dips(&self, (x, y): (i32, i32)) -> (f32, f32) {
         (x as f32 * self.dip, y as f32 * self.dip)
+    }
+
+    /// Whether `px` (client pixels) is on the toolbar while it is shown.
+    fn on_toolbar(&self, px: (i32, i32)) -> bool {
+        let (x, y) = self.to_dips(px);
+        self.pointer.shown
+            && self
+                .toolbar_input()
+                .is_some_and(|i| bar_rect(&i).contains(x, y))
+    }
+
+    /// Whether the hand cursor applies at `px`: dragging, or over a pannable image.
+    fn hand_at(&self, px: (i32, i32)) -> bool {
+        self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px))
     }
 
     /// The tooltip tools for the current layout, if they changed: (tooltip, old count, tools).
@@ -156,6 +185,12 @@ pub fn handle(
                 }
                 a.pointer.last_px = Some(px);
                 a.pointer.cursor = Some(a.to_dips(px));
+                if let Some(from) = a.pointer.drag.replace(px) {
+                    let (dx, dy) = a.to_dips((px.0 - from.0, px.1 - from.1));
+                    if a.viewer.pan(dx, dy) == Redraw::Full {
+                        invalidate(hwnd);
+                    }
+                }
                 let now = a.pointer.now_ms();
                 a.pointer.autohide.on_mouse_move(now);
                 let track = !a.pointer.tracking_leave;
@@ -197,19 +232,81 @@ pub fn handle(
             }
             Some(LRESULT(0))
         }
-        WM_LBUTTONDOWN => {
-            let mut a = app.try_borrow_mut().ok()?;
-            a.pointer.pressed = a.enabled_button_at(lparam);
+        // A double-click on a button counts as a second click on it.
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            let (drag, toggle) = {
+                let mut a = app.try_borrow_mut().ok()?;
+                let px = point(lparam);
+                a.pointer.pressed = a.enabled_button_at(lparam);
+                // Presses on the toolbar are clicks, never pans or zooms.
+                let on_image = a.pointer.pressed.is_none() && !a.on_toolbar(px);
+                let drag = on_image && a.viewer.pannable();
+                if drag {
+                    a.pointer.drag = Some(px);
+                }
+                let toggle = on_image && msg == WM_LBUTTONDBLCLK;
+                (drag, toggle.then(|| a.to_dips(px)))
+            };
+            if drag {
+                // SAFETY: plain call on our window; no App borrow is held.
+                unsafe { SetCapture(hwnd) };
+            }
+            if let Some(anchor) = toggle {
+                commands::run(app, hwnd, Command::ToggleFitActual, Some(anchor));
+            }
             Some(LRESULT(0))
         }
         WM_LBUTTONUP => {
-            let clicked = {
+            let (clicked, dragged) = {
                 let mut a = app.try_borrow_mut().ok()?;
                 let pressed = a.pointer.pressed.take();
-                pressed.filter(|b| a.enabled_button_at(lparam) == Some(*b))
+                let dragged = a.pointer.drag.take().is_some();
+                let clicked = pressed.filter(|b| a.enabled_button_at(lparam) == Some(*b));
+                (clicked, dragged)
             };
+            if dragged {
+                // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
             if let Some(b) = clicked {
                 on_button(app, hwnd, b);
+            }
+            Some(LRESULT(0))
+        }
+        WM_CAPTURECHANGED => {
+            app.try_borrow_mut().ok()?.pointer.drag = None;
+            Some(LRESULT(0))
+        }
+        WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
+            let px = cursor_in_client(hwnd)?;
+            if !app.try_borrow().ok()?.hand_at(px) {
+                return None;
+            }
+            // SAFETY: plain calls; IDC_HAND is a system cursor.
+            unsafe {
+                let cursor = LoadCursorW(None, IDC_HAND).ok()?;
+                SetCursor(cursor);
+            }
+            Some(LRESULT(1))
+        }
+        WM_MOUSEWHEEL => {
+            let mods = commands::mods();
+            if mods.alt {
+                return Some(LRESULT(0));
+            }
+            let delta = i32::from(((wparam.0 >> 16) & 0xFFFF) as u16 as i16);
+            let (notches, anchor) = {
+                let mut a = app.try_borrow_mut().ok()?;
+                a.pointer.wheel += delta;
+                let notches = a.pointer.wheel / WHEEL_DELTA as i32;
+                a.pointer.wheel -= notches * WHEEL_DELTA as i32;
+                (notches, cursor_in_client(hwnd).map(|px| a.to_dips(px)))
+            };
+            let cmd = command_for_wheel(notches.signum() as i16, mods);
+            for _ in 0..notches.unsigned_abs() {
+                commands::run(app, hwnd, cmd, anchor);
             }
             Some(LRESULT(0))
         }
@@ -218,20 +315,19 @@ pub fn handle(
 }
 
 fn on_button(app: &RefCell<App>, hwnd: HWND, b: ToolButton) {
+    if let Some(c) = b.command() {
+        commands::run(app, hwnd, c, None);
+    }
     let timer = {
         let Ok(mut a) = app.try_borrow_mut() else {
             return;
         };
-        match b.command() {
-            Some(c) => a.on_command(c),
-            None if b == ToolButton::Pin => {
-                a.toggle_pin(hwnd);
-                // Keep the floating pill up after unpinning, then let it auto-hide.
-                let now = a.pointer.now_ms();
-                a.pointer.autohide.on_mouse_move(now);
-                a.refresh_toolbar();
-            }
-            None => {}
+        if b == ToolButton::Pin {
+            a.toggle_pin(hwnd);
+            // Keep the floating pill up after unpinning, then let it auto-hide.
+            let now = a.pointer.now_ms();
+            a.pointer.autohide.on_mouse_move(now);
+            a.refresh_toolbar();
         }
         a.start_timer()
     };
@@ -260,6 +356,19 @@ fn track_leave(hwnd: HWND) {
     unsafe {
         let _ = TrackMouseEvent(&mut tme);
     }
+}
+
+/// The cursor position in client pixels.
+fn cursor_in_client(hwnd: HWND) -> Option<(i32, i32)> {
+    let mut pt = POINT::default();
+    // SAFETY: `pt` is a live local; plain calls on our window.
+    unsafe {
+        GetCursorPos(&mut pt).ok()?;
+        if !ScreenToClient(hwnd, &mut pt).as_bool() {
+            return None;
+        }
+    }
+    Some((pt.x, pt.y))
 }
 
 /// Client coordinates from a mouse message's lparam (signed 16-bit each).

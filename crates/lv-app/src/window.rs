@@ -1,58 +1,49 @@
 //! Main window: class registration, window procedure, theme and DPI.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
-use lv_core::command::Command;
-use lv_core::decode::{decode_file, DecodeError, DecodeLimits, DecodedImage};
 use lv_core::settings::{load_settings, save_settings, Settings};
-use lv_core::viewport::{Viewport, ZOOM_STEP};
-use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
-};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, GetWindowLongW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW,
-    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, TranslateMessage,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
-    IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 
+use crate::commands::{self, HwndCell};
+use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::placement;
-use crate::render::Renderer;
-use crate::theme::{palette, system_prefers_dark};
+use crate::render::{Align, Renderer, TextRun};
+use crate::theme::{self, palette, system_prefers_dark};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
+use crate::viewer::{Scene, Viewer};
 
 const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
-const CANNOT_OPEN: &str = "이 사진은 열 수 없어요";
-
-enum Content {
-    Empty,
-    /// `view` is built once the client size is known (and rebuilt on DPI change).
-    Image {
-        img: DecodedImage,
-        view: Option<Viewport>,
-    },
-    Message(String),
-}
+const LOADING: &str = "불러오는 중…";
+const LOADING_SIZE_DIP: f32 = 13.0;
 
 pub struct App {
     renderer: Option<Renderer>,
-    content: Content,
-    /// Size of the opened file in bytes, for the pinned bar's info text.
-    file_bytes: Option<u64>,
+    pub viewer: Viewer,
+    /// (generation, frame) of the image last uploaded to the renderer.
+    uploaded: Option<(u64, usize)>,
+    pub fullscreen: Option<Fullscreen>,
     dark: bool,
     pub settings: Settings,
     settings_path: Option<PathBuf>,
@@ -72,17 +63,12 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
-    let title = initial
-        .as_deref()
-        .and_then(Path::file_name)
-        .map_or_else(|| "light-view".into(), |n| n.to_string_lossy().into_owned());
+    let hwnd_cell = HwndCell::default();
     let app = RefCell::new(App {
         renderer: None,
-        content: initial.as_deref().map_or(Content::Empty, load_content),
-        file_bytes: initial
-            .as_deref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len()),
+        viewer: commands::new_viewer(&settings, hwnd_cell.clone()),
+        uploaded: None,
+        fullscreen: None,
         dark: system_prefers_dark(),
         settings,
         settings_path,
@@ -100,7 +86,7 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
         let instance = GetModuleHandleW(None).context("GetModuleHandleW")?;
         let class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
+            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW")?,
@@ -125,10 +111,10 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
             Some(std::ptr::from_ref(&app).cast()),
         )
         .context("CreateWindowExW")?;
+        hwnd_cell.set(hwnd);
+        DragAcceptFiles(hwnd, true);
 
-        apply_title_bar(hwnd, app.borrow().dark);
-        // Task 10 appends the position: "IMG_4821.HEIC · 12 / 128".
-        let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
+        theme::apply_title_bar(hwnd, app.borrow().dark);
         let tooltip = tooltip::create(hwnd);
         if let Some(tt) = tooltip {
             let dark = app.borrow().dark;
@@ -147,7 +133,10 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
             a.icon_family = toolbar::icon_family(&renderer);
             a.renderer = Some(renderer);
             a.pointer.set_tooltip(tooltip);
-            a.upload_image();
+        }
+        // Scans the folder and queues the decode; the window shows without waiting.
+        if let Some(path) = &initial {
+            commands::open(&app, hwnd, path);
         }
 
         let saved = app.borrow().settings.window.clone();
@@ -161,11 +150,10 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
             let _ = DestroyWindow(hwnd);
             return Err(e).context("SetWindowPlacement");
         }
-        // Build the viewport for the final (possibly maximized) size, not the
+        // Size the image area for the final (possibly maximized) size, not the
         // CW_USEDEFAULT size seen during creation.
         {
             let mut a = app.borrow_mut();
-            a.reset_view();
             a.on_size(hwnd);
             a.refresh_toolbar();
         }
@@ -181,47 +169,38 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_content(path: &Path) -> Content {
-    match decode_file(path, &DecodeLimits::default()) {
-        Ok(img) if !img.frames.is_empty() => Content::Image { img, view: None },
-        Ok(_) => Content::Message(CANNOT_OPEN.to_owned()),
-        Err(e) => Content::Message(error_message(&e)),
-    }
-}
-
-fn error_message(e: &DecodeError) -> String {
-    match e {
-        DecodeError::TooLarge { width, height } => {
-            format!("너무 커서 열 수 없어요 ({width}×{height})")
-        }
-        _ => CANNOT_OPEN.to_owned(),
-    }
-}
-
 impl App {
-    fn upload_image(&mut self) {
+    /// Uploads the shown image (or animation frame) if it changed since the last paint,
+    /// and (re)starts the animation timer for a newly shown photo. Done at paint time
+    /// so that a burst of key repeats uploads only the photo that ends up on screen.
+    fn upload_image(&mut self, hwnd: HWND) {
+        let key = (
+            self.viewer.generation(),
+            self.viewer.frame_to_upload().map_or(0, |f| f.1),
+        );
+        if self.uploaded == Some(key) {
+            return;
+        }
+        let new_photo = self.uploaded.map(|k| k.0) != Some(key.0);
+        self.uploaded = Some(key);
         let Some(r) = &mut self.renderer else { return };
-        if let Content::Image { img, .. } = &self.content {
-            r.set_image(Some(img), 0);
-            if !r.has_image() {
-                // Larger than the GPU's maximum bitmap size; release the pixel copy.
-                r.set_image(None, 0);
-                let (width, height) = (img.width, img.height);
-                self.content =
-                    Content::Message(error_message(&DecodeError::TooLarge { width, height }));
+        match self.viewer.frame_to_upload() {
+            Some((img, frame)) => {
+                r.set_image(Some(img), frame);
+                if !r.has_image() {
+                    // Larger than the GPU's maximum bitmap size; release the pixel copy.
+                    r.set_image(None, 0);
+                    self.viewer.too_large_to_draw();
+                }
             }
-        } else {
-            r.set_image(None, 0);
+            None => r.set_image(None, 0),
+        }
+        if new_photo {
+            commands::set_animation_timer(hwnd, self.viewer.frame_delay());
         }
     }
 
-    fn reset_view(&mut self) {
-        if let Content::Image { view, .. } = &mut self.content {
-            *view = None;
-        }
-    }
-
-    fn on_size(&mut self, hwnd: HWND) {
+    pub fn on_size(&mut self, hwnd: HWND) {
         let mut rc = RECT::default();
         // SAFETY: `rc` is a live local and `hwnd` is our window.
         if unsafe { GetClientRect(hwnd, &mut rc) }.is_err() {
@@ -234,17 +213,8 @@ impl App {
         let dip = dip_per_px(hwnd);
         self.dip = dip;
         self.client_dips = (pw as f32 * dip, ph as f32 * dip);
-        let view_dips = self.view_dips();
-        if let Content::Image { img, view } = &mut self.content {
-            match view {
-                Some(v) => v.resize(view_dips),
-                None => {
-                    // Image pixels map 1:1 to device pixels at scale 1.0 ("100%").
-                    let image_dips = (img.width as f32 * dip, img.height as f32 * dip);
-                    *view = Some(Viewport::initial(view_dips, image_dips));
-                }
-            }
-        }
+        let view = self.view_dips();
+        self.viewer.set_view(view, dip);
     }
 
     /// The image area: the client area above a pinned toolbar.
@@ -260,33 +230,15 @@ impl App {
 
     /// The toolbar's layout input, or `None` when no file is open (no toolbar).
     pub fn toolbar_input(&self) -> Option<ToolbarInput> {
-        if matches!(self.content, Content::Empty) {
+        if !self.viewer.has_file() {
             return None;
         }
         Some(ToolbarInput {
             view_w: self.client_dips.0,
             view_h: self.client_dips.1,
             pinned: self.settings.toolbar_pinned,
-            unsaved_rotation: false, // Task 10 tracks rotation
+            unsaved_rotation: self.viewer.unsaved_rotation(),
         })
-    }
-
-    pub fn on_command(&mut self, command: Command) {
-        match command {
-            Command::ZoomIn => self.zoom(ZOOM_STEP),
-            Command::ZoomOut => self.zoom(1.0 / ZOOM_STEP),
-            // TODO(Task 10): navigate to the previous / next photo in the folder.
-            Command::Prev | Command::Next => {}
-            _ => {}
-        }
-    }
-
-    /// Zooms about the centre of the image area.
-    fn zoom(&mut self, factor: f32) {
-        let (w, h) = self.view_dips();
-        if let Content::Image { view: Some(v), .. } = &mut self.content {
-            v.zoom_at(factor, (w / 2.0, h / 2.0));
-        }
     }
 
     /// Pins or unpins the toolbar, saves the choice and resizes the image area.
@@ -296,26 +248,37 @@ impl App {
         self.on_size(hwnd);
     }
 
-    fn paint(&mut self) {
+    fn paint(&mut self, hwnd: HWND) {
+        self.upload_image(hwnd);
         let toolbar = self.toolbar_input().filter(|_| self.pointer.shown);
-        let (info, zoom) = match &self.content {
-            Content::Image { img, view } => (
-                self.file_bytes
-                    .map(|b| toolbar::info_text(img.width, img.height, b))
-                    .unwrap_or_default(),
-                view.as_ref()
-                    .map(|v| toolbar::zoom_text(v.scale()))
-                    .unwrap_or_default(),
-            ),
-            _ => (String::new(), String::new()),
-        };
+        let info = self
+            .viewer
+            .info()
+            .map(|(w, h, bytes)| toolbar::info_text(w, h, bytes))
+            .unwrap_or_default();
+        let zoom = self
+            .viewer
+            .zoom()
+            .map(toolbar::zoom_text)
+            .unwrap_or_default();
+        let (view_w, view_h) = self.view_dips();
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
-        match &self.content {
-            Content::Image { view: Some(v), .. } => r.draw_image(v.image_rect()),
-            Content::Message(text) => r.draw_text_center(text, p.ink2),
-            Content::Image { view: None, .. } | Content::Empty => {}
+        match self.viewer.scene() {
+            Scene::Image { rect, quarters } => r.draw_image(rect, quarters),
+            Scene::Message(text) => r.draw_text_center(text, p.ink2),
+            Scene::Loading => {
+                let run = TextRun {
+                    text: LOADING,
+                    family: "Segoe UI",
+                    size: LOADING_SIZE_DIP,
+                    bold: false,
+                    color: p.ink2,
+                };
+                r.draw_runs((0.0, 0.0, view_w, view_h), &[run], Align::Center);
+            }
+            Scene::Empty => {}
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -323,7 +286,7 @@ impl App {
                 palette: p,
                 dark: self.dark,
                 icon_family: self.icon_family,
-                position: (1, 1), // Task 10 supplies the folder position
+                position: self.viewer.position(),
                 info: (&info, &zoom),
             };
             toolbar::draw(r, &view);
@@ -333,8 +296,13 @@ impl App {
         }
     }
 
+    /// Saves the normal-window placement (the one from before fullscreen, if active).
     fn save_placement(&mut self, hwnd: HWND) {
-        let Some(wp) = placement::current_placement(hwnd) else {
+        let wp = match &self.fullscreen {
+            Some(f) => f.placement_to_save(),
+            None => placement::current_placement(hwnd),
+        };
+        let Some(wp) = wp else {
             return;
         };
         self.settings.window = Some(wp);
@@ -386,7 +354,7 @@ fn handle(
     match msg {
         WM_ERASEBKGND => Some(LRESULT(1)),
         WM_GETMINMAXINFO => {
-            if let Some(width) = min_window_width(hwnd) {
+            if let Some(width) = placement::min_window_width(hwnd) {
                 // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
                 let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize.x = mmi.ptMinTrackSize.x.max(width);
@@ -403,7 +371,7 @@ fn handle(
             // SAFETY: paired BeginPaint/EndPaint on our window with a live PAINTSTRUCT.
             unsafe { BeginPaint(hwnd, &mut ps) };
             if let Ok(mut a) = app.try_borrow_mut() {
-                a.paint();
+                a.paint(hwnd);
             }
             // SAFETY: as above.
             unsafe {
@@ -418,7 +386,6 @@ fn handle(
                 if let Some(r) = &mut a.renderer {
                     r.set_dpi(dpi);
                 }
-                a.reset_view();
                 a.restoring
             };
             // SAFETY: plain call on our window.
@@ -439,21 +406,21 @@ fn handle(
                     );
                 }
             }
-            // The pixel size may not change, so rebuild the viewport explicitly.
+            // The pixel size may not change, so pass the new DPI to the viewer explicitly.
             app.try_borrow_mut().ok()?.on_size(hwnd);
             input::sync_tooltips(app, hwnd);
             invalidate(hwnd);
             Some(LRESULT(0))
         }
         WM_SETTINGCHANGE => {
-            if is_color_set_change(lparam) {
+            if theme::is_color_set_change(lparam) {
                 let dark = system_prefers_dark();
                 let tooltip = {
                     let mut a = app.try_borrow_mut().ok()?;
                     a.dark = dark;
                     a.pointer.tooltip()
                 };
-                apply_title_bar(hwnd, dark);
+                theme::apply_title_bar(hwnd, dark);
                 if let Some(tt) = tooltip {
                     tooltip::set_dark(tt, dark);
                 }
@@ -479,39 +446,8 @@ fn handle(
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
         }
-        _ => input::handle(app, hwnd, msg, wparam, lparam),
-    }
-}
-
-fn is_color_set_change(lparam: LPARAM) -> bool {
-    if lparam.0 == 0 {
-        return false;
-    }
-    // SAFETY: for WM_SETTINGCHANGE a non-null lparam is a NUL-terminated wide string.
-    let name = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
-    name.is_ok_and(|s| s == "ImmersiveColorSet")
-}
-
-fn apply_title_bar(hwnd: HWND, dark: bool) {
-    let value = BOOL::from(dark);
-    let paper = palette(dark).paper;
-    // COLORREF is 0x00BBGGRR.
-    let caption = COLORREF(u32::from(paper.0) | u32::from(paper.1) << 8 | u32::from(paper.2) << 16);
-    // SAFETY: `value` and `caption` are live locals and each size passed matches its
-    // value. DWMWA_CAPTION_COLOR fails on Windows 10; that error is ignored.
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            std::ptr::from_ref(&value).cast(),
-            std::mem::size_of::<BOOL>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR,
-            std::ptr::from_ref(&caption).cast(),
-            std::mem::size_of::<COLORREF>() as u32,
-        );
+        _ => commands::handle(app, hwnd, msg, wparam, lparam)
+            .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
     }
 }
 
@@ -519,29 +455,6 @@ pub fn invalidate(hwnd: HWND) {
     // SAFETY: plain call on our window.
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
-    }
-}
-
-/// Outer window width whose client area fits the widest toolbar
-/// (`toolbar::min_client_width`) at the window's DPI.
-fn min_window_width(hwnd: HWND) -> Option<i32> {
-    // SAFETY: plain calls on our window; `rc` is a live local.
-    unsafe {
-        let dpi = GetDpiForWindow(hwnd);
-        if dpi == 0 {
-            return None;
-        }
-        let client = (toolbar::min_client_width() * dpi as f32 / 96.0).ceil() as i32;
-        let mut rc = RECT {
-            left: 0,
-            top: 0,
-            right: client,
-            bottom: 0,
-        };
-        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
-        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
-        AdjustWindowRectExForDpi(&mut rc, style, false, ex_style, dpi).ok()?;
-        Some(rc.right - rc.left)
     }
 }
 
@@ -566,19 +479,4 @@ fn settings_path() -> Option<PathBuf> {
         s.ok()?
     };
     Some(PathBuf::from(dir).join("light-view").join("settings.toml"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn too_large_error_names_the_size() {
-        let e = DecodeError::TooLarge {
-            width: 30000,
-            height: 20000,
-        };
-        assert_eq!(error_message(&e), "너무 커서 열 수 없어요 (30000×20000)");
-        assert_eq!(error_message(&DecodeError::Unsupported), CANNOT_OPEN);
-    }
 }

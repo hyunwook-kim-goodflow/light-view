@@ -54,6 +54,23 @@ fn same_path(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
+/// The first supported image file (sub-folders are skipped) of `dir` in Explorer order.
+pub fn first_supported_in(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut first: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() || !is_supported_extension(&path) {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default();
+        if first.as_ref().is_none_or(|f| natural_cmp(name, f.file_name().unwrap_or_default()).is_lt()) {
+            first = Some(path);
+        }
+    }
+    Ok(first)
+}
+
 /// Supported image files of one folder, sorted like Explorer, with a cursor.
 #[derive(Debug, Clone, Default)]
 pub struct FolderList {
@@ -204,6 +221,16 @@ mod tests {
         let f = PathBuf::from(dir.path().join("a.jpg").to_string_lossy().replace("\\", "/"));
         let l = FolderList::scan(&f).unwrap();
         assert_eq!(l.position(), Some((1, 2)));
+    }
+    #[test]
+    fn first_supported_in_uses_explorer_order_and_skips_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["10.jpg", "2.png", "1.txt"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        std::fs::create_dir(dir.path().join("1.jpg")).unwrap();
+        let first = first_supported_in(dir.path()).unwrap();
+        assert_eq!(first.as_deref(), Some(dir.path().join("2.png").as_path()));
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(first_supported_in(empty.path()).unwrap(), None);
     }
     #[test]
     fn scan_with_relative_path_has_no_duplicate() {

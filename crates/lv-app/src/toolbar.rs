@@ -76,8 +76,8 @@ impl ToolButton {
         }
     }
 
-    /// Whether the button acts in this build. Rotation is enabled by Task 10;
-    /// Save, EXIF and Delete by M3/M4. Disabled buttons are drawn in ink2.
+    /// Whether the button acts in this build. Save, EXIF and Delete arrive in M3/M4.
+    /// Disabled buttons are drawn in ink2.
     pub fn enabled(self) -> bool {
         matches!(
             self,
@@ -85,6 +85,8 @@ impl ToolButton {
                 | ToolButton::Next
                 | ToolButton::ZoomOut
                 | ToolButton::ZoomIn
+                | ToolButton::RotateLeft
+                | ToolButton::RotateRight
                 | ToolButton::Pin
         )
     }
