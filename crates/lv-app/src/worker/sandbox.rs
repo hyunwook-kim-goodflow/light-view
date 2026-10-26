@@ -82,11 +82,14 @@ pub fn log(msg: &str) {
     eprintln!("light-view: worker: {msg}");
 }
 
-/// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox.
+/// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox. With `mitigations`
+/// false the best-effort creation attributes (win32k lockdown, child process policy) are
+/// left out; the mandatory layers are always applied.
 pub fn spawn(
     exe: &Path,
     max_pixels: u64,
     extra_args: &[&str],
+    mitigations: bool,
 ) -> Result<(Sandboxed, Pipes), String> {
     let token = low_integrity_token().map_err(|e| format!("low integrity token: {e}"))?;
     let job = create_job(max_pixels).map_err(|e| format!("job object: {e}"))?;
@@ -102,14 +105,15 @@ pub fn spawn(
     let child_ends = [raw(&stdin_child), raw(&stdout_child), raw(&stderr_child)];
 
     let launch = Launch::new(exe, max_pixels, extra_args)?;
-    let info = match launch.create(&token, child_ends, true) {
+    let info = match launch.create(&token, child_ends, mitigations) {
         Ok(info) => info,
-        Err(e) => {
+        Err(e) if mitigations => {
             log(&format!(
                 "start with mitigation attributes failed ({e}); retrying without"
             ));
             launch.create(&token, child_ends, false)?
         }
+        Err(e) => return Err(e),
     };
     // The child holds its own copies now; ours would keep the pipes open after it dies.
     drop((stdin_child, stdout_child, stderr_child));
@@ -399,13 +403,19 @@ impl AttributeList {
                 &mut size,
             )
         };
-        let mut list = AttributeList {
-            buf: vec![0; size.div_ceil(std::mem::size_of::<usize>())],
-        };
+        let mut buf = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
         // SAFETY: `buf` holds at least `size` writable bytes.
-        unsafe { InitializeProcThreadAttributeList(list.as_ptr(), count, 0, &mut size) }
-            .map_err(|e| format!("InitializeProcThreadAttributeList: {e}"))?;
-        Ok(list)
+        unsafe {
+            InitializeProcThreadAttributeList(
+                LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr().cast()),
+                count,
+                0,
+                &mut size,
+            )
+        }
+        .map_err(|e| format!("InitializeProcThreadAttributeList: {e}"))?;
+        // Only an initialized list gets the Drop that deletes it.
+        Ok(AttributeList { buf })
     }
 
     fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {

@@ -355,10 +355,22 @@ fn test_mode_hang_never_answers() {
     assert!(w.child.try_wait().unwrap().is_none(), "hang mode exited");
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn test_mode_die_at_start_exits_without_reading() {
+    let mut w = Worker::spawn(&["--max-pixels", "1000", "--test-mode=die-at-start"]);
+    assert_eq!(w.wait().code(), Some(3));
+    assert!(w.rest_of_stdout().is_empty());
+}
+
 #[cfg(not(debug_assertions))]
 #[test]
 fn test_mode_is_rejected_in_release() {
-    for mode in ["--test-mode=crash", "--test-mode=hang"] {
+    for mode in [
+        "--test-mode=crash",
+        "--test-mode=hang",
+        "--test-mode=die-at-start",
+    ] {
         let mut w = Worker::spawn(&["--max-pixels", "1000", mode]);
         assert_eq!(w.wait().code(), Some(2), "{mode}");
     }

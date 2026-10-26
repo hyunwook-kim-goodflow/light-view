@@ -5,13 +5,18 @@
 //! the worker's reader thread (ruling R4): if no matching answer arrives within the timeout
 //! (10 s), or the worker dies or breaks the protocol, its Job is terminated, the slot is
 //! emptied and the call fails with `Corrupt("작업자가 응답하지 않아요")`; the next call starts
-//! a fresh worker. A slot whose worker fails to start three times in a row gives up; once
-//! every slot has, `decode_heif` answers `Unsupported` at once.
+//! a fresh worker.
+//!
+//! A worker counts as started only once it has given a valid answer: failing to spawn, or
+//! dying, hanging or breaking the protocol on its first request, is a start failure. After
+//! one, the slot starts its workers without the best-effort creation mitigations (in case
+//! they are what kills the worker); after three in a row it gives up. Once every slot has,
+//! `decode_heif` answers `Unsupported` at once.
 
 mod sandbox;
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -29,6 +34,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
 const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
+/// Longest worker stderr line copied into the log, in bytes.
+const MAX_LOG_LINE: usize = 4096;
 
 type Decoded = (u32, u32, Vec<u8>);
 
@@ -38,6 +45,8 @@ pub struct WorkerPool {
     timeout: Duration,
     /// Extra arguments for each slot's first worker only (test fault injection).
     first_args: Vec<String>,
+    /// Extra arguments for every worker (test fault injection).
+    every_args: Vec<String>,
     state: Mutex<PoolState>,
     slot_freed: Condvar,
     next_id: AtomicU64,
@@ -52,12 +61,17 @@ struct PoolState {
 #[derive(Default)]
 struct Slot {
     worker: Option<Worker>,
+    /// Consecutive start failures; reset by a worker's first valid answer.
     spawn_failures: u32,
     started_once: bool,
+    /// Workers start without the best-effort mitigations (after a start failure).
+    degraded: bool,
 }
 
 struct Worker {
     sandboxed: Sandboxed,
+    /// Has given at least one valid answer, so it counts as started.
+    answered: bool,
     requests: Sender<Request>,
     responses: Receiver<Result<Option<Response>, IpcError>>,
 }
@@ -66,7 +80,7 @@ impl WorkerPool {
     /// Starts `size` workers right away. Never panics: failures are logged and recorded in
     /// the slots, and later calls retry.
     pub fn start(exe: PathBuf, size: usize, max_pixels: u64) -> WorkerPool {
-        Self::start_with(exe, size, max_pixels, DEFAULT_TIMEOUT, &[])
+        Self::start_with(exe, size, max_pixels, DEFAULT_TIMEOUT, &[], &[])
     }
 
     fn start_with(
@@ -75,12 +89,14 @@ impl WorkerPool {
         max_pixels: u64,
         timeout: Duration,
         first_args: &[&str],
+        every_args: &[&str],
     ) -> WorkerPool {
         let pool = WorkerPool {
             exe,
             max_pixels,
             timeout,
             first_args: first_args.iter().map(|a| a.to_string()).collect(),
+            every_args: every_args.iter().map(|a| a.to_string()).collect(),
             state: Mutex::new(PoolState {
                 idle: Vec::with_capacity(size),
                 live: size,
@@ -154,24 +170,24 @@ impl WorkerPool {
     }
 
     fn try_spawn(&self, slot: &mut Slot) {
-        let args: Vec<&str> = if slot.started_once {
-            Vec::new()
+        let first = if slot.started_once {
+            &[][..]
         } else {
-            self.first_args.iter().map(String::as_str).collect()
+            &self.first_args[..]
         };
-        match Worker::start(&self.exe, self.max_pixels, &args) {
+        let args: Vec<&str> = first
+            .iter()
+            .chain(&self.every_args)
+            .map(String::as_str)
+            .collect();
+        match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded) {
             Ok(worker) => {
                 slot.worker = Some(worker);
                 slot.started_once = true;
-                slot.spawn_failures = 0;
             }
             Err(e) => {
-                slot.spawn_failures += 1;
-                log(&format!(
-                    "cannot start {} (attempt {}): {e}",
-                    self.exe.display(),
-                    slot.spawn_failures
-                ));
+                let why = format!("cannot start {}: {e}", self.exe.display());
+                start_failed(slot, &why);
             }
         }
     }
@@ -179,7 +195,7 @@ impl WorkerPool {
     /// Sends one request to the slot's worker and waits for its answer. Anything other than
     /// a matching answer ends the worker.
     fn request(&self, slot: &mut Slot, data: Vec<u8>) -> Result<Decoded, DecodeError> {
-        let Some(worker) = slot.worker.as_ref() else {
+        let Some(worker) = slot.worker.as_mut() else {
             return Err(DecodeError::Corrupt(NOT_RESPONDING.into()));
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -201,12 +217,26 @@ impl WorkerPool {
                 Err(RecvTimeoutError::Disconnected) => Err("the reader thread is gone".to_string()),
             }
         };
-        let pid = worker.sandboxed.pid;
-        outcome.unwrap_or_else(|why| {
-            log(&format!("worker {pid} dropped: {why}"));
-            slot.worker = None; // terminates its Job
-            Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
-        })
+        match outcome {
+            Ok(result) => {
+                worker.answered = true;
+                slot.spawn_failures = 0;
+                result
+            }
+            Err(why) => {
+                let (pid, answered) = (worker.sandboxed.pid, worker.answered);
+                slot.worker = None; // terminates its Job
+                if answered {
+                    log(&format!("worker {pid} dropped: {why}"));
+                } else {
+                    start_failed(
+                        slot,
+                        &format!("worker {pid} failed its first request: {why}"),
+                    );
+                }
+                Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
+            }
+        }
     }
 
     /// Maps the answer to request `id`; `Err` means the worker broke the protocol.
@@ -247,6 +277,29 @@ impl WorkerPool {
                 job: windows::Win32::Foundation::HANDLE(w.sandboxed.job.as_raw_handle()),
             })
             .collect()
+    }
+
+    /// (consecutive start failures, degraded) of every idle slot.
+    #[cfg(test)]
+    fn slot_states(&self) -> Vec<(u32, bool)> {
+        self.lock()
+            .idle
+            .iter()
+            .map(|slot| (slot.spawn_failures, slot.degraded))
+            .collect()
+    }
+}
+
+/// Records a failed start; the slot's next workers go without the best-effort mitigations.
+fn start_failed(slot: &mut Slot, why: &str) {
+    slot.spawn_failures += 1;
+    log(&format!(
+        "start failure {} of {MAX_SPAWN_FAILURES}: {why}",
+        slot.spawn_failures
+    ));
+    if !slot.degraded {
+        slot.degraded = true;
+        log("this slot now starts workers without win32k lockdown and the child process policy");
     }
 }
 
@@ -290,8 +343,13 @@ fn response_cap(max_pixels: u64) -> u64 {
 impl Worker {
     /// Spawns a sandboxed worker with its stderr, reader and writer threads. The threads end
     /// when the process does (its pipes close) or the `Worker` is dropped.
-    fn start(exe: &Path, max_pixels: u64, args: &[&str]) -> Result<Worker, String> {
-        let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args)?;
+    fn start(
+        exe: &Path,
+        max_pixels: u64,
+        args: &[&str],
+        mitigations: bool,
+    ) -> Result<Worker, String> {
+        let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args, mitigations)?;
         let pid = sandboxed.pid;
         let named = |what: &str| thread::Builder::new().name(format!("lv-worker {pid} {what}"));
 
@@ -328,6 +386,7 @@ impl Worker {
 
         Ok(Worker {
             sandboxed,
+            answered: false,
             requests,
             responses,
         })
@@ -336,13 +395,55 @@ impl Worker {
 
 /// Copies the worker's diagnostics into the app's log so the pipe never fills up.
 fn drain_stderr(pid: u32, stderr: File) {
-    let mut reader = BufReader::new(stderr);
-    let mut line = Vec::new();
-    while matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
-        let text = String::from_utf8_lossy(&line);
-        log(&format!("lv-worker {pid}: {}", text.trim_end()));
-        line.clear();
+    for_each_log_line(stderr, |line| log(&format!("lv-worker {pid}: {line}")));
+}
+
+/// Splits untrusted `input` into log lines with bounded memory: each line keeps at most
+/// [`MAX_LOG_LINE`] bytes (the rest up to the next newline is dropped and the line marked
+/// `[truncated]`), and control characters are escaped so the worker cannot forge log lines.
+fn for_each_log_line(mut input: impl Read, mut emit: impl FnMut(String)) {
+    let mut chunk = [0u8; 4096];
+    let mut line = Vec::with_capacity(MAX_LOG_LINE);
+    let mut truncated = false;
+    loop {
+        let n = match input.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        for &byte in &chunk[..n] {
+            if byte == b'\n' {
+                emit(log_line(&line, truncated));
+                line.clear();
+                truncated = false;
+            } else if line.len() < MAX_LOG_LINE {
+                line.push(byte);
+            } else {
+                truncated = true;
+            }
+        }
     }
+    if !line.is_empty() || truncated {
+        emit(log_line(&line, truncated));
+    }
+}
+
+fn log_line(bytes: &[u8], truncated: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.strip_suffix('\r').unwrap_or(&text);
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    if truncated {
+        out.push_str(" [truncated]");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -554,6 +655,7 @@ mod tests {
             MAX_PIXELS,
             Duration::from_secs(10),
             &["--test-mode=crash"],
+            &[],
         );
         let crashed = Process::open(single_worker(&pool).pid);
         assert_not_responding(pool.decode_heif(sample()));
@@ -569,6 +671,7 @@ mod tests {
             MAX_PIXELS,
             Duration::from_secs(1),
             &["--test-mode=hang"],
+            &[],
         );
         let hung = Process::open(single_worker(&pool).pid);
         let start = Instant::now();
@@ -619,5 +722,77 @@ mod tests {
             Err(DecodeError::Unsupported)
         ));
         assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn worker_dying_at_start_gives_up_after_three_attempts() {
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            1,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &[],
+            &["--test-mode=die-at-start"],
+        );
+        // Spawning succeeds every time, but no worker ever answers.
+        for attempt in 1..=3 {
+            assert_not_responding(pool.decode_heif(sample()));
+            assert_eq!(pool.slot_states(), vec![(attempt, true)]);
+        }
+        assert!(matches!(
+            pool.decode_heif(sample()),
+            Err(DecodeError::Unsupported)
+        ));
+        assert!(pool.slot_states().is_empty(), "the slot gave up");
+    }
+
+    #[test]
+    fn first_answer_resets_start_failures() {
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            1,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &["--test-mode=crash"],
+            &[],
+        );
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        assert_not_responding(pool.decode_heif(sample()));
+        assert_eq!(pool.slot_states(), vec![(1, true)]);
+        assert_decodes(&pool);
+        assert_eq!(pool.slot_states(), vec![(0, true)]);
+
+        // The replacement started without the best-effort win32k lockdown.
+        let process = Process::open(single_worker(&pool).pid);
+        let mut flags = 0u32;
+        // SAFETY: ProcessSystemCallDisablePolicy is a single flags DWORD.
+        unsafe {
+            GetProcessMitigationPolicy(
+                process.0,
+                ProcessSystemCallDisablePolicy,
+                std::ptr::from_mut(&mut flags).cast(),
+                4,
+            )
+        }
+        .expect("GetProcessMitigationPolicy");
+        assert_eq!(flags & 1, 0, "degraded slot still sets win32k lockdown");
+    }
+
+    #[test]
+    fn log_lines_are_bounded_and_escaped() {
+        let mut input = b"a\nb\r\n".to_vec();
+        input.extend(std::iter::repeat_n(b'x', 3 * MAX_LOG_LINE));
+        input.extend(b"\nc\x1b[31m\rforged\nlast");
+        let mut lines = Vec::new();
+        for_each_log_line(&input[..], |line| lines.push(line));
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert_eq!(lines[0], "a");
+        assert_eq!(lines[1], "b");
+        assert_eq!(
+            lines[2],
+            format!("{} [truncated]", "x".repeat(MAX_LOG_LINE))
+        );
+        assert_eq!(lines[3], "c\\u{1b}[31m\\rforged");
+        assert_eq!(lines[4], "last");
     }
 }
