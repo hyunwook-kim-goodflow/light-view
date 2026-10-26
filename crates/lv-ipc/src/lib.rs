@@ -27,6 +27,19 @@
 //! - `0x82` `Failed`: `id: u64 | tag: u8 | fields`, with tag `0` `TooLarge`
 //!   (`width: u32 | height: u32`), tag `1` `Corrupt` (string), tag `2` `Unsupported` (none).
 //!
+//! # Reading
+//!
+//! `read_request`/`read_response` take a `max_payload` cap; frames with `len` above
+//! `min(max_payload, MAX_PAYLOAD)` are rejected with `TooLong` before any payload is read.
+//! Callers should pass the largest payload they can legitimately expect (for the app, about
+//! `max_pixels * 4 + 16`; for the worker, its memory budget). A clean EOF exactly at a frame
+//! boundary yields `Ok(None)`; EOF anywhere else is `Io(UnexpectedEof)` ("the pipe died").
+//! A payload shorter than its kind's fixed fields is `Malformed`.
+//!
+//! Any read error leaves the stream desynchronized: the caller must drop the stream (restart the
+//! worker) rather than try to read another frame. Wrap pipes in `BufWriter`/`BufReader` to avoid
+//! many tiny syscalls.
+//!
 //! # Corrupt message policy
 //!
 //! Writers truncate the message to at most [`MAX_CORRUPT_LEN`] (4 KiB) bytes on a char boundary.
@@ -114,8 +127,8 @@ impl From<io::Error> for IpcError {
     }
 }
 
-fn check_len(len: u64) -> Result<(), IpcError> {
-    if len > MAX_PAYLOAD {
+fn check_len(len: u64, max_payload: u64) -> Result<(), IpcError> {
+    if len > max_payload.min(MAX_PAYLOAD) {
         Err(IpcError::TooLong(len))
     } else {
         Ok(())
@@ -137,48 +150,66 @@ fn write_frame(w: &mut impl Write, kind: u8, len: u64) -> io::Result<()> {
     w.write_all(&header)
 }
 
-/// Reads and validates the frame header; returns `(kind, len)`.
-fn read_header(r: &mut impl Read) -> Result<(u8, u64), IpcError> {
+/// Reads and validates the frame header; returns `None` on a clean EOF (zero bytes of the
+/// next header available), `(kind, len)` otherwise.
+fn read_header(r: &mut impl Read, max_payload: u64) -> Result<Option<(u8, u64)>, IpcError> {
     let mut header = [0u8; 13];
-    r.read_exact(&mut header)?;
+    let mut filled = 0;
+    while filled < header.len() {
+        match r.read(&mut header[filled..]) {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(IpcError::Io(io::ErrorKind::UnexpectedEof.into())),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     if header[..4] != MAGIC {
         return Err(IpcError::BadMagic);
     }
     let len = u64::from_le_bytes(header[5..].try_into().expect("8 bytes"));
-    check_len(len)?;
-    Ok((header[4], len))
+    check_len(len, max_payload)?;
+    Ok(Some((header[4], len)))
 }
 
-fn read_u8(r: &mut impl Read) -> Result<u8, IpcError> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b)?;
-    Ok(b[0])
-}
+type Payload<'a, R> = io::Take<&'a mut R>;
 
-fn read_u32(r: &mut impl Read) -> Result<u32, IpcError> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b)?;
-    Ok(u32::from_le_bytes(b))
-}
-
-fn read_u64(r: &mut impl Read) -> Result<u64, IpcError> {
-    let mut b = [0u8; 8];
-    r.read_exact(&mut b)?;
-    Ok(u64::from_le_bytes(b))
-}
-
-/// Reads exactly `n` bytes, allocating only as data actually arrives.
-fn read_exact_vec(r: &mut impl Read, n: u64) -> Result<Vec<u8>, IpcError> {
-    let mut buf = Vec::new();
-    let got = r.take(n).read_to_end(&mut buf)?;
-    if got as u64 != n {
-        return Err(IpcError::Io(io::ErrorKind::UnexpectedEof.into()));
+/// Reads `N` fixed bytes; a payload too short for them is `Malformed`, not an I/O error.
+fn read_fixed<const N: usize, R: Read>(p: &mut Payload<'_, R>) -> Result<[u8; N], IpcError> {
+    if p.limit() < N as u64 {
+        return Err(IpcError::Malformed("payload shorter than fixed fields"));
     }
+    let mut b = [0u8; N];
+    p.read_exact(&mut b)?;
+    Ok(b)
+}
+
+fn read_u8<R: Read>(p: &mut Payload<'_, R>) -> Result<u8, IpcError> {
+    Ok(read_fixed::<1, R>(p)?[0])
+}
+
+fn read_u32<R: Read>(p: &mut Payload<'_, R>) -> Result<u32, IpcError> {
+    Ok(u32::from_le_bytes(read_fixed(p)?))
+}
+
+fn read_u64<R: Read>(p: &mut Payload<'_, R>) -> Result<u64, IpcError> {
+    Ok(u64::from_le_bytes(read_fixed(p)?))
+}
+
+/// Reads exactly `n` bytes into a buffer allocated once (`n` must already be bounded by the
+/// validated frame length). Allocation failure is `Io(OutOfMemory)`.
+fn read_exact_vec<R: Read>(p: &mut Payload<'_, R>, n: u64) -> Result<Vec<u8>, IpcError> {
+    let n = usize::try_from(n).map_err(|_| IpcError::Io(io::ErrorKind::OutOfMemory.into()))?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(n)
+        .map_err(|_| IpcError::Io(io::ErrorKind::OutOfMemory.into()))?;
+    buf.resize(n, 0);
+    p.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn expect_consumed(payload: &io::Take<&mut impl Read>) -> Result<(), IpcError> {
-    if payload.limit() != 0 {
+fn expect_consumed<R: Read>(p: &Payload<'_, R>) -> Result<(), IpcError> {
+    if p.limit() != 0 {
         return Err(IpcError::Malformed("trailing bytes in payload"));
     }
     Ok(())
@@ -203,8 +234,11 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
     }
 }
 
-pub fn read_request(r: &mut impl Read) -> Result<Request, IpcError> {
-    let (kind, len) = read_header(r)?;
+/// Reads one request; `Ok(None)` means clean EOF at a frame boundary.
+pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Request>, IpcError> {
+    let Some((kind, len)) = read_header(r, max_payload)? else {
+        return Ok(None);
+    };
     let mut p = r.by_ref().take(len);
     match kind {
         KIND_DECODE_HEIF => {
@@ -212,15 +246,15 @@ pub fn read_request(r: &mut impl Read) -> Result<Request, IpcError> {
             let max_pixels = read_u64(&mut p)?;
             let rest = p.limit();
             let data = read_exact_vec(&mut p, rest)?;
-            Ok(Request::DecodeHeif {
+            Ok(Some(Request::DecodeHeif {
                 id,
                 max_pixels,
                 data,
-            })
+            }))
         }
         KIND_SHUTDOWN => {
             expect_consumed(&p)?;
-            Ok(Request::Shutdown)
+            Ok(Some(Request::Shutdown))
         }
         KIND_IMAGE | KIND_FAILED => {
             Err(IpcError::Malformed("response kind where request expected"))
@@ -287,8 +321,11 @@ pub fn write_response(w: &mut impl Write, r: &Response) -> io::Result<()> {
     }
 }
 
-pub fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
-    let (kind, len) = read_header(r)?;
+/// Reads one response; `Ok(None)` means clean EOF at a frame boundary.
+pub fn read_response(r: &mut impl Read, max_payload: u64) -> Result<Option<Response>, IpcError> {
+    let Some((kind, len)) = read_header(r, max_payload)? else {
+        return Ok(None);
+    };
     let mut p = r.by_ref().take(len);
     match kind {
         KIND_IMAGE => {
@@ -310,12 +347,12 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
                 ));
             }
             let bgra = read_exact_vec(&mut p, expected)?;
-            Ok(Response::Image {
+            Ok(Some(Response::Image {
                 id,
                 width,
                 height,
                 bgra,
-            })
+            }))
         }
         KIND_FAILED => {
             let id = read_u64(&mut p)?;
@@ -331,7 +368,7 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
                         return Err(IpcError::Malformed("corrupt message too long"));
                     }
                     if n > p.limit() {
-                        return Err(IpcError::Io(io::ErrorKind::UnexpectedEof.into()));
+                        return Err(IpcError::Malformed("string longer than payload"));
                     }
                     let bytes = read_exact_vec(&mut p, n)?;
                     let msg = String::from_utf8(bytes)
@@ -342,7 +379,7 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
                 _ => return Err(IpcError::Malformed("unknown fail tag")),
             };
             expect_consumed(&p)?;
-            Ok(Response::Failed { id, kind })
+            Ok(Some(Response::Failed { id, kind }))
         }
         KIND_DECODE_HEIF | KIND_SHUTDOWN => {
             Err(IpcError::Malformed("request kind where response expected"))
@@ -355,6 +392,17 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    // Strict wrappers: clean EOF is reported as UnexpectedEof so older tests stay terse.
+    fn read_request(r: &mut impl Read) -> Result<Request, IpcError> {
+        super::read_request(r, MAX_PAYLOAD)?
+            .ok_or(IpcError::Io(io::ErrorKind::UnexpectedEof.into()))
+    }
+
+    fn read_response(r: &mut impl Read) -> Result<Response, IpcError> {
+        super::read_response(r, MAX_PAYLOAD)?
+            .ok_or(IpcError::Io(io::ErrorKind::UnexpectedEof.into()))
+    }
 
     fn frame(kind: u8, len: u64, payload: &[u8]) -> Vec<u8> {
         let mut v = MAGIC.to_vec();
@@ -471,15 +519,16 @@ mod tests {
 
     #[test]
     fn max_payload_boundary() {
-        assert!(check_len(MAX_PAYLOAD).is_ok());
-        assert!(check_len(0).is_ok());
+        assert!(check_len(MAX_PAYLOAD, MAX_PAYLOAD).is_ok());
+        assert!(check_len(0, MAX_PAYLOAD).is_ok());
         assert!(matches!(
-            check_len(MAX_PAYLOAD + 1),
+            check_len(MAX_PAYLOAD + 1, u64::MAX),
             Err(IpcError::TooLong(_))
         ));
-        // A frame of exactly MAX_PAYLOAD passes the header check and only then hits EOF.
-        let bytes = frame(1, MAX_PAYLOAD, &[0; 16]);
-        match read_request(&mut Cursor::new(bytes)) {
+        // A frame of exactly the cap passes the header check and only then hits EOF
+        // (small cap here so the test does not allocate 1 GiB).
+        let bytes = frame(1, 4096, &[0; 16]);
+        match super::read_request(&mut Cursor::new(bytes), 4096) {
             Err(IpcError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
             other => panic!("expected UnexpectedEof, got {other:?}"),
         }
@@ -691,5 +740,89 @@ mod tests {
             read_response(&mut Cursor::new(bytes)),
             Err(IpcError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn caller_cap_enforced_for_both_directions() {
+        let req = req_bytes(&Request::DecodeHeif {
+            id: 1,
+            max_pixels: 1,
+            data: vec![0; 100],
+        });
+        assert!(matches!(
+            super::read_request(&mut Cursor::new(&req), 115),
+            Err(IpcError::TooLong(116))
+        ));
+        assert!(super::read_request(&mut Cursor::new(&req), 116)
+            .unwrap()
+            .is_some());
+        let resp = resp_bytes(&Response::Image {
+            id: 1,
+            width: 5,
+            height: 5,
+            bgra: vec![0; 100],
+        });
+        assert!(matches!(
+            super::read_response(&mut Cursor::new(&resp), 100),
+            Err(IpcError::TooLong(116))
+        ));
+        assert!(super::read_response(&mut Cursor::new(&resp), 116)
+            .unwrap()
+            .is_some());
+        // Cap above MAX_PAYLOAD is clamped to it.
+        let bytes = frame(0x81, MAX_PAYLOAD + 1, &[]);
+        assert!(matches!(
+            super::read_response(&mut Cursor::new(bytes), u64::MAX),
+            Err(IpcError::TooLong(_))
+        ));
+    }
+
+    #[test]
+    fn clean_eof_is_none_but_truncation_is_error() {
+        assert!(
+            super::read_request(&mut Cursor::new(Vec::new()), MAX_PAYLOAD)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            super::read_response(&mut Cursor::new(Vec::new()), MAX_PAYLOAD)
+                .unwrap()
+                .is_none()
+        );
+        let mut c = Cursor::new(req_bytes(&Request::Shutdown));
+        assert!(super::read_request(&mut c, MAX_PAYLOAD).unwrap().is_some());
+        assert!(super::read_request(&mut c, MAX_PAYLOAD).unwrap().is_none());
+        for cut in [1, 4, 12] {
+            let bytes = req_bytes(&Request::Shutdown);
+            match super::read_request(&mut Cursor::new(&bytes[..cut]), MAX_PAYLOAD) {
+                Err(IpcError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+                other => panic!("cut {cut}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn payload_shorter_than_fixed_fields_is_malformed() {
+        for p in [&[][..], &[0u8; 15][..]] {
+            let bytes = frame(1, p.len() as u64, p);
+            assert!(matches!(
+                read_request(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        for p in [&[][..], &[0u8; 15][..]] {
+            let bytes = frame(0x81, p.len() as u64, p);
+            assert!(matches!(
+                read_response(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        for p in [&[][..], &[0u8; 8][..], &failed_payload(1, 0, &[0; 4])[..]] {
+            let bytes = frame(0x82, p.len() as u64, p);
+            assert!(matches!(
+                read_response(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
     }
 }
