@@ -1,6 +1,7 @@
 //! Background prefetching of decoded images with cancellation and a memory budget.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -207,7 +208,11 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
             }
         };
 
-        let result: DecodeResult = Arc::new(decoder.decode(&path));
+        // A panicking decoder must not kill the worker or leave `path` in flight forever.
+        let result: DecodeResult = Arc::new(
+            catch_unwind(AssertUnwindSafe(|| decoder.decode(&path)))
+                .unwrap_or_else(|_| Err(DecodeError::Corrupt("decoder panicked".into()))),
+        );
 
         let inserted = {
             let mut st = shared.lock();
@@ -446,6 +451,35 @@ mod tests {
         assert_eq!(h.wait_ready(1), vec![p("c")]);
         assert_eq!(h.ready_count.load(Ordering::SeqCst), 3);
         assert_eq!(h.calls.lock().unwrap().len(), 3);
+    }
+
+    /// Panics for "boom", decodes everything else.
+    struct PanickingDecoder;
+
+    impl Decode for PanickingDecoder {
+        fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError> {
+            assert!(path != Path::new("boom"), "decoder blew up");
+            Ok(one_px())
+        }
+    }
+
+    #[test]
+    fn panicking_decoder_yields_an_error_and_the_worker_goes_on() {
+        let (tx, ready) = channel();
+        let tx = Mutex::new(tx);
+        let prefetcher = Prefetcher::new(PanickingDecoder, 1, u64::MAX, move |path| {
+            let _ = tx.lock().unwrap().send(path);
+        });
+        prefetcher.request(&[p("boom")]);
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), p("boom"));
+        let got = prefetcher
+            .get(&p("boom"))
+            .expect("the panic is cached as an error");
+        assert!(matches!(got.as_ref(), Err(DecodeError::Corrupt(m)) if m == "decoder panicked"));
+        // The single worker survived and serves the next request.
+        prefetcher.request(&[p("next")]);
+        assert_eq!(ready.recv_timeout(WAIT).unwrap(), p("next"));
+        assert!(prefetcher.get(&p("next")).unwrap().is_ok());
     }
 
     #[test]
