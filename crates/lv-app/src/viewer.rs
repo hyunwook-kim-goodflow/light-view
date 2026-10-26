@@ -11,6 +11,8 @@ use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
 
 pub const CANNOT_OPEN: &str = "이 사진은 열 수 없어요";
+/// Followed by the pixel size when it is known.
+const TOO_LARGE: &str = "너무 커서 열 수 없어요";
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
 const MIN_DELAY_MS: u32 = 20;
 const DEFAULT_DELAY_MS: u32 = 100;
@@ -72,13 +74,17 @@ pub struct Viewer {
     touched: bool,
     /// The current photo has been pending longer than the loading delay.
     loading: bool,
+    /// A move came back to the photo still on screen; its animation timer, stopped
+    /// while another photo was pending, must be restarted (the generation did not change).
+    rearm_animation: bool,
 }
 
 pub fn error_message(e: &DecodeError) -> String {
     match e {
         DecodeError::TooLarge { width, height } => {
-            format!("너무 커서 열 수 없어요 ({width}×{height})")
+            format!("{TOO_LARGE} ({width}×{height})")
         }
+        DecodeError::FileTooLarge { .. } => TOO_LARGE.to_owned(),
         _ => CANNOT_OPEN.to_owned(),
     }
 }
@@ -135,6 +141,7 @@ impl Viewer {
             dip: 1.0,
             touched: false,
             loading: false,
+            rearm_animation: false,
         }
     }
 
@@ -265,7 +272,18 @@ impl Viewer {
             .map(Path::to_path_buf)
             .collect();
         self.prefetcher.request(&self.wanted);
-        self.show_current();
+        match &self.shown {
+            // Back on the photo still on screen (the move away never finished): take up
+            // its rotation again, drop the loading note and restart its animation.
+            Some(s) if self.showing_current() => {
+                self.quarters = s.quarters;
+                self.loading = false;
+                self.rearm_animation = true;
+            }
+            _ => {
+                self.show_current();
+            }
+        }
         Redraw::Full
     }
 
@@ -348,6 +366,12 @@ impl Viewer {
         if let Some(s) = &mut self.shown {
             s.content = Content::Message(error_message(&DecodeError::TooLarge { width, height }));
         }
+    }
+
+    /// True once after a move returned to the photo still on screen: restart the
+    /// animation timer with `frame_delay`.
+    pub fn take_animation_rearm(&mut self) -> bool {
+        std::mem::take(&mut self.rearm_animation)
     }
 
     pub fn view_rotation_quarters(&self) -> u8 {
@@ -642,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn next_then_prev_on_a_still_pending_photo_restores_the_shown_one() {
+        let (mut v, rx, release) = gated_viewer_at("c.jpg", "d.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        let generation = v.generation();
+        assert!(!v.take_animation_rearm());
+
+        v.apply(Command::Next);
+        assert_eq!(v.loading_overdue(), Redraw::Full);
+        assert!(v.loading());
+        // The animation timer stops while d is pending (advance_frame returns None).
+        assert_eq!(v.advance_frame(), None);
+
+        assert_eq!(v.apply(Command::Prev), Redraw::Full);
+        assert!(!v.pending());
+        assert!(!v.loading());
+        assert_eq!(v.view_rotation_quarters(), 1);
+        assert!(v.unsaved_rotation());
+        assert_eq!(v.title(), "c.jpg · 3 / 5 · 회전됨 · 저장 안 됨");
+        assert!(matches!(v.scene(), Scene::Image { quarters: 1, .. }));
+        // Same photo, so no new generation: the window must re-arm the timer itself.
+        assert_eq!(v.generation(), generation);
+        assert!(v.take_animation_rearm());
+        assert!(!v.take_animation_rearm());
+        // Rotating again turns from the restored rotation.
+        v.apply(Command::RotateRight);
+        assert_eq!(v.view_rotation_quarters(), 2);
+        drop(release);
+    }
+
+    #[test]
     fn too_large_error_names_the_size() {
         let e = DecodeError::TooLarge {
             width: 30000,
@@ -649,5 +704,9 @@ mod tests {
         };
         assert_eq!(error_message(&e), "너무 커서 열 수 없어요 (30000×20000)");
         assert_eq!(error_message(&DecodeError::Unsupported), CANNOT_OPEN);
+        assert_eq!(
+            error_message(&DecodeError::FileTooLarge { bytes: 1 << 40 }),
+            "너무 커서 열 수 없어요"
+        );
     }
 }

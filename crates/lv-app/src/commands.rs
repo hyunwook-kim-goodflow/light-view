@@ -52,10 +52,12 @@ impl HwndCell {
 }
 
 pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> Viewer {
-    let decoder = FileDecoder {
-        limits: DecodeLimits::default(),
-    };
     let budget = memory_budget(settings);
+    let decoder = FileDecoder {
+        limits: DecodeLimits {
+            max_pixels: max_pixels_for_budget(budget),
+        },
+    };
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
         let h = hwnd.0.load(Ordering::Acquire);
         if h != 0 {
@@ -66,6 +68,13 @@ pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> Viewer {
         }
     });
     Viewer::new(prefetcher)
+}
+
+/// The decode pixel limit for a prefetch memory budget. Decoding peaks at about twice
+/// the RGBA size (conversion or rotation copies) on each of `PREFETCH_WORKERS` (two)
+/// workers, so one image may use `budget / 8` pixels, capped at the decoder default.
+fn max_pixels_for_budget(budget: u64) -> u64 {
+    (budget / 8).min(DecodeLimits::default().max_pixels)
 }
 
 /// `memory_budget_mb` if set, else a quarter of physical memory, at most 2 GiB.
@@ -135,17 +144,23 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
 }
 
 /// After the viewer changed: title, toolbar tools (Save comes and goes), the loading
-/// timer and a repaint.
+/// and animation timers and a repaint.
 fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     if redraw == Redraw::None {
         return;
     }
-    let Ok((title, pending)) = app
-        .try_borrow()
-        .map(|a| (a.viewer.title(), a.viewer.pending()))
-    else {
+    let Ok((title, pending, rearm)) = app.try_borrow_mut().map(|mut a| {
+        let rearm = a
+            .viewer
+            .take_animation_rearm()
+            .then(|| a.viewer.frame_delay());
+        (a.viewer.title(), a.viewer.pending(), rearm)
+    }) else {
         return;
     };
+    if let Some(delay) = rearm {
+        set_animation_timer(hwnd, delay);
+    }
     // SAFETY: plain calls on our window; no App borrow is held (WM_SETTEXT re-enters).
     unsafe {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
@@ -251,5 +266,20 @@ fn first_dropped(drop: HDROP) -> Option<PathBuf> {
         let got = DragQueryFileW(drop, 0, Some(&mut buf));
         DragFinish(drop);
         (got > 0).then(|| PathBuf::from(OsString::from_wide(&buf[..got as usize])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_pixels_follow_the_memory_budget() {
+        // Peak ≈ 2 × RGBA (conversion/rotation) on each of two workers: budget / 8.
+        assert_eq!(max_pixels_for_budget(512 << 20), (512 << 20) / 8);
+        assert_eq!(max_pixels_for_budget(2 << 30), 268_435_456);
+        // Never above the decoder's own ceiling, however large the budget.
+        assert_eq!(max_pixels_for_budget(64 << 30), 268_435_456);
+        assert_eq!(max_pixels_for_budget(0), 0);
     }
 }

@@ -1,7 +1,7 @@
 //! Pure-Rust image decoding with EXIF orientation applied and size limits enforced.
 
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
@@ -62,7 +62,14 @@ impl Default for DecodeLimits {
 #[derive(Debug)]
 pub enum DecodeError {
     Unsupported,
-    TooLarge { width: u32, height: u32 },
+    TooLarge {
+        width: u32,
+        height: u32,
+    },
+    /// The file is larger than `max_file_bytes` allows; it was not read.
+    FileTooLarge {
+        bytes: u64,
+    },
     Corrupt(String),
     Io(std::io::Error),
 }
@@ -72,6 +79,7 @@ impl fmt::Display for DecodeError {
         match self {
             Self::Unsupported => write!(f, "unsupported image format"),
             Self::TooLarge { width, height } => write!(f, "image too large ({width}x{height})"),
+            Self::FileTooLarge { bytes } => write!(f, "file too large ({bytes} bytes)"),
             Self::Corrupt(msg) => write!(f, "corrupt image: {msg}"),
             Self::Io(e) => write!(f, "io error: {e}"),
         }
@@ -109,8 +117,42 @@ pub fn exif_orientation(bytes: &[u8]) -> u16 {
         .map_or(1, |v| v as u16)
 }
 
+/// Floor of the file size cap, so a small `max_pixels` never rejects ordinary files.
+pub const MIN_FILE_CAP: u64 = 64 << 20;
+
+/// Room for headers and metadata (EXIF, ICC, palettes) on top of the pixel data.
+const FILE_HEADROOM: u64 = 1 << 20;
+
+/// The largest file `decode_file` reads: the raw RGBA size of the largest allowed
+/// image (`max_pixels * 4`) plus `FILE_HEADROOM`, at least `MIN_FILE_CAP`. The
+/// supported formats store at most 4 bytes per pixel (uncompressed 32-bit BMP; the
+/// rest compress), so a real image within the pixel limit is never larger than this;
+/// anything larger is rejected before it is read into memory.
+pub fn max_file_bytes(limits: &DecodeLimits) -> u64 {
+    limits
+        .max_pixels
+        .saturating_mul(4)
+        .saturating_add(FILE_HEADROOM)
+        .max(MIN_FILE_CAP)
+}
+
+/// Sniffs the first `SNIFF_LEN` bytes before reading the rest: a non-image is
+/// `Unsupported` and a file over `max_file_bytes` is `FileTooLarge`, both unread.
 pub fn decode_file(path: &Path, limits: &DecodeLimits) -> Result<DecodedImage, DecodeError> {
-    let bytes = std::fs::read(path)?;
+    let mut file = std::fs::File::open(path)?;
+    let mut head = Vec::with_capacity(SNIFF_LEN);
+    (&mut file).take(SNIFF_LEN as u64).read_to_end(&mut head)?;
+    match sniff_format(&head) {
+        Some(f) if to_image_format(f).is_some() => {}
+        _ => return Err(DecodeError::Unsupported),
+    }
+    let len = file.metadata()?.len();
+    if len > max_file_bytes(limits) {
+        return Err(DecodeError::FileTooLarge { bytes: len });
+    }
+    let mut bytes = head;
+    bytes.reserve_exact(len.saturating_sub(SNIFF_LEN as u64) as usize);
+    file.read_to_end(&mut bytes)?;
     decode_bytes(&bytes, limits)
 }
 
@@ -400,6 +442,50 @@ mod tests {
             assert_eq!(&f.rgba[4..8], &[0, 0, 255, 255]);
         }
         assert_eq!(out[1].delay_ms, 20);
+    }
+    /// A file starting with `head`, extended to `len` bytes (the tail is zeros; the
+    /// file system allocates it without writing).
+    fn file_with(dir: &tempfile::TempDir, head: &[u8], len: u64) -> std::path::PathBuf {
+        let path = dir.path().join("f");
+        let f = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut &f, head).unwrap();
+        f.set_len(len).unwrap();
+        path
+    }
+    #[test]
+    fn file_cap_follows_max_pixels_with_a_floor() {
+        let cap = |max_pixels| max_file_bytes(&DecodeLimits { max_pixels });
+        assert_eq!(cap(1), MIN_FILE_CAP);
+        assert_eq!(cap(268_435_456), 268_435_456 * 4 + FILE_HEADROOM);
+        assert_eq!(cap(u64::MAX), u64::MAX);
+    }
+    #[test]
+    fn non_image_is_unsupported_before_its_size_is_considered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file_with(&dir, b"this is not an image header", MIN_FILE_CAP + 1);
+        let limits = DecodeLimits { max_pixels: 1 };
+        assert!(matches!(
+            decode_file(&path, &limits),
+            Err(DecodeError::Unsupported)
+        ));
+    }
+    #[test]
+    fn file_larger_than_the_cap_is_rejected_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = fixtures::png_2x1();
+        let limits = DecodeLimits { max_pixels: 1 };
+        let path = file_with(&dir, &png, MIN_FILE_CAP + 1);
+        match decode_file(&path, &limits) {
+            Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, MIN_FILE_CAP + 1),
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+        // Within the cap the file is read whole and decoded as before.
+        let path = file_with(&dir, &png, png.len() as u64);
+        let img = decode_file(&path, &DecodeLimits::default()).unwrap();
+        assert_eq!(
+            (img.width, img.height, img.byte_len),
+            (2, 1, png.len() as u64)
+        );
     }
     #[test]
     fn exif_orientation_defaults_to_1() {
