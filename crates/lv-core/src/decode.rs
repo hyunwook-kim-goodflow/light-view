@@ -173,7 +173,12 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             let mut dec = GifDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
             dec.set_limits(image_limits(limits)).map_err(corrupt)?;
             let icc = dec.icc_profile().map_err(corrupt)?;
-            let frames = collect_frames(dec.into_frames(), limits, width, height)?;
+            let frames = collect_frames(
+                dec.into_frames(),
+                limits.max_pixels.saturating_mul(4),
+                width,
+                height,
+            )?;
             Ok(finish(frames, width, height, icc))
         }
         ImageFormat::WebP => {
@@ -181,7 +186,12 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             dec.set_limits(image_limits(limits)).map_err(corrupt)?;
             let icc = dec.icc_profile().map_err(corrupt)?;
             if dec.has_animation() {
-                let frames = collect_frames(dec.into_frames(), limits, width, height)?;
+                let frames = collect_frames(
+                    dec.into_frames(),
+                    limits.max_pixels.saturating_mul(4),
+                    width,
+                    height,
+                )?;
                 let (frames, w, h) = orient_frames(frames, width, height, exif_orientation(bytes));
                 Ok(finish(frames, w, h, icc))
             } else {
@@ -224,20 +234,19 @@ fn orient_frames(frames: Vec<Frame>, w: u32, h: u32, orientation: u16) -> (Vec<F
     (frames, out_dims.0, out_dims.1)
 }
 
-/// Collect animation frames; total decoded bytes are capped at `max_pixels * 4`.
+/// Collect animation frames; total decoded bytes are capped at `budget_bytes` (callers pass `max_pixels * 4`).
 fn collect_frames(
     frames: image::Frames<'_>,
-    limits: &DecodeLimits,
+    budget_bytes: u64,
     width: u32,
     height: u32,
 ) -> Result<Vec<Frame>, DecodeError> {
-    let budget = limits.max_pixels.saturating_mul(4);
     let mut used: u64 = 0;
     let mut out = Vec::new();
     for f in frames {
         let f = f.map_err(|e| decode_err(e, width, height))?;
         used = used.saturating_add(f.buffer().as_raw().len() as u64);
-        if used > budget {
+        if used > budget_bytes {
             return Err(DecodeError::TooLarge { width, height });
         }
         let delay_ms = delay_ms(&f);
@@ -352,23 +361,23 @@ mod tests {
     }
     #[test]
     fn animation_total_frames_budget_enforced() {
+        // Call collect_frames directly with an unrestricted image decoder, so only the
+        // cumulative budget can trip. Each 8x8 frame is 256 bytes.
         let gif = fixtures::gif_n_frames(10, 8);
-        // One 8x8 frame (64 px) fits in 100 px; ten do not.
-        let tight = DecodeLimits { max_pixels: 100 };
+        let frames = |budget| {
+            let dec = GifDecoder::new(Cursor::new(&gif[..])).unwrap();
+            collect_frames(dec.into_frames(), budget, 8, 8)
+        };
+        // Budget of 3 frames: frames 1-3 are accepted, frame 4 trips the budget.
         assert!(matches!(
-            decode_bytes(&gif, &tight),
+            frames(3 * 256),
             Err(DecodeError::TooLarge {
                 width: 8,
                 height: 8
             })
         ));
-        assert_eq!(
-            decode_bytes(&gif, &DecodeLimits::default())
-                .unwrap()
-                .frames
-                .len(),
-            10
-        );
+        // Budget of all 10 frames: everything is accepted.
+        assert_eq!(frames(10 * 256).unwrap().len(), 10);
     }
     #[test]
     fn orient_frames_rotates_each_frame_and_swaps_dims() {
