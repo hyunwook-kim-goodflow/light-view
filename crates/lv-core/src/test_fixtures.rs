@@ -130,3 +130,27 @@ pub fn png_header_only(w: u32, h: u32) -> Vec<u8> {
     chunk(&mut out, b"IEND", &[]);
     out
 }
+
+/// Animated GIF with `n` solid `size`x`size` frames of alternating colours.
+pub fn gif_n_frames(n: u32, size: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut enc = GifEncoder::new(&mut out);
+        for i in 0..n {
+            let c = if i % 2 == 0 {
+                Rgba([255, 0, 0, 255])
+            } else {
+                Rgba([0, 0, 255, 255])
+            };
+            let img = RgbaImage::from_pixel(size, size, c);
+            enc.encode_frame(Frame::from_parts(
+                img,
+                0,
+                0,
+                Delay::from_numer_denom_ms(100, 1),
+            ))
+            .unwrap();
+        }
+    }
+    out
+}
