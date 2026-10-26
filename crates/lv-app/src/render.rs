@@ -57,7 +57,7 @@ pub struct TextRun<'a> {
     pub color: Rgb,
 }
 
-/// Premultiplied BGRA pixels kept so the bitmap can be rebuilt after device loss.
+/// Premultiplied BGRA pixels; only alive while the bitmap is created from them.
 struct Pixels {
     bgra: Vec<u8>,
     width: u32,
@@ -78,8 +78,15 @@ pub struct Renderer {
     dwrite: IDWriteFactory,
     text_format: IDWriteTextFormat,
     dpi: f32,
-    pixels: Option<Pixels>,
+    /// Size of the image last set. No pixel copy is kept: after device loss the
+    /// caller uploads again (see `needs_upload`).
+    image: Option<(u32, u32)>,
     device: Option<Device>,
+}
+
+/// An image is set but its bitmap is missing (the device was lost, or not yet built).
+fn needs_upload_for(image: Option<(u32, u32)>, has_bitmap: bool) -> bool {
+    image.is_some() && !has_bitmap
 }
 
 impl Renderer {
@@ -112,7 +119,7 @@ impl Renderer {
             dwrite,
             text_format,
             dpi: if dpi > 0.0 { dpi } else { 96.0 },
-            pixels: None,
+            image: None,
             device: None,
         };
         r.ensure_device()?;
@@ -143,9 +150,10 @@ impl Renderer {
     }
 
     /// Uploads `frame` of `img` as premultiplied BGRA, or clears the image. A frame whose
-    /// buffer length does not match `width * height * 4` is treated as no image.
+    /// buffer length does not match `width * height * 4` is treated as no image. The
+    /// converted pixels are dropped once the bitmap exists.
     pub fn set_image(&mut self, img: Option<&DecodedImage>, frame: usize) {
-        self.pixels = img.and_then(|img| {
+        let pixels = img.and_then(|img| {
             let f = img.frames.get(frame)?;
             Some(Pixels {
                 bgra: premultiplied_bgra_for(&f.rgba, img.width, img.height)?,
@@ -153,9 +161,11 @@ impl Renderer {
                 height: img.height,
             })
         });
+        self.image = pixels.as_ref().map(|p| (p.width, p.height));
+        // A lost device is rebuilt here so the bitmap can be created right away.
+        let _ = self.ensure_device();
         if let Some(d) = &mut self.device {
-            d.bitmap = self
-                .pixels
+            d.bitmap = pixels
                 .as_ref()
                 .and_then(|p| create_bitmap(&d.target, p).ok());
         }
@@ -165,9 +175,16 @@ impl Renderer {
     /// device's maximum bitmap size).
     pub fn has_image(&self) -> bool {
         match &self.device {
-            Some(d) => d.bitmap.is_some(),
-            None => self.pixels.is_some(),
+            Some(d) => self.image.is_some() && d.bitmap.is_some(),
+            // No device to try yet; `needs_upload` asks again once there is one.
+            None => self.image.is_some(),
         }
+    }
+
+    /// The device was rebuilt since the image was set: call `set_image` again.
+    pub fn needs_upload(&self) -> bool {
+        let has_bitmap = self.device.as_ref().is_some_and(|d| d.bitmap.is_some());
+        needs_upload_for(self.image, has_bitmap)
     }
 
     pub fn begin(&mut self, bg: Rgb) {
@@ -186,12 +203,12 @@ impl Renderer {
     /// `rect` (x, y, w, h in DIPs) is the on-screen box of the image after turning it
     /// clockwise by `quarters` × 90° about its centre.
     pub fn draw_image(&mut self, rect: (f32, f32, f32, f32), quarters: u8) {
-        let (Some(d), Some(p)) = (&self.device, &self.pixels) else {
+        let (Some(d), Some((image_w, _))) = (&self.device, self.image) else {
             return;
         };
         let Some(bitmap) = &d.bitmap else { return };
         let (dest, transform) = unrotated_dest(rect, quarters);
-        let mode = interpolation_for(dest.2 * self.dpi / 96.0 / p.width as f32);
+        let mode = interpolation_for(dest.2 * self.dpi / 96.0 / image_w as f32);
         let dest = to_rect_f(dest);
         // SAFETY: `dest` and `transform` are live locals; `bitmap` belongs to this
         // device context, which shares the render target's transform.
@@ -509,15 +526,12 @@ impl Renderer {
         let dc: ID2D1DeviceContext = target.cast()?;
         // SAFETY: the color is a live local.
         let brush = unsafe { target.CreateSolidColorBrush(&Rgb(0, 0, 0).to_d2d(), None)? };
-        let bitmap = self
-            .pixels
-            .as_ref()
-            .and_then(|p| create_bitmap(&target, p).ok());
+        // The bitmap is rebuilt by the caller's next `set_image` (`needs_upload`).
         self.device = Some(Device {
             target,
             dc,
             brush,
-            bitmap,
+            bitmap: None,
         });
         Ok(())
     }
@@ -653,6 +667,15 @@ mod tests {
         let rgba = [255, 128, 0, 255, 200, 100, 50, 128, 10, 20, 30, 0];
         let out = rgba_to_premultiplied_bgra(&rgba);
         assert_eq!(out, vec![0, 128, 255, 255, 25, 50, 100, 128, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn upload_is_needed_only_for_a_set_image_without_bitmap() {
+        // Device lost or rebuilt: the image is still set but has no bitmap.
+        assert!(needs_upload_for(Some((4000, 3000)), false));
+        assert!(!needs_upload_for(Some((4000, 3000)), true));
+        // No image (cleared, or released as too large): nothing to rebuild.
+        assert!(!needs_upload_for(None, false));
     }
 
     #[test]

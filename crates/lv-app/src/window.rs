@@ -173,14 +173,16 @@ pub fn run(initial: Option<PathBuf>) -> anyhow::Result<()> {
 
 impl App {
     /// Uploads the shown image (or animation frame) if it changed since the last paint,
-    /// and (re)starts the animation timer for a newly shown photo. Done at paint time
+    /// or again after the renderer lost its device (it keeps no pixel copy), and
+    /// (re)starts the animation timer for a newly shown photo. Done at paint time
     /// so that a burst of key repeats uploads only the photo that ends up on screen.
     fn upload_image(&mut self, hwnd: HWND) {
         let key = (
             self.viewer.generation(),
             self.viewer.frame_to_upload().map_or(0, |f| f.1),
         );
-        if self.uploaded == Some(key) {
+        let lost = self.renderer.as_ref().is_some_and(Renderer::needs_upload);
+        if self.uploaded == Some(key) && !lost {
             return;
         }
         let new_photo = self.uploaded.map(|k| k.0) != Some(key.0);
