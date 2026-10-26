@@ -249,10 +249,9 @@ mod tests {
             width: 1,
             height: 1,
             frames: vec![crate::decode::Frame {
-                rgba: vec![0; 4],
+                bgra: vec![0; 4],
                 delay_ms: 0,
             }],
-            icc: None,
             format: ImageFormat::Png,
             byte_len: 0,
         }

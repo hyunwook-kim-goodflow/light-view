@@ -26,6 +26,13 @@ pub fn png_2x1() -> Vec<u8> {
     encode_png(&img)
 }
 
+/// 1x1 PNG holding one straight-alpha RGBA pixel.
+pub fn png_pixel(rgba: [u8; 4]) -> Vec<u8> {
+    let mut img = RgbaImage::new(1, 1);
+    img.put_pixel(0, 0, Rgba(rgba));
+    encode_png(&img)
+}
+
 /// 16x8 JPEG, left 8 columns red, right 8 columns blue, with an EXIF Orientation APP1
 /// segment inserted right after SOI.
 pub fn jpeg_16x8_with_orientation(orientation: u16) -> Vec<u8> {
