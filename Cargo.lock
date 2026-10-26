@@ -276,6 +276,7 @@ name = "lv-heif"
 version = "0.1.0"
 dependencies = [
  "libheif-rs",
+ "lv-ipc",
 ]
 
 [[package]]

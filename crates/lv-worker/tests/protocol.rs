@@ -284,10 +284,11 @@ fn truncated_frame_exits_two() {
     assert_eq!(w.wait().code(), Some(2));
 }
 
-/// R10: request cap = max(N * 4 + 1 MiB, 64 MiB) + 64; with N = 1000 that is 64 MiB + 64.
+/// R10: request cap = min(max(N * 4 + 1 MiB, 64 MiB), MAX_PAYLOAD - 16) + 16; with
+/// N = 1000 that is 64 MiB + 16.
 #[test]
 fn oversized_request_exits_two() {
-    let cap: u64 = 64 * 1024 * 1024 + 64;
+    let cap: u64 = 64 * 1024 * 1024 + 16;
     let header = |len: u64| {
         let mut h = b"LVW1".to_vec();
         h.push(0x01);

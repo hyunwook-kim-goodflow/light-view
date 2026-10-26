@@ -46,7 +46,6 @@ use windows::Win32::System::Threading::{
     STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-const MIB: u64 = 1024 * 1024;
 /// Pipe buffer for requests and responses; responses are tens of MB.
 const PIPE_BUFFER: u32 = 1024 * 1024;
 /// PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON.
@@ -267,9 +266,10 @@ fn low_integrity_token() -> windows::core::Result<OwnedHandle> {
     Ok(restricted)
 }
 
-/// Memory cap per worker: the decoded image three times over, at least 256 MiB.
+/// Memory cap per worker: what libheif may allocate plus the worker's own RGBA copy,
+/// `max(12 * max_pixels, 256 MiB + 4 * max_pixels)` (see `lv_ipc::worker_memory_limit`).
 pub fn memory_limit(max_pixels: u64) -> u64 {
-    max_pixels.saturating_mul(4 * 3).max(256 * MIB)
+    lv_ipc::worker_memory_limit(max_pixels)
 }
 
 fn create_job(max_pixels: u64) -> windows::core::Result<OwnedHandle> {
