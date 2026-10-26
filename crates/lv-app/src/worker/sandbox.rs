@@ -15,7 +15,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{SetHandleInformation, BOOL, HANDLE, HANDLE_FLAG_INHERIT};
+use windows::Win32::Foundation::{
+    SetHandleInformation, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+};
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
     TokenIntegrityLevel, WinLowLabelSid, DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES,
@@ -32,15 +34,16 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
-use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess,
     InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -54,9 +57,17 @@ const CHILD_PROCESS_RESTRICTED: u32 = 1;
 /// A running sandboxed worker. Dropping it terminates the Job and with it the process.
 pub struct Sandboxed {
     pub pid: u32,
-    /// Held so the PID cannot be reused while the worker is in use.
+    /// Held so the PID cannot be reused while the worker is in use, and to poll for exit.
     pub process: OwnedHandle,
     pub job: OwnedHandle,
+}
+
+impl Sandboxed {
+    /// Whether the process has already ended.
+    pub fn has_exited(&self) -> bool {
+        // SAFETY: valid process handle owned by `self`; a zero timeout only polls.
+        unsafe { WaitForSingleObject(raw(&self.process), 0) == WAIT_OBJECT_0 }
+    }
 }
 
 impl Drop for Sandboxed {
@@ -74,8 +85,27 @@ impl Drop for Sandboxed {
 /// The app's ends of the worker's standard handles.
 pub struct Pipes {
     pub stdin: File,
+    /// Our copy of the worker's stdin read end, to see whether the worker took its request.
+    pub stdin_monitor: StdinMonitor,
     pub stdout: File,
     pub stderr: File,
+}
+
+/// A second read end of the worker's stdin pipe, never read from.
+///
+/// While it is open, writes to a dead worker land in the pipe buffer instead of failing, so
+/// after a worker dies [`StdinMonitor::unread`] tells whether it had taken its request.
+/// Dropping it (with the worker) makes a writer blocked on a full pipe fail and end.
+pub struct StdinMonitor(OwnedHandle);
+
+impl StdinMonitor {
+    /// Bytes written to the worker's stdin that nobody has read.
+    pub fn unread(&self) -> windows::core::Result<u32> {
+        let mut available = 0u32;
+        // SAFETY: valid pipe read handle; only the byte count is written (no buffer).
+        unsafe { PeekNamedPipe(raw(&self.0), None, 0, None, Some(&mut available), None)? };
+        Ok(available)
+    }
 }
 
 pub fn log(msg: &str) {
@@ -115,8 +145,12 @@ pub fn spawn(
         }
         Err(e) => return Err(e),
     };
-    // The child holds its own copies now; ours would keep the pipes open after it dies.
-    drop((stdin_child, stdout_child, stderr_child));
+    // The child holds its own copies now; ours of its output ends would keep those pipes
+    // open after it dies. The stdin read end stays (no longer inheritable) as the monitor.
+    drop((stdout_child, stderr_child));
+    // SAFETY: `stdin_child` is a valid pipe handle we own.
+    unsafe { SetHandleInformation(raw(&stdin_child), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+        .map_err(|e| format!("SetHandleInformation: {e}"))?;
     // SAFETY: CreateProcessAsUserW returned these handles to us; we own them from here.
     let (process, thread) = unsafe {
         (
@@ -145,6 +179,7 @@ pub fn spawn(
     }
     let pipes = Pipes {
         stdin: File::from(stdin_ours),
+        stdin_monitor: StdinMonitor(stdin_child),
         stdout: File::from(stdout_ours),
         stderr: File::from(stderr_ours),
     };
