@@ -13,6 +13,9 @@ mod toolbar;
 mod tooltip;
 mod viewer;
 mod window;
+// Created at startup from Task 6 on; until then only the tests use it.
+#[allow(dead_code)]
+mod worker;
 
 use std::path::PathBuf;
 use std::time::Instant;

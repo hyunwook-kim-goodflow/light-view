@@ -252,6 +252,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lv-core",
+ "lv-ipc",
  "windows",
  "winresource",
 ]
