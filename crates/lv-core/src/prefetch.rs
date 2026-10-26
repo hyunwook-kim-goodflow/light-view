@@ -12,6 +12,11 @@ pub type DecodeResult = Arc<Result<DecodedImage, DecodeError>>;
 
 pub trait Decode: Send + Sync + 'static {
     fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError>;
+
+    /// Called once when the prefetcher is dropped, before it joins its threads. A decoder
+    /// that can block (on another process, say) should make running and later `decode`
+    /// calls return promptly. The default does nothing.
+    fn shutdown(&self) {}
 }
 
 /// Decodes real files with `decode_file`.
@@ -122,6 +127,7 @@ impl Shared {
 
 pub struct Prefetcher {
     shared: Arc<Shared>,
+    decoder: Arc<dyn Decode>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -137,7 +143,7 @@ impl Prefetcher {
             cond: Condvar::new(),
             budget: budget_bytes,
         });
-        let decoder = Arc::new(decoder);
+        let decoder: Arc<dyn Decode> = Arc::new(decoder);
         let on_ready = Arc::new(on_ready);
         let workers = (0..workers.max(1))
             .map(|_| {
@@ -147,7 +153,11 @@ impl Prefetcher {
                 std::thread::spawn(move || worker_loop(&shared, &*decoder, &*on_ready))
             })
             .collect();
-        Prefetcher { shared, workers }
+        Prefetcher {
+            shared,
+            decoder,
+            workers,
+        }
     }
 
     /// `wanted[0]` is the current image and highest priority; the rest follow in order.
@@ -186,6 +196,8 @@ impl Drop for Prefetcher {
             st.queue.clear();
         }
         self.shared.cond.notify_all();
+        // A thread stuck in a decode (a hung HEIF worker) would otherwise hold up exit.
+        self.decoder.shutdown();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -479,6 +491,51 @@ mod tests {
         prefetcher.request(&[p("next")]);
         assert_eq!(ready.recv_timeout(WAIT).unwrap(), p("next"));
         assert!(prefetcher.get(&p("next")).unwrap().is_ok());
+    }
+
+    /// Every decode blocks (for at most 10 s) until `shutdown` is called.
+    struct BlockingDecoder {
+        started: Mutex<Sender<()>>,
+        stopped: Mutex<bool>,
+        cond: Condvar,
+    }
+
+    impl Decode for BlockingDecoder {
+        fn decode(&self, _path: &Path) -> Result<DecodedImage, DecodeError> {
+            let _ = self.started.lock().unwrap().send(());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut stopped = self.stopped.lock().unwrap();
+            while !*stopped {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                stopped = self.cond.wait_timeout(stopped, left).unwrap().0;
+            }
+            Err(DecodeError::Unsupported)
+        }
+
+        fn shutdown(&self) {
+            *self.stopped.lock().unwrap() = true;
+            self.cond.notify_all();
+        }
+    }
+
+    #[test]
+    fn drop_shuts_the_decoder_down_before_joining() {
+        let (started_tx, started) = channel();
+        let decoder = BlockingDecoder {
+            started: Mutex::new(started_tx),
+            stopped: Mutex::new(false),
+            cond: Condvar::new(),
+        };
+        let prefetcher = Prefetcher::new(decoder, 1, u64::MAX, |_| {});
+        prefetcher.request(&[p("a")]);
+        started.recv_timeout(WAIT).expect("decode started");
+        let start = std::time::Instant::now();
+        drop(prefetcher);
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(2), "drop waited {took:?}");
     }
 
     #[test]

@@ -18,15 +18,19 @@
 //! best-effort creation mitigations for later workers, in case they are what kills it. A
 //! worker that dies after reading its first request may have been killed by the file, and a
 //! hostile file must not be able to weaken the sandbox for the next one (ruling R11a).
+//!
+//! When the app exits, [`WorkerPool::shutdown`] ends every worker, busy ones included, so
+//! no prefetch thread is left waiting out a hung worker's timeout.
 
 mod sandbox;
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
+use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,7 +39,7 @@ use lv_ipc::{
     max_request_data, read_response, write_request, FailKind, IpcError, Request, Response,
 };
 
-use sandbox::{log, Sandboxed, StdinMonitor};
+use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
 
 /// How long a worker may take to answer one request, and a caller may wait for a free slot.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,6 +72,10 @@ struct PoolState {
     idle: Vec<Slot>,
     /// Slots that have not given up, idle or in use.
     live: usize,
+    /// Set by `shutdown`: no new workers, every call answers `Unsupported`.
+    closed: bool,
+    /// The Job of every worker started, idle or busy, so `shutdown` can end busy ones too.
+    jobs: Vec<(u32, Weak<OwnedHandle>)>,
 }
 
 #[derive(Default)]
@@ -116,7 +124,7 @@ impl WorkerPool {
         Self::start_with(exe, size, max_pixels, DEFAULT_TIMEOUT, &[], &[])
     }
 
-    fn start_with(
+    pub(crate) fn start_with(
         exe: PathBuf,
         size: usize,
         max_pixels: u64,
@@ -134,6 +142,8 @@ impl WorkerPool {
             state: Mutex::new(PoolState {
                 idle: Vec::with_capacity(size),
                 live: size,
+                closed: false,
+                jobs: Vec::new(),
             }),
             slot_freed: Condvar::new(),
             next_id: AtomicU64::new(1),
@@ -164,9 +174,40 @@ impl WorkerPool {
             if self.ensure_worker(guard.slot()) {
                 return self.request(guard.slot(), data);
             }
+            if self.is_closed() {
+                return Err(DecodeError::Unsupported);
+            }
             log("a worker slot gave up after repeated start failures");
             guard.give_up();
         }
+    }
+
+    /// Ends every worker now, including ones busy with a request (whose callers then get an
+    /// error at once), and makes later calls answer `Unsupported` without starting one.
+    /// Called when the app exits, so a hung worker cannot hold up the prefetch threads.
+    pub fn shutdown(&self) {
+        let (jobs, idle) = {
+            let mut state = self.lock();
+            state.closed = true;
+            let idle: Vec<Worker> = state
+                .idle
+                .iter_mut()
+                .filter_map(|s| s.worker.take())
+                .collect();
+            (std::mem::take(&mut state.jobs), idle)
+        };
+        // Waiters for a slot must see `closed` rather than wait out their timeout.
+        self.slot_freed.notify_all();
+        drop(idle); // terminates their Jobs
+        for (pid, job) in jobs {
+            if let Some(job) = job.upgrade() {
+                terminate_job(&job, pid);
+            }
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.lock().closed
     }
 
     fn lock(&self) -> MutexGuard<'_, PoolState> {
@@ -178,7 +219,7 @@ impl WorkerPool {
         let deadline = Instant::now() + self.timeout;
         let mut state = self.lock();
         loop {
-            if state.live == 0 {
+            if state.live == 0 || state.closed {
                 return Err(DecodeError::Unsupported);
             }
             if let Some(slot) = state.idle.pop() {
@@ -200,7 +241,8 @@ impl WorkerPool {
         }
     }
 
-    /// Makes sure `slot` has a worker; false once the slot has given up. A started worker
+    /// Makes sure `slot` has a worker; false once the slot has given up or the pool is shut
+    /// down. A started worker
     /// that has exited since its last answer (killed from outside, say) is replaced
     /// without counting a failure: no request of ours was in it.
     fn ensure_worker(&self, slot: &mut Slot) -> bool {
@@ -214,7 +256,7 @@ impl WorkerPool {
             ));
         }
         while slot.worker.is_none() {
-            if slot.spawn_failures >= MAX_SPAWN_FAILURES {
+            if slot.spawn_failures >= MAX_SPAWN_FAILURES || self.is_closed() {
                 return false;
             }
             self.try_spawn(slot);
@@ -235,6 +277,14 @@ impl WorkerPool {
             .collect();
         match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded) {
             Ok(worker) => {
+                let mut state = self.lock();
+                if state.closed {
+                    return; // dropping `worker` ends it
+                }
+                state.jobs.retain(|(_, job)| job.strong_count() > 0);
+                let job = Arc::downgrade(&worker.sandboxed.job);
+                state.jobs.push((worker.sandboxed.pid, job));
+                drop(state);
                 slot.worker = Some(worker);
                 slot.started_once = true;
             }
@@ -296,6 +346,12 @@ impl WorkerPool {
                 worker.answered = true;
                 slot.spawn_failures = 0;
                 result
+            }
+            Err(why) if self.is_closed() => {
+                // `shutdown` ended the worker: not its fault, nothing to count.
+                log(&format!("request {id} ended by shutdown: {why}"));
+                slot.worker = None;
+                Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
             }
             Err(why) => {
                 let (pid, answered) = (worker.sandboxed.pid, worker.answered);
@@ -868,6 +924,43 @@ pub(crate) mod tests {
         assert_decodes(&pool);
         assert_eq!(single_worker(&pool).pid, pid);
         assert!(win32k_lockdown(&pool));
+    }
+
+    #[test]
+    fn shutdown_ends_a_hung_request_at_once() {
+        let pool = std::sync::Arc::new(WorkerPool::start_with(
+            worker_exe(),
+            1,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &["--test-mode=hang"],
+            &[],
+        ));
+        let hung = Process::open(single_worker(&pool).pid);
+        let caller = {
+            let pool = pool.clone();
+            thread::spawn(move || pool.decode_heif(sample()))
+        };
+        // Let the request reach the worker, which never answers.
+        thread::sleep(Duration::from_millis(500));
+        let start = Instant::now();
+        pool.shutdown();
+        let result = caller.join().expect("caller thread");
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "the caller waited {took:?}");
+        assert!(result.is_err());
+        assert!(
+            hung.wait_for_exit(Duration::from_secs(5)),
+            "worker still runs"
+        );
+        // Later calls answer at once without starting a worker.
+        let start = Instant::now();
+        assert!(matches!(
+            pool.decode_heif(sample()),
+            Err(DecodeError::Unsupported)
+        ));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(pool.workers().is_empty());
     }
 
     #[test]
