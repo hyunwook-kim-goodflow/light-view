@@ -46,7 +46,13 @@ if (-not (Test-Path (Join-Path $VcpkgDir '.git'))) {
     Write-Host "Cloning vcpkg $VcpkgCommit into $VcpkgDir"
     New-Item -ItemType Directory -Force -Path $VcpkgDir | Out-Null
     Invoke-Native git @('-C', $VcpkgDir, 'init', '--quiet')
+}
+# Idempotent even if an earlier run stopped between `init` and `remote add`.
+$origin = & git -C $VcpkgDir config --get remote.origin.url
+if (-not $origin) {
     Invoke-Native git @('-C', $VcpkgDir, 'remote', 'add', 'origin', $VcpkgRepo)
+} elseif ($origin -ne $VcpkgRepo) {
+    Invoke-Native git @('-C', $VcpkgDir, 'remote', 'set-url', 'origin', $VcpkgRepo)
 }
 $head = & git -C $VcpkgDir rev-parse --verify --quiet HEAD
 if ($head -ne $VcpkgCommit) {
@@ -61,12 +67,24 @@ if (-not (Test-Path $VcpkgExe)) {
 }
 
 # --- 2. Manifest-mode install -------------------------------------------------------------
+# Keep every vcpkg cache inside the repo: by default the binary cache lives in
+# %LOCALAPPDATA%\vcpkg\archives. Root, downloads and buildtrees are passed explicitly so a
+# global VCPKG_ROOT / VCPKG_DOWNLOADS cannot redirect them.
+$ArchivesDir = Join-Path $VcpkgDir 'archives'
+$DownloadsDir = Join-Path $VcpkgDir 'downloads'
+New-Item -ItemType Directory -Force -Path $ArchivesDir, $DownloadsDir | Out-Null
+$env:VCPKG_DISABLE_METRICS = '1'
 Write-Host "Installing vcpkg.json dependencies for $Triplet"
 Invoke-Native $VcpkgExe @(
     'install',
     '--triplet', $Triplet,
+    "--vcpkg-root=$VcpkgDir",
+    "--downloads-root=$DownloadsDir",
+    "--x-buildtrees-root=$(Join-Path $VcpkgDir 'buildtrees')",
+    "--x-packages-root=$(Join-Path $VcpkgDir 'packages')",
     "--x-manifest-root=$RepoRoot",
     "--x-install-root=$InstallRoot",
+    "--binarysource=clear;files,$ArchivesDir,readwrite",
     '--disable-metrics'
 )
 
