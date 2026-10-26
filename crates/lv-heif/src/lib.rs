@@ -106,11 +106,25 @@ fn security_limits(max_pixels: u64) -> SecurityLimits {
     limits
 }
 
+/// Decoding threads for one decode, given the number of logical CPUs: half of them (the
+/// app runs two workers at once), at least 1 and at most 4.
+fn threads_for(cpus: usize) -> u32 {
+    (cpus / 2).clamp(1, 4) as u32
+}
+
+fn decoding_threads() -> u32 {
+    threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 fn decode_inner(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
     let lib = LibHeif::new();
     let mut ctx = HeifContext::new().map_err(corrupt("context"))?;
     ctx.set_security_limits(&security_limits(max_pixels))
         .map_err(corrupt("security limits"))?;
+    // libheif's threads decode grid tiles in parallel; libde265's (below) split one HEVC
+    // image. Both are capped because two workers decode at the same time.
+    let threads = decoding_threads();
+    ctx.set_max_decoding_threads(threads);
     ctx.read_bytes(bytes).map_err(corrupt("read"))?;
     let handle = ctx
         .primary_image_handle()
@@ -136,6 +150,7 @@ fn decode_inner(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
     let mut options =
         DecodingOptions::new().ok_or_else(|| HeifError::Corrupt("decoding options".into()))?;
     options.set_convert_hdr_to_8bit(true);
+    options.set_num_codec_threads(threads);
     let image = lib
         .decode(&handle, ColorSpace::Rgb(chroma), Some(options))
         .map_err(corrupt("decode"))?;
@@ -260,6 +275,13 @@ mod tests {
             assert!(limits.max_total_memory() >= limits.max_memory_block_size());
         }
         assert_eq!(security_limits(1).max_memory_block_size(), 256 * MIB);
+    }
+
+    #[test]
+    fn decoding_threads_are_half_the_cpus_from_one_to_four() {
+        for (cpus, threads) in [(1, 1), (2, 1), (4, 2), (6, 3), (8, 4), (16, 4), (64, 4)] {
+            assert_eq!(threads_for(cpus), threads, "{cpus} CPUs");
+        }
     }
 
     #[test]
