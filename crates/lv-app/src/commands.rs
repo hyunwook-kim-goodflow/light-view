@@ -11,7 +11,7 @@ use std::sync::Arc;
 use lv_core::command::{command_for_key, Command, Mods};
 use lv_core::decode::DecodeLimits;
 use lv_core::listing::first_supported_in;
-use lv_core::prefetch::{FileDecoder, Prefetcher};
+use lv_core::prefetch::Prefetcher;
 use lv_core::settings::Settings;
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::fullscreen;
 use crate::input;
+use crate::routing::RoutingDecoder;
 use crate::viewer::{Redraw, Viewer};
 use crate::window::{invalidate, App};
 
@@ -51,13 +52,14 @@ impl HwndCell {
     }
 }
 
+/// The viewer with its prefetcher. HEIF workers (one per prefetch thread, ruling R2) start
+/// here, before the window shows; a missing or failing worker only affects HEIF.
 pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> Viewer {
     let budget = memory_budget(settings);
-    let decoder = FileDecoder {
-        limits: DecodeLimits {
-            max_pixels: max_pixels_for_budget(budget),
-        },
+    let limits = DecodeLimits {
+        max_pixels: max_pixels_for_budget(budget),
     };
+    let decoder = RoutingDecoder::start(limits, PREFETCH_WORKERS);
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
         let h = hwnd.0.load(Ordering::Acquire);
         if h != 0 {
@@ -77,9 +79,9 @@ fn max_pixels_for_budget(budget: u64) -> u64 {
     (budget / 8).min(DecodeLimits::default().max_pixels)
 }
 
-/// `memory_budget_mb` if set, else a quarter of physical memory, at most 2 GiB.
+/// `memory_budget_mb` if set and not 0, else a quarter of physical memory, at most 2 GiB.
 fn memory_budget(settings: &Settings) -> u64 {
-    if let Some(mb) = settings.memory_budget_mb {
+    if let Some(mb) = settings.memory_budget_mb.filter(|&mb| mb > 0) {
         return u64::from(mb) << 20;
     }
     let mut status = MEMORYSTATUSEX {
@@ -281,5 +283,21 @@ mod tests {
         // Never above the decoder's own ceiling, however large the budget.
         assert_eq!(max_pixels_for_budget(64 << 30), 268_435_456);
         assert_eq!(max_pixels_for_budget(0), 0);
+    }
+
+    #[test]
+    fn zero_budget_uses_default() {
+        let zero = Settings {
+            memory_budget_mb: Some(0),
+            ..Settings::default()
+        };
+        let default = memory_budget(&Settings::default());
+        assert!(default > 0);
+        assert_eq!(memory_budget(&zero), default);
+        let set = Settings {
+            memory_budget_mb: Some(512),
+            ..Settings::default()
+        };
+        assert_eq!(memory_budget(&set), 512 << 20);
     }
 }

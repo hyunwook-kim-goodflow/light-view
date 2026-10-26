@@ -98,3 +98,19 @@ Final review: With fixes. Important: #1 back-to-shown-photo state (loading/quart
 - Ruling R17 (final): fix #1, #3, #4 now (+ cheap hardening: /DEPENDENTLOADFLAG:0x800, catch_unwind in prefetch worker_loop, brief check of 1/12 exit-0 smoke hypothesis). #2 folder refresh handed to M3 (needs same list-mutation path as delete/undo) — cost: M1 doesn't see external folder changes. #5 decode output -> premultiplied BGRA decided for M2 worker protocol — cost: page flips of 12MP may exceed 16ms in M1.
 Final fix wave: re-review all addressed (commits 4c74fe0..7847a8a).
 - Ruling R18 (final residuals, parked): WM_CLOSE-posted-then-launch race loses B's path (only when WM_CLOSE is posted, e.g. taskkill/scripts; manual close sends synchronously) — deferred to M2 with fix: in on_copy_data PeekMessage(WM_CLOSE)/closing flag → return 0 so B falls back to Primary — cost if wrong: rare lost double-click. Also parked: decode_file read_to_end unbounded after size check (use take); budget/8 comment ignores file buffer (~1.5x budget worst case); after() try_borrow_mut latent skip; memory_budget_mb=0 refuses all images (clamp); smoke runs write real settings.toml.
+
+# M2 status of the parked M1 items
+
+Checked against the M2 branch (`m2-heic-worker`) in Task 7. The history above is kept as it was; this section only says what moved. Items not listed here are still open.
+
+| M1 item | Status | Note |
+|---|---|---|
+| R18: WM_CLOSE-posted-then-launch race loses the second launch's path | **M2에서 해결** (764db06) | `on_copy_data` refuses the path while a WM_CLOSE waits in the queue (`PeekMessageW`) or the window is closing (`mark_closing`), so the second launch falls back to being primary. |
+| R18: `decode_file` `read_to_end` unbounded after the size check | **M2에서 해결** (764db06) | The read is `take(room + 1)`; a file that grew past the cap is `FileTooLarge`. |
+| R18: `memory_budget_mb = 0` refuses every image | **M2에서 해결** (764db06) | `memory_budget` treats 0 like unset (`filter(\|&mb\| mb > 0)`), with a test. |
+| Task 1: ftyp brands ignore the box size | **M2에서 해결** (764db06) | Brands are read only inside the `ftyp` box; size 0 means to the end; test `ftyp_brands_limited_to_box`. |
+| Final review #5 / R17: RGBA to BGRA conversion on the UI thread per flip | **M2에서 해결** (6814578) | Every decoder returns premultiplied BGRA8 sRGB (`premultiply_to_bgra`); the renderer only checks the length and uploads. HEIF output comes from the worker already converted. |
+| R17: `catch_unwind` in the prefetch `worker_loop` | M1에서 이미 해결 | Done in the M1 final fix wave (`prefetch.rs`); the HEIF worker has its own `catch_unwind` around libheif and color conversion. |
+| Not an M1 item: first-present target (200 ms JPEG, 400 ms HEIC) | 미해결 | Measured in Task 7 (README "현재 수치"): 12 MP JPEG ~430-580 ms, 12 MP HEIC ~1.2-1.5 s. For HEIC, libheif/libde265 decoding (single-threaded, 0.7-1.0 s) is almost all of it; pipe transfer is ~30 ms and color conversion is negligible. Goes to M5 profiling; see the follow-up note in README. |
+
+Still parked from M1 and untouched by M2: folder refresh (M3), the per-task minor lists above, and the user-verify visual checks.

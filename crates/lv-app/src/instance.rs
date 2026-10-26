@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -13,8 +14,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, IsIconic, SendMessageTimeoutW,
-    SetForegroundWindow, ShowWindow, SMTO_ABORTIFHUNG, SW_RESTORE, WM_COPYDATA,
+    AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, IsIconic, PeekMessageW,
+    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, MSG, PM_NOREMOVE, SMTO_ABORTIFHUNG,
+    SW_RESTORE, WM_CLOSE, WM_COPYDATA,
 };
 
 use crate::commands;
@@ -100,8 +102,9 @@ fn forward(path: Option<&Path>) -> bool {
         cbData: (data.len() * 2) as u32,
         lpData: data.as_ptr() as *mut _,
     };
+    let mut answer = 0usize;
     // SAFETY: `cds` and `data` outlive the synchronous send; the system copies the
-    // payload into the receiver.
+    // payload into the receiver. `answer` is a live local.
     let sent = unsafe {
         SendMessageTimeoutW(
             hwnd,
@@ -110,10 +113,10 @@ fn forward(path: Option<&Path>) -> bool {
             LPARAM(std::ptr::from_ref(&cds) as isize),
             SMTO_ABORTIFHUNG,
             SEND_TIMEOUT_MS,
-            None,
+            Some(&mut answer),
         )
     };
-    sent.0 != 0
+    forwarded(sent, answer)
 }
 
 /// The primary's window, retried while it may still be starting.
@@ -135,9 +138,18 @@ fn find_primary_window() -> Option<HWND> {
 
 /// WM_COPYDATA from another launch: opens the path if it is an existing file (or a
 /// folder, like a drop) and brings the window forward. The sender is not trusted.
+/// Answers 1 when the path was taken (even if there is nothing to open), 0 when refused
+/// while the window is closing (the sender then opens its own window) or malformed.
 pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
     // Any process can send WM_COPYDATA; a null lparam must not be dereferenced.
     if lparam.0 == 0 {
+        return LRESULT(0);
+    }
+    let mut queued = MSG::default();
+    // SAFETY: plain call on our window's queue; PM_NOREMOVE leaves the message there.
+    let close_pending =
+        unsafe { PeekMessageW(&mut queued, hwnd, WM_CLOSE, WM_CLOSE, PM_NOREMOVE) }.as_bool();
+    if !accept_copy_data(close_pending, CLOSING.load(Ordering::Relaxed)) {
         return LRESULT(0);
     }
     // SAFETY: lparam is non-null (checked above). For WM_COPYDATA the system marshals
@@ -153,9 +165,13 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
         };
         decode_message(cds.dwData, bytes)
     };
-    let Some(path) = path.filter(|p| p.is_file() || p.is_dir()) else {
+    let Some(path) = path else {
         return LRESULT(0);
     };
+    if !(path.is_file() || path.is_dir()) {
+        // Taken, with nothing to open: the sender must not open a window for it either.
+        return LRESULT(1);
+    }
     // An unsaved rotation is discarded (M1); `open` takes and drops its own borrow.
     commands::open(app, hwnd, &path);
     // SAFETY: plain calls on our window; no App borrow is held (both may re-enter).
@@ -166,6 +182,27 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
         let _ = SetForegroundWindow(hwnd);
     }
     LRESULT(1)
+}
+
+/// Set once the window starts closing; later WM_COPYDATA messages are refused.
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// Called when the window handles WM_CLOSE (it is destroyed right after).
+pub fn mark_closing() {
+    CLOSING.store(true, Ordering::Relaxed);
+}
+
+/// Whether a forwarded path may be taken: not while a WM_CLOSE waits in the queue
+/// (`close_pending`) or is being handled (`closing`), since the window would go away with
+/// it. Refused, the sender opens its own window (M1 ruling R18).
+fn accept_copy_data(close_pending: bool, closing: bool) -> bool {
+    !close_pending && !closing
+}
+
+/// Whether the primary took the path: the send completed (`sent`) and the window answered
+/// 1 (`answer`). Anything else, the launch opens its own window.
+fn forwarded(sent: LRESULT, answer: usize) -> bool {
+    sent.0 != 0 && answer == 1
 }
 
 /// The path as UTF-16 with a terminating NUL.
@@ -204,6 +241,20 @@ mod tests {
 
     fn bytes(units: &[u16]) -> Vec<u8> {
         units.iter().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn copydata_refused_while_closing() {
+        assert!(accept_copy_data(false, false));
+        // A WM_CLOSE waiting in the queue, or one being handled: the sender opens its own
+        // window instead of handing the path to a window about to go away.
+        assert!(!accept_copy_data(true, false));
+        assert!(!accept_copy_data(false, true));
+        assert!(!accept_copy_data(true, true));
+        // The sender counts only an explicit acceptance as forwarded.
+        assert!(forwarded(LRESULT(1), 1));
+        assert!(!forwarded(LRESULT(1), 0));
+        assert!(!forwarded(LRESULT(0), 1));
     }
 
     #[test]

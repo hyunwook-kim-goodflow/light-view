@@ -1,0 +1,10 @@
+[package]
+name = "lv-heif"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Safe libheif wrapper for light-view's HEIC worker (links libheif/libde265 dynamically)."
+
+[dependencies]
+lv-ipc = { path = "../lv-ipc" }
+libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_23"] }
