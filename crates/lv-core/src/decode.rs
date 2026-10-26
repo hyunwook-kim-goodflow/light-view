@@ -86,6 +86,14 @@ impl From<std::io::Error> for DecodeError {
     }
 }
 
+/// Map an `image` error from the decode phase; allocation-limit hits become `TooLarge`.
+fn decode_err(e: image::ImageError, width: u32, height: u32) -> DecodeError {
+    match e {
+        image::ImageError::Limits(_) => DecodeError::TooLarge { width, height },
+        e => corrupt(e),
+    }
+}
+
 fn corrupt(e: impl fmt::Display) -> DecodeError {
     DecodeError::Corrupt(e.to_string())
 }
@@ -165,7 +173,7 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             let mut dec = GifDecoder::new(Cursor::new(bytes)).map_err(corrupt)?;
             dec.set_limits(image_limits(limits)).map_err(corrupt)?;
             let icc = dec.icc_profile().map_err(corrupt)?;
-            let frames = collect_frames(dec.into_frames())?;
+            let frames = collect_frames(dec.into_frames(), limits, width, height)?;
             Ok(finish(frames, width, height, icc))
         }
         ImageFormat::WebP => {
@@ -173,8 +181,9 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             dec.set_limits(image_limits(limits)).map_err(corrupt)?;
             let icc = dec.icc_profile().map_err(corrupt)?;
             if dec.has_animation() {
-                let frames = collect_frames(dec.into_frames())?;
-                Ok(finish(frames, width, height, icc))
+                let frames = collect_frames(dec.into_frames(), limits, width, height)?;
+                let (frames, w, h) = orient_frames(frames, width, height, exif_orientation(bytes));
+                Ok(finish(frames, w, h, icc))
             } else {
                 decode_still(dec, bytes, icc, finish)
             }
@@ -189,10 +198,48 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     }
 }
 
-fn collect_frames(frames: image::Frames<'_>) -> Result<Vec<Frame>, DecodeError> {
+/// Apply an EXIF orientation to every frame; width/height swap for orientations 5-8.
+fn orient_frames(frames: Vec<Frame>, w: u32, h: u32, orientation: u16) -> (Vec<Frame>, u32, u32) {
+    let Some(o) =
+        Orientation::from_exif(orientation as u8).filter(|o| *o != Orientation::NoTransforms)
+    else {
+        return (frames, w, h);
+    };
+    let mut out_dims = (w, h);
+    let frames = frames
+        .into_iter()
+        .map(|f| {
+            let Some(buf) = image::RgbaImage::from_raw(w, h, f.rgba) else {
+                unreachable!("frame buffer matches canvas size")
+            };
+            let mut img = DynamicImage::ImageRgba8(buf);
+            img.apply_orientation(o);
+            out_dims = (img.width(), img.height());
+            Frame {
+                rgba: img.into_rgba8().into_raw(),
+                delay_ms: f.delay_ms,
+            }
+        })
+        .collect();
+    (frames, out_dims.0, out_dims.1)
+}
+
+/// Collect animation frames; total decoded bytes are capped at `max_pixels * 4`.
+fn collect_frames(
+    frames: image::Frames<'_>,
+    limits: &DecodeLimits,
+    width: u32,
+    height: u32,
+) -> Result<Vec<Frame>, DecodeError> {
+    let budget = limits.max_pixels.saturating_mul(4);
+    let mut used: u64 = 0;
     let mut out = Vec::new();
     for f in frames {
-        let f = f.map_err(corrupt)?;
+        let f = f.map_err(|e| decode_err(e, width, height))?;
+        used = used.saturating_add(f.buffer().as_raw().len() as u64);
+        if used > budget {
+            return Err(DecodeError::TooLarge { width, height });
+        }
         let delay_ms = delay_ms(&f);
         out.push(Frame {
             rgba: f.into_buffer().into_raw(),
@@ -212,7 +259,8 @@ fn decode_still(
     icc: Option<Vec<u8>>,
     finish: impl FnOnce(Vec<Frame>, u32, u32, Option<Vec<u8>>) -> DecodedImage,
 ) -> Result<DecodedImage, DecodeError> {
-    let mut img = DynamicImage::from_decoder(dec).map_err(corrupt)?;
+    let (w0, h0) = dec.dimensions();
+    let mut img = DynamicImage::from_decoder(dec).map_err(|e| decode_err(e, w0, h0))?;
     if matches!(
         sniff_format(bytes),
         Some(ImageFormat::Jpeg | ImageFormat::WebP)
@@ -301,6 +349,48 @@ mod tests {
             decode_bytes(b"hello world, not an image", &DecodeLimits::default()),
             Err(DecodeError::Unsupported)
         ));
+    }
+    #[test]
+    fn animation_total_frames_budget_enforced() {
+        let gif = fixtures::gif_n_frames(10, 8);
+        // One 8x8 frame (64 px) fits in 100 px; ten do not.
+        let tight = DecodeLimits { max_pixels: 100 };
+        assert!(matches!(
+            decode_bytes(&gif, &tight),
+            Err(DecodeError::TooLarge {
+                width: 8,
+                height: 8
+            })
+        ));
+        assert_eq!(
+            decode_bytes(&gif, &DecodeLimits::default())
+                .unwrap()
+                .frames
+                .len(),
+            10
+        );
+    }
+    #[test]
+    fn orient_frames_rotates_each_frame_and_swaps_dims() {
+        // 2x1 frames: [red, blue]; orientation 6 (rotate 90 cw) -> 1x2, red on top.
+        let px = [255, 0, 0, 255, 0, 0, 255, 255];
+        let frames = vec![
+            Frame {
+                rgba: px.to_vec(),
+                delay_ms: 10,
+            },
+            Frame {
+                rgba: px.to_vec(),
+                delay_ms: 20,
+            },
+        ];
+        let (out, w, h) = orient_frames(frames, 2, 1, 6);
+        assert_eq!((w, h, out.len()), (1, 2, 2));
+        for f in &out {
+            assert_eq!(&f.rgba[0..4], &[255, 0, 0, 255]);
+            assert_eq!(&f.rgba[4..8], &[0, 0, 255, 255]);
+        }
+        assert_eq!(out[1].delay_ms, 20);
     }
     #[test]
     fn exif_orientation_defaults_to_1() {
