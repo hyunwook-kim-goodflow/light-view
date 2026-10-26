@@ -49,7 +49,8 @@ impl State {
         }
     }
 
-    fn insert(&mut self, path: PathBuf, result: DecodeResult, budget: u64) {
+    /// Returns false if the entry was evicted again in the same pass.
+    fn insert(&mut self, path: PathBuf, result: DecodeResult, budget: u64) -> bool {
         let bytes = match result.as_ref() {
             Ok(img) => img.memory_bytes(),
             Err(_) => 0,
@@ -57,7 +58,7 @@ impl State {
         self.tick += 1;
         let last_used = self.tick;
         self.cache.insert(
-            path,
+            path.clone(),
             Entry {
                 result,
                 bytes,
@@ -65,24 +66,34 @@ impl State {
             },
         );
         self.evict(budget);
+        self.cache.contains_key(&path)
     }
 
-    /// Evict until within budget: entries not wanted first, then other
-    /// non-current entries, each oldest-used first. `wanted[0]` is never evicted.
+    /// Evict until within budget: entries not wanted first (oldest-used first), then
+    /// wanted entries farthest from the current one first. `wanted[0]` is never evicted.
     fn evict(&mut self, budget: u64) {
         let mut total: u64 = self.cache.values().map(|e| e.bytes).sum();
         if total <= budget {
             return;
         }
         let current = self.wanted.first();
-        let wanted: HashSet<&PathBuf> = self.wanted.iter().collect();
+        let rank: HashMap<&PathBuf, usize> = self
+            .wanted
+            .iter()
+            .enumerate()
+            .rev() // first occurrence wins
+            .map(|(i, p)| (p, i))
+            .collect();
         let mut victims: Vec<(bool, u64, PathBuf)> = self
             .cache
             .iter()
             .filter(|(path, _)| Some(*path) != current)
-            .map(|(path, e)| (wanted.contains(path), e.last_used, path.clone()))
+            .map(|(path, e)| match rank.get(path) {
+                Some(&i) => (true, (usize::MAX - i) as u64, path.clone()),
+                None => (false, e.last_used, path.clone()),
+            })
             .collect();
-        // false (unwanted) sorts before true (wanted); then oldest first.
+        // Unwanted (false) first, oldest first; then wanted, highest index first.
         victims.sort();
         for (_, _, path) in victims {
             if total <= budget {
@@ -199,8 +210,7 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
             let mut st = shared.lock();
             st.in_flight.remove(&path);
             if st.wanted.contains(&path) && !st.cache.contains_key(&path) {
-                st.insert(path.clone(), result, shared.budget);
-                true
+                st.insert(path.clone(), result, shared.budget)
             } else {
                 false
             }
@@ -386,14 +396,30 @@ mod tests {
     }
 
     #[test]
-    fn lru_evicts_oldest_among_wanted() {
+    fn evicts_lowest_priority_wanted_first() {
         let h = harness(1, 8, &[], &[]);
         h.prefetcher.request(&[p("a"), p("b"), p("c")]);
-        h.wait_ready(3);
-        // Budget fits two: a (current) stays; of b and c, b is older.
+        h.wait_ready(2);
+        // Budget fits two: a (current) and b (next) stay; c, the farthest, goes.
         assert!(h.prefetcher.get(&p("a")).is_some());
-        assert!(h.prefetcher.get(&p("b")).is_none());
-        assert!(h.prefetcher.get(&p("c")).is_some());
+        assert!(h.prefetcher.get(&p("b")).is_some());
+        assert!(h.prefetcher.get(&p("c")).is_none());
+    }
+
+    #[test]
+    fn entry_evicted_on_insert_does_not_fire_on_ready() {
+        let h = harness(1, 8, &[], &[]);
+        h.prefetcher.request(&[p("a"), p("b"), p("c")]);
+        for _ in 0..3 {
+            h.wait_started();
+        }
+        let Harness {
+            ready_count,
+            prefetcher,
+            ..
+        } = h;
+        drop(prefetcher); // joins workers: c's in-flight decode finishes first
+        assert_eq!(ready_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
