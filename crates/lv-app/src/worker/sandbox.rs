@@ -13,6 +13,7 @@ use std::fs::File;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
+use std::sync::Arc;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -58,7 +59,8 @@ pub struct Sandboxed {
     pub pid: u32,
     /// Held so the PID cannot be reused while the worker is in use, and to poll for exit.
     pub process: OwnedHandle,
-    pub job: OwnedHandle,
+    /// Shared so the pool can end the worker from another thread ([`terminate_job`]).
+    pub job: Arc<OwnedHandle>,
 }
 
 impl Sandboxed {
@@ -71,13 +73,15 @@ impl Sandboxed {
 
 impl Drop for Sandboxed {
     fn drop(&mut self) {
-        // SAFETY: `self.job` is a valid Job handle owned by `self`.
-        if let Err(e) = unsafe { TerminateJobObject(raw(&self.job), 1) } {
-            log(&format!(
-                "TerminateJobObject for worker {} failed: {e}",
-                self.pid
-            ));
-        }
+        terminate_job(&self.job, self.pid);
+    }
+}
+
+/// Ends every process in the worker's Job (`pid` is for the log). Harmless if it has ended.
+pub fn terminate_job(job: &OwnedHandle, pid: u32) {
+    // SAFETY: `job` is a valid Job handle, kept open by the borrow.
+    if let Err(e) = unsafe { TerminateJobObject(raw(job), 1) } {
+        log(&format!("TerminateJobObject for worker {pid} failed: {e}"));
     }
 }
 
@@ -174,7 +178,7 @@ pub fn spawn(
     let sandboxed = Sandboxed {
         pid: info.dwProcessId,
         process,
-        job,
+        job: Arc::new(job),
     };
     // SAFETY: valid thread handle of the suspended main thread.
     if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {

@@ -49,6 +49,13 @@ fn worker_exe_in(dir: &Path) -> Option<PathBuf> {
 }
 
 impl Decode for RoutingDecoder {
+    /// Ends the HEIF workers, so a prefetch thread waiting on a hung one returns at once.
+    fn shutdown(&self) {
+        if let Some(pool) = &self.pool {
+            pool.shutdown();
+        }
+    }
+
     fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError> {
         let image = open_image(path)?;
         if image.format != ImageFormat::Heif {
@@ -124,6 +131,32 @@ mod tests {
         assert_eq!(bmp.format, ImageFormat::Bmp);
         assert_eq!((bmp.width, bmp.height), (1, 1));
         assert_eq!(bmp.frames[0].bgra, vec![0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn dropping_the_prefetcher_with_a_hung_worker_is_quick() {
+        use std::time::{Duration, Instant};
+
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            1,
+            limits().max_pixels,
+            Duration::from_secs(10),
+            &["--test-mode=hang"],
+            &[],
+        );
+        let decoder = RoutingDecoder {
+            limits: limits(),
+            pool: Some(Arc::new(pool)),
+        };
+        let prefetcher = lv_core::prefetch::Prefetcher::new(decoder, 1, u64::MAX, |_| {});
+        prefetcher.request(&[heic_path()]);
+        // Let the request reach the worker, which never answers.
+        std::thread::sleep(Duration::from_millis(500));
+        let start = Instant::now();
+        drop(prefetcher);
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(3), "exit waited {took:?}");
     }
 
     #[test]
