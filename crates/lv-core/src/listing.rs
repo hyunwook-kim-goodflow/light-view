@@ -30,16 +30,32 @@ pub fn natural_cmp(a: &OsStr, b: &OsStr) -> Ordering {
     while i < a.len() && j < b.len() {
         if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
             let si = i;
-            while i < a.len() && a[i].is_ascii_digit() { i += 1; }
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
             let sj = j;
-            while j < b.len() && b[j].is_ascii_digit() { j += 1; }
-            let na: String = a[si..i].iter().collect::<String>().trim_start_matches('0').to_owned();
-            let nb: String = b[sj..j].iter().collect::<String>().trim_start_matches('0').to_owned();
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let na: String = a[si..i]
+                .iter()
+                .collect::<String>()
+                .trim_start_matches('0')
+                .to_owned();
+            let nb: String = b[sj..j]
+                .iter()
+                .collect::<String>()
+                .trim_start_matches('0')
+                .to_owned();
             let o = na.len().cmp(&nb.len()).then_with(|| na.cmp(&nb));
-            if o != Ordering::Equal { return o; }
+            if o != Ordering::Equal {
+                return o;
+            }
         } else {
             let o = a[i].to_lowercase().cmp(b[j].to_lowercase());
-            if o != Ordering::Equal { return o; }
+            if o != Ordering::Equal {
+                return o;
+            }
             i += 1;
             j += 1;
         }
@@ -49,7 +65,9 @@ pub fn natural_cmp(a: &OsStr, b: &OsStr) -> Ordering {
 
 fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| -> Vec<String> {
-        p.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
     };
     norm(a) == norm(b)
 }
@@ -64,7 +82,10 @@ pub fn first_supported_in(dir: &Path) -> std::io::Result<Option<PathBuf>> {
             continue;
         }
         let name = path.file_name().unwrap_or_default();
-        if first.as_ref().is_none_or(|f| natural_cmp(name, f.file_name().unwrap_or_default()).is_lt()) {
+        if first
+            .as_ref()
+            .is_none_or(|f| natural_cmp(name, f.file_name().unwrap_or_default()).is_lt())
+        {
             first = Some(path);
         }
     }
@@ -84,7 +105,12 @@ impl FolderList {
             .into_iter()
             .filter(|p| is_supported_extension(p) || keep.is_some_and(|c| same_path(p, c)))
             .collect();
-        v.sort_by(|a, b| natural_cmp(a.file_name().unwrap_or_default(), b.file_name().unwrap_or_default()));
+        v.sort_by(|a, b| {
+            natural_cmp(
+                a.file_name().unwrap_or_default(),
+                b.file_name().unwrap_or_default(),
+            )
+        });
         v
     }
 
@@ -168,12 +194,20 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    fn p(s: &str) -> PathBuf { PathBuf::from(format!(r"C:\pics\{s}")) }
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(format!(r"C:\pics\{s}"))
+    }
 
     #[test]
     fn natural_order_like_explorer() {
-        let l = FolderList::from_paths(vec![p("img10.jpg"), p("img2.jpg"), p("IMG1.png"), p("notes.txt")], &p("img2.jpg"));
-        let names: Vec<_> = (-1..=1).filter_map(|o| l.neighbor(o)).map(|x| x.file_name().unwrap().to_owned()).collect();
+        let l = FolderList::from_paths(
+            vec![p("img10.jpg"), p("img2.jpg"), p("IMG1.png"), p("notes.txt")],
+            &p("img2.jpg"),
+        );
+        let names: Vec<_> = (-1..=1)
+            .filter_map(|o| l.neighbor(o))
+            .map(|x| x.file_name().unwrap().to_owned())
+            .collect();
         assert_eq!(names, ["IMG1.png", "img2.jpg", "img10.jpg"]);
         assert_eq!(l.position(), Some((2, 3)));
     }
@@ -209,7 +243,9 @@ mod tests {
     #[test]
     fn scan_reads_real_folder() {
         let dir = tempfile::tempdir().unwrap();
-        for n in ["2.jpg", "10.jpg", "x.txt"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        for n in ["2.jpg", "10.jpg", "x.txt"] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
         std::fs::create_dir(dir.path().join("sub.jpg")).unwrap();
         let l = FolderList::scan(&dir.path().join("10.jpg")).unwrap();
         assert_eq!(l.position(), Some((2, 2)));
@@ -217,15 +253,24 @@ mod tests {
     #[test]
     fn scan_with_forward_slashes_has_no_duplicate() {
         let dir = tempfile::tempdir().unwrap();
-        for n in ["a.jpg", "b.jpg"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
-        let f = PathBuf::from(dir.path().join("a.jpg").to_string_lossy().replace("\\", "/"));
+        for n in ["a.jpg", "b.jpg"] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
+        let f = PathBuf::from(
+            dir.path()
+                .join("a.jpg")
+                .to_string_lossy()
+                .replace("\\", "/"),
+        );
         let l = FolderList::scan(&f).unwrap();
         assert_eq!(l.position(), Some((1, 2)));
     }
     #[test]
     fn first_supported_in_uses_explorer_order_and_skips_folders() {
         let dir = tempfile::tempdir().unwrap();
-        for n in ["10.jpg", "2.png", "1.txt"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        for n in ["10.jpg", "2.png", "1.txt"] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
         std::fs::create_dir(dir.path().join("1.jpg")).unwrap();
         let first = first_supported_in(dir.path()).unwrap();
         assert_eq!(first.as_deref(), Some(dir.path().join("2.png").as_path()));
@@ -235,7 +280,9 @@ mod tests {
     #[test]
     fn scan_with_relative_path_has_no_duplicate() {
         let dir = tempfile::tempdir().unwrap();
-        for n in ["a.jpg", "b.jpg"] { std::fs::write(dir.path().join(n), b"").unwrap(); }
+        for n in ["a.jpg", "b.jpg"] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
         let old = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let r = FolderList::scan(Path::new("a.jpg"));
