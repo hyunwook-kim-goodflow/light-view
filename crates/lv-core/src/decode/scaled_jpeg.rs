@@ -9,16 +9,21 @@
 //!
 //! `jpeg-decoder` decodes every block of the full-size image (zero-filling what the file
 //! lacks) and cannot be cancelled, so a header claiming a huge image over a few bytes of
-//! data would keep a decoding thread busy for many seconds. A file with fewer bits than
-//! its blocks need at the least (2 per block sequential: a DC code and an EOB; 1 per
-//! block progressive: the first DC scan) is `Corrupt` before decoding starts.
+//! data would keep a decoding thread busy for many seconds (ruling R9). So, before
+//! decoding: a source over `MAX_SOURCE_PIXELS` (32768², about 7 s at worst) is
+//! `TooLarge`, and a file whose entropy-coded data (the bytes of its scans, not its
+//! metadata, tables or anything after EOI) has fewer bits than the frame has blocks
+//! (every block takes at least one bit) is `Corrupt`.
 
 use std::io::Cursor;
 
 use jpeg_decoder::{Decoder, PixelFormat};
 
 use super::{corrupt, DecodeError, DecodeLimits, RgbaFrame};
-use crate::jpeg_markers::{is_frame_header, Markers};
+use crate::jpeg_markers::{is_frame_header, skip_entropy_data, Markers, SOS};
+
+/// The largest source a scaled decode takes on (R9): 32768 x 32768.
+const MAX_SOURCE_PIXELS: u64 = 1 << 30;
 
 /// The denominators `jpeg-decoder` can scale by.
 const DENOMINATORS: [u8; 4] = [1, 2, 4, 8];
@@ -50,8 +55,10 @@ pub(super) fn decode(
     limits: &DecodeLimits,
 ) -> Result<Scaled, DecodeError> {
     let too_large = || DecodeError::TooLarge { width, height };
-    // 64 times the limit or more cannot fit even at 1/8.
-    if u64::from(width) * u64::from(height) > limits.max_pixels.saturating_mul(64) {
+    // Over 64 times the limit cannot fit even at 1/8; over `MAX_SOURCE_PIXELS` takes
+    // too long to decode (R9).
+    let source_cap = limits.max_pixels.saturating_mul(64).min(MAX_SOURCE_PIXELS);
+    if u64::from(width) * u64::from(height) > source_cap {
         return Err(too_large());
     }
     let denom = pick_scale(width, height, limits.max_pixels).ok_or_else(too_large)?;
@@ -95,18 +102,26 @@ fn check_frame(bytes: &[u8], alloc_cap: u64) -> Result<(), Option<DecodeError>> 
         _ => return Err(None),
     };
     let blocks = frame_blocks(frame.payload).ok_or_else(|| Some(corrupt("bad frame header")))?;
-    let min_bits = if progressive {
-        blocks
-    } else {
-        blocks.saturating_mul(2)
-    };
-    if (bytes.len() as u64).saturating_mul(8) < min_bits {
+    if entropy_bytes(bytes).saturating_mul(8) < blocks {
         return Err(Some(corrupt("too little data for the image size")));
     }
     if progressive && blocks.saturating_mul(COEFFICIENT_BYTES) > alloc_cap {
         return Err(None);
     }
     Ok(())
+}
+
+/// The bytes of entropy-coded data in all scans up to EOI: from each SOS header's end to
+/// the next marker that is not `RSTn` or a stuffed `FF00` (or the end of the file).
+fn entropy_bytes(bytes: &[u8]) -> u64 {
+    Markers::new(bytes)
+        .map_while(Result::ok)
+        .filter(|m| m.code == SOS)
+        .map(|m| {
+            let next = skip_entropy_data(bytes, m.end).unwrap_or(bytes.len());
+            next.saturating_sub(m.end) as u64
+        })
+        .sum()
 }
 
 /// The bytes a progressive decode holds per block: 64 `i16` coefficients.
@@ -301,10 +316,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn huge_header_over_little_data_fails_fast() {
-        // A real 64x32 JPEG whose SOF claims 65535x65535 and whose scan data is cut
-        // right after the scan header.
+    /// The real 64x32 `gradient-64x32.jpg` with its SOF claiming `side`x`side` and its
+    /// scan data cut right after the scan header.
+    fn crafted(side: u16) -> Vec<u8> {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../testdata/jpeg/gradient-64x32.jpg"
@@ -314,16 +328,55 @@ mod tests {
             let markers: Vec<_> = Markers::new(&bytes).map_while(Result::ok).collect();
             let sof = markers.iter().find(|m| is_frame_header(m.code)).unwrap();
             let sof_at = sof.payload.as_ptr() as usize - bytes.as_ptr() as usize;
-            let sos = markers.iter().find(|m| m.code == crate::jpeg_markers::SOS);
+            let sos = markers.iter().find(|m| m.code == SOS);
             (sof_at, sos.unwrap().end)
         };
         bytes.truncate(sos_end);
         bytes.extend([0xFF, 0xD9]);
-        bytes[sof_at + 1..sof_at + 5].copy_from_slice(&[0xFF; 4]);
+        let side = side.to_be_bytes();
+        bytes[sof_at + 1..sof_at + 5].copy_from_slice(&[side[0], side[1], side[0], side[1]]);
+        bytes
+    }
+
+    /// Decodes with the default limits; must not succeed, and must be quick about it.
+    fn refused_fast(bytes: &[u8]) -> DecodeError {
         let start = std::time::Instant::now();
-        let result = decode_bytes(&bytes, &DecodeLimits::default());
-        assert!(matches!(result, Err(DecodeError::Corrupt(_))), "{result:?}");
+        let result = decode_bytes(bytes, &DecodeLimits::default());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        result.expect_err("a crafted file must not decode")
+    }
+
+    #[test]
+    fn huge_header_over_little_data_fails_fast() {
+        // At the source cap the data check refuses it; past the cap, the size does.
+        assert!(matches!(
+            refused_fast(&crafted(32768)),
+            DecodeError::Corrupt(_)
+        ));
+        assert!(matches!(
+            refused_fast(&crafted(65535)),
+            DecodeError::TooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn bytes_after_eoi_are_not_scan_data() {
+        let mut bytes = crafted(32768);
+        bytes.resize(bytes.len() + (30 << 20), 0);
+        assert!(matches!(refused_fast(&bytes), DecodeError::Corrupt(_)));
+    }
+
+    #[test]
+    fn metadata_segments_are_not_scan_data() {
+        // About 32 MB of APP5 segments right after SOI.
+        let bytes = crafted(32768);
+        let app = crate::jpeg_markers::tests::segment(0xE5, &[0x41; 65533]);
+        let mut big = bytes[..2].to_vec();
+        for _ in 0..500 {
+            big.extend_from_slice(&app);
+        }
+        big.extend_from_slice(&bytes[2..]);
+        assert!(matches!(refused_fast(&big), DecodeError::Corrupt(_)));
     }
 
     #[test]
@@ -334,6 +387,14 @@ mod tests {
             Err(DecodeError::TooLarge {
                 width: 64,
                 height: 48
+            })
+        ));
+        // Over 32768² is too slow to decode whatever the limit (R9).
+        assert!(matches!(
+            decode(b"not a jpeg", 40000, 30000, &DecodeLimits::default()),
+            Err(DecodeError::TooLarge {
+                width: 40000,
+                height: 30000
             })
         ));
     }
@@ -367,27 +428,31 @@ mod tests {
 
     #[test]
     fn only_sequential_or_small_progressive_frames_are_scaled() {
-        // A frame header followed by `data` bytes standing in for the scans.
+        // A frame header, then one scan with `data` bytes of entropy-coded data.
         let jpeg = |code: u8, payload: &[u8], data: usize| {
             let mut b = vec![0xFF, 0xD8];
             b.extend(crate::jpeg_markers::tests::segment(code, payload));
+            b.extend(crate::jpeg_markers::tests::segment(
+                SOS,
+                &[1, 1, 0, 0, 63, 0],
+            ));
             b.resize(b.len() + data, 0);
             b.extend([0xFF, 0xD9]);
             b
         };
-        // 3 * 1250 * 1250 blocks: at least 2 bits each sequential, 1 progressive.
+        // 3 * 1250 * 1250 blocks, each taking at least one bit.
         let big = sof(10000, 10000, &[(1, 1), (1, 1), (1, 1)]);
-        let blocks = 3 * 1250 * 1250;
+        let blocks: usize = 3 * 1250 * 1250;
         let cap = 500_000_000;
-        assert!(check_frame(&jpeg(0xC0, &big, blocks / 4), cap).is_ok());
-        assert!(check_frame(&jpeg(0xC1, &big, blocks / 4), cap).is_ok());
+        assert!(check_frame(&jpeg(0xC0, &big, blocks.div_ceil(8)), cap).is_ok());
+        assert!(check_frame(&jpeg(0xC1, &big, blocks.div_ceil(8)), cap).is_ok());
         assert!(matches!(
-            check_frame(&jpeg(0xC0, &big, blocks / 4 - 30), cap),
+            check_frame(&jpeg(0xC0, &big, blocks / 8 - 30), cap),
             Err(Some(DecodeError::Corrupt(_)))
         ));
         // Progressive with enough data, but 600 MB of coefficients is over a 500 MB cap.
         assert!(matches!(
-            check_frame(&jpeg(0xC2, &big, blocks / 8), cap),
+            check_frame(&jpeg(0xC2, &big, blocks.div_ceil(8)), cap),
             Err(None)
         ));
         let small = sof(640, 480, &[(1, 1), (1, 1), (1, 1)]);
@@ -411,5 +476,21 @@ mod tests {
             check_frame(&[0xFF, 0xD8, 0xFF, 0xD9], cap),
             Err(Some(DecodeError::Corrupt(_)))
         ));
+    }
+
+    #[test]
+    fn entropy_bytes_count_scans_only() {
+        let seg = crate::jpeg_markers::tests::segment;
+        let mut b = vec![0xFF, 0xD8];
+        b.extend(seg(0xE1, &[0; 100]));
+        b.extend(seg(SOS, &[0; 6]));
+        // 4 data bytes, a stuffed FF00 and a restart marker inside the scan.
+        b.extend([1, 2, 0xFF, 0x00, 3, 0xFF, 0xD0, 4]);
+        b.extend(seg(0xC4, &[0; 50]));
+        b.extend(seg(SOS, &[0; 6]));
+        b.extend([5, 6]);
+        b.extend([0xFF, 0xD9]);
+        b.extend([7; 1000]);
+        assert_eq!(entropy_bytes(&b), 8 + 2);
     }
 }
