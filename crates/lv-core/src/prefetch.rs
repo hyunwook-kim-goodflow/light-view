@@ -660,7 +660,8 @@ mod tests {
         std::thread::spawn(move || {
             let h = harness(2, u64::MAX, &["a"], &[]);
             h.prefetcher.request(&[p("a"), p("b")]);
-            assert_eq!(h.wait_started(), p("a"));
+            // Two workers: "b" (not gated) may start first.
+            while h.wait_started() != p("a") {}
             h.releases[&p("a")].send(()).unwrap();
             drop(h);
             done_tx.send(()).unwrap();

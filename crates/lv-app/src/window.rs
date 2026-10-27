@@ -46,7 +46,7 @@ use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::uia;
 use crate::uia_provider;
-use crate::viewer::{Scene, Viewer};
+use crate::viewer::{Redraw, Scene, Viewer};
 use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
 
@@ -106,7 +106,17 @@ pub fn run(
     settings_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let hwnd_cell = HwndCell::default();
-    let (viewer, pool, decode_limits) = commands::new_viewer(&settings, hwnd_cell.clone());
+    let (mut viewer, pool, decode_limits) = crate::timing::step("viewer-ms", || {
+        commands::new_viewer(&settings, hwnd_cell.clone())
+    });
+    // The first photo starts decoding now, while the window and its renderer are made,
+    // instead of after them. Its ready message may come before the window exists and is
+    // then lost: the window checks for the photo itself once it is up.
+    let first = initial.as_deref().and_then(commands::file_to_open);
+    if let Some(file) = &first {
+        crate::timing::set_target(file);
+        crate::timing::step("open-ms", || viewer.open(file));
+    }
     let (save_tx, save_rx) = channel();
     let (delete_tx, delete_rx) = channel();
     let post = hwnd_cell.clone();
@@ -184,7 +194,8 @@ pub fn run(
             tooltip::set_dark(tt, dark);
         }
         // On failure, destroy the window before `app` goes away (no borrow is held).
-        let renderer = match Renderer::new(hwnd) {
+        crate::timing::mark("window-at");
+        let renderer = match crate::timing::step("d2d-ms", || Renderer::new(hwnd)) {
             Ok(r) => r,
             Err(e) => {
                 let _ = DestroyWindow(hwnd);
@@ -197,9 +208,11 @@ pub fn run(
             a.renderer = Some(renderer);
             a.pointer.set_tooltip(tooltip);
         }
-        // Scans the folder and queues the decode; the window shows without waiting.
-        if let Some(path) = &initial {
-            commands::open(&app, hwnd, path);
+        // The first photo (opened above) is shown if it is ready, and the title, toolbar
+        // and folder watch follow it, as after any open.
+        if first.is_some() {
+            app.borrow_mut().viewer.check_current();
+            commands::after(&app, hwnd, Redraw::Full);
         }
 
         let saved = app.borrow().settings.window.clone();
@@ -207,7 +220,7 @@ pub fn run(
         // Restoring onto a monitor with another DPI sends WM_DPICHANGED; the saved
         // rect is already in that monitor's pixels, so it must not be rescaled.
         app.borrow_mut().restoring = true;
-        let restored = SetWindowPlacement(hwnd, &wp);
+        let restored = crate::timing::step("show-ms", || SetWindowPlacement(hwnd, &wp));
         app.borrow_mut().restoring = false;
         if let Err(e) = restored {
             let _ = DestroyWindow(hwnd);
@@ -222,6 +235,7 @@ pub fn run(
         }
         input::sync_tooltips(&app, hwnd);
         let _ = InvalidateRect(hwnd, None, false);
+        crate::timing::mark("shown-at");
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -253,7 +267,7 @@ impl App {
         let Some(r) = &mut self.renderer else { return };
         match self.viewer.frame_to_upload() {
             Some((img, frame)) => {
-                r.set_image(Some(img), frame);
+                crate::timing::step("upload-ms", || r.set_image(Some(img), frame));
                 if !r.has_image() {
                     // Larger than the GPU's maximum bitmap size; release the pixel copy.
                     r.set_image(None, 0);
@@ -440,7 +454,12 @@ impl App {
             now_ms,
         };
         overlay::draw(r, &mut self.overlay, &view);
-        match r.end() {
+        let ended = if drew_image {
+            crate::timing::step("present-ms", || r.end())
+        } else {
+            r.end()
+        };
+        match ended {
             Ok(()) if drew_image => crate::timing::first_image_presented(),
             Ok(()) => {}
             Err(e) => eprintln!("light-view: EndDraw failed: {e}"),

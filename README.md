@@ -88,9 +88,37 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 
 폴더의 처음과 끝에서 더 넘기면 멈춰요(순환하지 않아요).
 
-개발용 옵션: `lv-app.exe --timing <파일>`은 프로세스 시작부터 첫 사진이 그려질 때까지의 시간을 `first-present-ms=<n>` 한 줄로 stderr에 찍고, `%TEMP%\light-view-timing.log`에도 덧붙여요. 옵션은 파일 경로보다 앞에 써야 해요.
+개발용 옵션: `lv-app.exe --timing <파일>`은 프로세스 시작부터 첫 사진이 그려질 때까지의 시간을 `first-present-ms=<n>`으로 시작하는 한 줄(뒤에 개인 메모리와 구간별 시간이 이어져요)로 stderr에 찍고, `%TEMP%\light-view-timing.log`에도 덧붙여요. 옵션은 파일 경로보다 앞에 써야 해요.
 
 ## 현재 수치
+
+### M5 (lv-bench)
+
+`lv-bench`로 재요. 합성 사진을 임시 폴더에 5장씩 만들고 가운데 사진을 `lv-app.exe --bench`로 5번 열어 중앙값을 JSON 한 줄씩 찍어요. `--bench`는 `--timing`과 같은 측정에 더해 기본 설정으로 띄우고 설정을 저장하지 않으며 단일 창 확인을 하지 않아요. 창은 측정 뒤 그 창에만 `WM_CLOSE`를 보내 닫아요.
+
+```
+cargo build --release -p lv-app -p lv-worker -p lv-bench
+target\release\lv-bench.exe [--runs 5] [--case jpeg12mp]... [--heic 12MP.heic] [-v] [--check crates\lv-bench\baseline.json]
+```
+
+`first_pixel_ms`는 프로세스 시작부터 첫 사진이 그려질 때까지, `decode_ms`는 그 사진의 디코딩, `private_mb`는 메모리가 가라앉은 뒤(이웃 사진 미리 읽기까지 끝난 뒤) 앱과 작업자의 개인 메모리 합이에요. `-v`는 매 실행의 구간별 시간(`d2d-ms`, `decode.decode` 등)을 함께 찍어요. `--check`는 기준 파일 값의 1.5배를 넘는 값이 있으면 종료 코드 1이에요. `heic12mp`는 12 MP HEIC 파일을 `--heic`로 줘야 돌아요(저장소에 넣을 수 있는 샘플이 없어요).
+
+측정 환경: i7-1360P, Windows 11, release 빌드, **AC 전원**(배터리 22%, 충전 중), 2026-10-27.
+
+| 경우 | 첫 사진(ms) | 디코딩(ms) | 개인 메모리(MB) | 목표 |
+|---|---|---|---|---|
+| jpeg12mp (4032×3024) | 394 | 247 | 299 | 200 ms / 300 MB |
+| jpeg24mp (6000×4000, 타일·밉맵) | 561 | 474 | 560 | — |
+| png_large (8000×6000) | 627 | 501 | 980 | — |
+| HEIC 451×461 (작은 샘플, 12 MP 아님) | 296 | 44 | 61 | (12 MP: 400 ms) |
+
+같은 때 바꾸기 전 빌드와 번갈아 잰 jpeg12mp: AC에서 첫 사진 중앙값 543 → 375 ms, 메모리 350 → 298 MB. 배터리(절전으로 CPU가 느려진 상태)에서는 3196 → 2055 ms, 304 → 244 MB.
+
+바꾼 것: 첫 사진 디코딩을 창·Direct2D를 만들기 전에 시작해 둘이 겹치게, HEIF 작업자 시작을 UI 스레드 밖으로, 미리 읽기를 진행 방향 2장에서 1장으로(앞뒤 한 장씩), 밉맵을 한 단계씩 올리고 바로 해제(창이 작아지면 더 깊은 단계를 새로 만듦).
+
+**남은 원인(목표 미달):** 이제 첫 사진의 대부분은 Direct2D 렌더 타깃(D3D 장치) 만들기예요. AC에서 약 250–400 ms, 배터리에서 0.8–1.9 s이고, 작은 HEIC도 첫 사진이 약 280–300 ms라 사진 크기와 상관없는 바닥이에요. 200 ms를 맞추려면 장치를 만드는 방식을 바꿔야 해요(예: D3D11 장치와 스왑 체인을 직접 만들고 통합 GPU를 고르기). 12 MP JPEG 메모리는 목표 근처(AC 299 MB, 배터리 244 MB)이고 사진 3장(현재 + 앞뒤)의 디코딩 결과 약 140 MB, GPU 비트맵 약 47 MB(통합 GPU라 개인 메모리로 잡혀요), 나머지가 기본이에요. 12 MP HEIC는 이 PC에서 쓸 수 있는 샘플이 없어 다시 재지 못했어요.
+
+### 이전 측정 (M1–M2)
 
 측정 환경: 13th Gen Intel(R) Core(TM) i7-1360P, Windows 11, release 빌드. 첫 화면 시간은 `--timing`으로 5회씩 쟀어요(프로세스 시작부터 첫 사진이 그려질 때까지라 창 만들기와 단일 인스턴스 확인 시간도 포함돼요).
 

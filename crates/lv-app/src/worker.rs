@@ -133,11 +133,36 @@ enum WriteOutcome {
 
 impl WorkerPool {
     /// Starts `size` workers right away. Never panics: failures are logged and recorded in
-    /// the slots, and later calls retry.
+    /// the slots, and later calls retry. The app uses
+    /// [`start_in_background`](Self::start_in_background).
+    #[cfg(test)]
     pub fn start(exe: PathBuf, size: usize, max_pixels: u64) -> WorkerPool {
         Self::start_with(exe, size, max_pixels, DEFAULT_TIMEOUT, &[], &[])
     }
 
+    /// Like [`start`](Self::start), but returns at once and starts the workers on a
+    /// thread of their own, so the app's window does not wait for them. A request made
+    /// before a slot's worker is up starts it itself (or waits for the slot).
+    pub fn start_in_background(exe: PathBuf, size: usize, max_pixels: u64) -> Arc<WorkerPool> {
+        let pool = Arc::new(Self::unstarted(
+            exe,
+            size,
+            max_pixels,
+            DEFAULT_TIMEOUT,
+            &[],
+            &[],
+        ));
+        let starter = pool.clone();
+        let spawned = thread::Builder::new()
+            .name("lv-worker start".into())
+            .spawn(move || starter.start_idle_slots());
+        if let Err(e) = spawned {
+            log(&format!("cannot start the worker start thread: {e}"));
+        }
+        pool
+    }
+
+    #[cfg(test)]
     pub(crate) fn start_with(
         exe: PathBuf,
         size: usize,
@@ -146,7 +171,21 @@ impl WorkerPool {
         first_args: &[&str],
         every_args: &[&str],
     ) -> WorkerPool {
-        let pool = WorkerPool {
+        let pool = Self::unstarted(exe, size, max_pixels, timeout, first_args, every_args);
+        pool.start_idle_slots();
+        pool
+    }
+
+    /// A pool of `size` empty slots.
+    fn unstarted(
+        exe: PathBuf,
+        size: usize,
+        max_pixels: u64,
+        timeout: Duration,
+        first_args: &[&str],
+        every_args: &[&str],
+    ) -> WorkerPool {
+        WorkerPool {
             exe,
             max_pixels,
             data_cap: request_data_cap(max_pixels),
@@ -154,7 +193,7 @@ impl WorkerPool {
             first_args: first_args.iter().map(|a| a.to_string()).collect(),
             every_args: every_args.iter().map(|a| a.to_string()).collect(),
             state: Mutex::new(PoolState {
-                idle: Vec::with_capacity(size),
+                idle: (0..size).map(|_| Slot::default()).collect(),
                 live: size,
                 closed: false,
                 jobs: Vec::new(),
@@ -164,16 +203,32 @@ impl WorkerPool {
             single_use_degraded: AtomicBool::new(false),
             #[cfg(test)]
             single_use_pids: Mutex::new(Vec::new()),
-        };
-        let slots: Vec<Slot> = (0..size)
-            .map(|_| {
-                let mut slot = Slot::default();
-                pool.try_spawn(&mut slot);
-                slot
-            })
-            .collect();
-        pool.lock().idle = slots;
-        pool
+        }
+    }
+
+    /// Tries once to start a worker in each idle slot that has none and has never had
+    /// one, one slot at a time (the others stay free for requests meanwhile). A failure
+    /// counts as one start failure of that slot, as at any start.
+    fn start_idle_slots(&self) {
+        loop {
+            let mut slot =
+                {
+                    let mut state = self.lock();
+                    if state.closed {
+                        return;
+                    }
+                    let Some(i) = state.idle.iter().position(|s| {
+                        s.worker.is_none() && !s.started_once && s.spawn_failures == 0
+                    }) else {
+                        return;
+                    };
+                    state.idle.swap_remove(i)
+                };
+            // On failure the slot's count is now 1, so it is not taken again here.
+            self.try_spawn(&mut slot);
+            self.lock().idle.push(slot);
+            self.slot_freed.notify_one();
+        }
     }
 
     /// Sends one request to a worker and waits at most `deadline` for its answer (ruling
@@ -796,6 +851,27 @@ pub(crate) mod tests {
         let mut workers = pool.workers();
         assert_eq!(workers.len(), 1, "expected one live worker");
         workers.remove(0)
+    }
+
+    #[test]
+    fn background_start_does_not_wait_for_workers_and_then_serves() {
+        let started = Instant::now();
+        let pool = WorkerPool::start_in_background(worker_exe(), 2, MAX_PIXELS);
+        let returned = started.elapsed();
+        // A worker process takes tens of ms to start; none was started by the call.
+        assert!(
+            returned < Duration::from_millis(20),
+            "start_in_background took {returned:?}"
+        );
+        // A request made meanwhile is served (by a started slot or one it starts).
+        assert_decodes(&pool);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.workers().len() < 2 {
+            assert!(Instant::now() < deadline, "both slots get a worker");
+            thread::sleep(Duration::from_millis(20));
+        }
+        pool.shutdown();
+        assert!(pool.workers().is_empty());
     }
 
     #[test]

@@ -1,0 +1,3 @@
+{"case": "jpeg12mp", "first_pixel_ms": 394, "decode_ms": 247, "private_mb": 299}
+{"case": "jpeg24mp", "first_pixel_ms": 561, "decode_ms": 474, "private_mb": 560}
+{"case": "png_large", "first_pixel_ms": 627, "decode_ms": 501, "private_mb": 980}

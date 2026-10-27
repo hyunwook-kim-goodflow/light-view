@@ -85,6 +85,9 @@ pub struct Renderer {
     device: Option<Device>,
     /// The mip build for the image set last, until its levels are uploaded.
     mip_job: Option<MipJob>,
+    /// The tiled image's decoded frame, kept (shared, not copied) so deeper mip levels
+    /// can be built when the window gets smaller.
+    mip_source: Option<(DecodeResult, usize)>,
 }
 
 /// An image is set but its bitmap is missing (the device was lost, or not yet built).
@@ -95,10 +98,13 @@ fn needs_upload_for(image: Option<(u32, u32)>, has_bitmap: bool) -> bool {
 impl Renderer {
     pub fn new(hwnd: HWND) -> Result<Renderer> {
         // SAFETY: plain factory constructors; no pointers are passed.
-        let factory: ID2D1Factory1 =
-            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        let factory: ID2D1Factory1 = crate::timing::step("d2d.factory", || unsafe {
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+        })?;
         // SAFETY: as above.
-        let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let dwrite: IDWriteFactory = crate::timing::step("d2d.dwrite", || unsafe {
+            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+        })?;
         // SAFETY: the font family and locale are static NUL-terminated strings.
         let text_format = unsafe {
             let f = dwrite.CreateTextFormat(
@@ -125,8 +131,9 @@ impl Renderer {
             image: None,
             device: None,
             mip_job: None,
+            mip_source: None,
         };
-        r.ensure_device()?;
+        crate::timing::step("d2d.target", || r.ensure_device())?;
         Ok(r)
     }
 
@@ -142,6 +149,9 @@ impl Renderer {
                 self.device = None;
             }
         }
+        // A smaller window may need deeper mip levels to fit the image (a DPI change
+        // arrives here too, with the window's new size).
+        self.ensure_mips((w, h));
     }
 
     /// Window DPI changed (`WM_DPICHANGED`); drawing stays in DIPs.
@@ -160,6 +170,7 @@ impl Renderer {
     pub fn set_image(&mut self, img: Option<&DecodeResult>, frame: usize) {
         // Cancels the previous image's build.
         self.mip_job = None;
+        self.mip_source = None;
         let decoded = img.and_then(|r| r.as_ref().as_ref().ok());
         let pixels = decoded.and_then(|img| {
             let f = img.frames.get(frame)?;
@@ -183,21 +194,40 @@ impl Renderer {
         }
         // SAFETY: plain query on a live render target.
         let view = unsafe { d.target.GetPixelSize() };
-        let levels = mip_levels_for_fit((tiled.width, tiled.height), (view.width, view.height));
-        if levels > 1 {
-            let hwnd = self.hwnd.0 as isize;
-            self.mip_job = Some(MipJob::spawn(source.clone(), frame, levels, move || {
-                // SAFETY: plain call; posting to a destroyed window just fails.
-                unsafe {
-                    let _ = PostMessageW(
-                        HWND(hwnd as *mut _),
-                        WM_APP_MIPS_READY,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
-            }));
+        self.mip_source = Some((source.clone(), frame));
+        self.ensure_mips((view.width, view.height));
+    }
+
+    /// Starts building the mip levels fitting the tiled image in a `view`-pixel window
+    /// needs, beyond those uploaded or already being built.
+    fn ensure_mips(&mut self, view: (u32, u32)) {
+        let (Some(d), Some((source, frame))) = (&self.device, &self.mip_source) else {
+            return;
+        };
+        let Some(full) = &d.image else { return };
+        let levels = mip_levels_for_fit((full.width, full.height), view);
+        let have = u8::try_from(d.mips.len() + 1).unwrap_or(u8::MAX);
+        let planned = self.mip_job.as_ref().map_or(have, MipJob::levels).max(have);
+        if levels <= planned {
+            return;
         }
+        let (source, frame) = (source.clone(), *frame);
+        let hwnd = self.hwnd.0 as isize;
+        // Replaces (cancels) a shallower build; levels it already handed over stay.
+        self.take_mips();
+        let have = self.device.as_ref().map_or(1, |d| d.mips.len() + 1);
+        let first = u8::try_from(have).unwrap_or(u8::MAX);
+        self.mip_job = Some(MipJob::spawn(source, frame, (first, levels), move || {
+            // SAFETY: plain call; posting to a destroyed window just fails.
+            unsafe {
+                let _ = PostMessageW(
+                    HWND(hwnd as *mut _),
+                    WM_APP_MIPS_READY,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        }));
     }
 
     /// Whether an image is set and its bitmaps could be created (video memory may run
@@ -217,18 +247,35 @@ impl Renderer {
         needs_upload_for(self.image, has_bitmap)
     }
 
-    /// Uploads the mip levels if their build finished. If one cannot be created the
-    /// image keeps drawing from the levels before it.
+    /// Uploads the mip levels finished so far, freeing each one's pixels right after
+    /// its upload. If one cannot be created, the build is dropped and the image keeps
+    /// drawing from the levels before it.
     fn take_mips(&mut self) {
-        let Some(levels) = self.mip_job.as_ref().and_then(MipJob::try_take) else {
-            return;
-        };
-        self.mip_job = None;
+        let Some(job) = &self.mip_job else { return };
+        let ready = job.take_ready();
+        let last = job.levels().saturating_sub(1);
         let Some(d) = &mut self.device else { return };
         if d.image.is_none() {
             return;
         }
-        d.mips = upload_levels(&d.target, &levels);
+        for (level, mip) in ready {
+            // Levels come in order; one not following the uploaded ones is from a build
+            // that was replaced.
+            if usize::from(level) != d.mips.len() + 1 {
+                continue;
+            }
+            match upload_level(&d.target, &mip) {
+                Some(bitmap) => d.mips.push(bitmap),
+                None => {
+                    self.mip_job = None;
+                    return;
+                }
+            }
+            if level >= last {
+                self.mip_job = None;
+                return;
+            }
+        }
     }
 
     pub fn begin(&mut self, bg: Rgb) {
@@ -437,15 +484,10 @@ impl Renderer {
     }
 }
 
-/// GPU bitmaps of `levels`, in order, stopping at the first that cannot be created.
-fn upload_levels(target: &ID2D1HwndRenderTarget, levels: &[MipLevel]) -> Vec<TiledBitmap> {
-    levels
-        .iter()
-        .map_while(|l| {
-            let p = Pixels::new(&l.bgra, l.width, l.height)?;
-            TiledBitmap::upload(target, &p).ok()
-        })
-        .collect()
+/// The GPU bitmaps of one mip level; `None` if they cannot be created.
+fn upload_level(target: &ID2D1HwndRenderTarget, level: &MipLevel) -> Option<TiledBitmap> {
+    let p = Pixels::new(&level.bgra, level.width, level.height)?;
+    TiledBitmap::upload(target, &p).ok()
 }
 
 /// The unturned bitmap rect sharing `rect`'s centre, and the transform that turns it

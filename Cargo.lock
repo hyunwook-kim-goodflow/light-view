@@ -267,6 +267,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lv-bench"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "windows",
+]
+
+[[package]]
 name = "lv-core"
 version = "0.1.0"
 dependencies = [
