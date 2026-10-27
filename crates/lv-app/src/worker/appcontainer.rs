@@ -6,11 +6,13 @@
 //! has no network. The worker still needs read and execute access to its own folder (the
 //! exe and the DLLs it imports). The installer grants that to `ALL APPLICATION PACKAGES`;
 //! a folder without it (a dev build in `target\`, a copied portable folder) makes
-//! [`for_worker`] answer `None`, and the worker runs in the low integrity sandbox alone.
+//! [`for_worker`] answer `None` without creating the profile, and the worker runs in the low
+//! integrity sandbox alone.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
@@ -30,7 +32,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 
+use super::process::Worker;
 use super::sandbox::log;
+use super::WorkerPool;
 
 /// The worker's AppContainer profile. The app creates it on first use and keeps it.
 pub const PROFILE_NAME: &str = "goodflow.LightView.Worker";
@@ -53,11 +57,72 @@ impl OwnedSid {
     }
 }
 
+/// Variables an AppContainer start passes on. Windows points `LOCALAPPDATA`, `TEMP` and
+/// `TMP` at the container's own folder and refuses the start (ERROR_ENVVAR_NOT_FOUND) when
+/// `LOCALAPPDATA` is missing.
+const ENVIRONMENT: &[&str] = &["SystemRoot", "LOCALAPPDATA"];
+
+/// The AppContainer a worker starts in, and what its environment holds.
+pub struct Container {
+    sid: OwnedSid,
+    environment: &'static [&'static str],
+}
+
+impl Container {
+    pub fn sid(&self) -> &OwnedSid {
+        &self.sid
+    }
+
+    /// Names of the variables of ours the worker's environment holds.
+    pub fn environment(&self) -> &'static [&'static str] {
+        self.environment
+    }
+
+    /// A container whose start always fails (no `LOCALAPPDATA`), to test the fallback.
+    #[cfg(test)]
+    pub fn broken(sid: OwnedSid) -> Container {
+        Container {
+            sid,
+            environment: &["SystemRoot"],
+        }
+    }
+}
+
 impl Drop for OwnedSid {
     fn drop(&mut self) {
         // SAFETY: the SID came from CreateAppContainerProfile or
         // DeriveAppContainerSidFromAppContainerName, which document FreeSid; freed once.
         unsafe { FreeSid(self.0) };
+    }
+}
+
+impl WorkerPool {
+    /// The AppContainer for this pool's workers, if they can run in one (ruling R2). Looked
+    /// up and logged once, by the first worker start (normally on the pool's start thread).
+    pub(super) fn container(&self) -> Option<&Container> {
+        if self.container_failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.container
+            .get_or_init(|| {
+                #[cfg(test)]
+                let profile = || profile_sid_named(self.profile_name);
+                #[cfg(not(test))]
+                let profile = profile_sid;
+                for_worker(&self.exe, profile)
+            })
+            .as_ref()
+    }
+
+    /// Notes a worker that had to start without the AppContainer it was given.
+    pub(super) fn check_container(&self, worker: &Worker) {
+        if let Some(e) = &worker.sandboxed.container_failure {
+            if !self.container_failed.swap(true, Ordering::Relaxed) {
+                log(&format!(
+                    "start in the AppContainer failed ({e}); workers run without it"
+                ));
+            }
+        }
     }
 }
 
@@ -111,15 +176,23 @@ fn create_or_derive(name: &str) -> windows::core::Result<OwnedSid> {
     }
 }
 
-/// The AppContainer to start `exe` in: the profile's `sid` (from [`profile_sid`]) when there
-/// is one and the exe's folder lets AppContainers read and run it, else `None`. Says which
-/// in the log (the pool asks once).
-pub fn for_worker(exe: &Path, sid: Option<OwnedSid>) -> Option<OwnedSid> {
-    let sid = sid?;
-    match folder_readable(&sid, exe) {
+/// The AppContainer to start `exe` in, else `None`, saying which in the log (the pool asks
+/// once). It needs `LOCALAPPDATA` set and `exe`'s folder letting `ALL APPLICATION PACKAGES`
+/// read and run it; only then is `profile` asked for the SID (normally [`profile_sid`],
+/// which creates the profile), so runs that cannot use it leave no profile behind.
+pub fn for_worker(exe: &Path, profile: impl FnOnce() -> Option<OwnedSid>) -> Option<Container> {
+    if std::env::var_os("LOCALAPPDATA").is_none() {
+        log("LOCALAPPDATA is not set; workers run in the low integrity sandbox only");
+        return None;
+    }
+    match folder_readable(exe) {
         Ok(true) => {
+            let sid = profile()?;
             log("workers run in an AppContainer");
-            Some(sid)
+            Some(Container {
+                sid,
+                environment: ENVIRONMENT,
+            })
         }
         Ok(false) => {
             let dir = exe.parent().unwrap_or(exe);
@@ -138,10 +211,10 @@ pub fn for_worker(exe: &Path, sid: Option<OwnedSid>) -> Option<OwnedSid> {
     }
 }
 
-/// Whether AppContainer `sid` may read and execute `exe`, its folder and every DLL in it
-/// (by their DACLs: an allow entry for `sid` or `ALL APPLICATION PACKAGES` covering
-/// read+execute, and no deny entry for either touching it).
-pub fn folder_readable(sid: &OwnedSid, exe: &Path) -> Result<bool, String> {
+/// Whether every AppContainer may read and execute `exe`, its folder and every DLL in it
+/// (by their DACLs: an allow entry for `ALL APPLICATION PACKAGES` covering read+execute,
+/// and no deny entry for it touching that).
+pub fn folder_readable(exe: &Path) -> Result<bool, String> {
     let dir = exe
         .parent()
         .ok_or_else(|| format!("{} has no parent folder", exe.display()))?;
@@ -159,7 +232,7 @@ pub fn folder_readable(sid: &OwnedSid, exe: &Path) -> Result<bool, String> {
     let any_package = any_package_sid().map_err(|e| format!("CreateWellKnownSid: {e}"))?;
     let any_package = PSID(any_package.as_ptr().cast_mut().cast());
     for path in paths {
-        if !grants_read_execute(&path, &[sid.as_psid(), any_package])? {
+        if !grants_read_execute(&path, any_package)? {
             return Ok(false);
         }
     }
@@ -208,9 +281,9 @@ fn file_rights(mask: u32) -> u32 {
     rights
 }
 
-/// Whether `path`'s DACL lets one of `sids` read and execute it. Deny entries count wherever
-/// they are, which can only make the answer more cautious.
-fn grants_read_execute(path: &Path, sids: &[PSID]) -> Result<bool, String> {
+/// Whether `path`'s DACL lets `sid` read and execute it. Deny entries count wherever they
+/// are, which can only make the answer more cautious.
+fn grants_read_execute(path: &Path, sid: PSID) -> Result<bool, String> {
     let path_w: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut sd = PSECURITY_DESCRIPTOR::default();
@@ -265,10 +338,7 @@ fn grants_read_execute(path: &Path, sids: &[PSID]) -> Result<bool, String> {
             )
         };
         // SAFETY: both SIDs are valid for the duration of the call.
-        if !sids
-            .iter()
-            .any(|&sid| unsafe { EqualSid(sid, ace_sid) }.is_ok())
-        {
+        if unsafe { EqualSid(sid, ace_sid) }.is_err() {
             continue;
         }
         if kind == ACCESS_ALLOWED_ACE_TYPE {
@@ -284,6 +354,7 @@ fn grants_read_execute(path: &Path, sids: &[PSID]) -> Result<bool, String> {
 mod tests {
     use super::*;
 
+    use std::ops::Deref;
     use std::process::Command;
     use std::time::Duration;
 
@@ -304,15 +375,56 @@ mod tests {
     /// Not a valid profile name, so creating the profile fails.
     const BAD_PROFILE: &str = "no\\such//profile";
 
-    fn pool_with(exe: PathBuf, profile: &'static str, every_args: &[&str]) -> WorkerPool {
+    fn unstarted(exe: PathBuf, profile: &'static str, every_args: &[&str]) -> WorkerPool {
         let pool =
             WorkerPool::unstarted(exe, 1, MAX_PIXELS, Duration::from_secs(10), &[], every_args);
-        let pool = WorkerPool {
+        WorkerPool {
             profile_name: profile,
             ..pool
-        };
-        pool.start_idle_slots();
-        pool
+        }
+    }
+
+    /// A started pool whose workers are ended and waited for on drop, a failed assertion
+    /// included, so the folder they run from can be deleted afterwards.
+    struct Running {
+        pool: WorkerPool,
+        processes: Vec<Process>,
+    }
+
+    impl Running {
+        fn start(pool: WorkerPool) -> Running {
+            pool.start_idle_slots();
+            let processes = pool
+                .workers()
+                .iter()
+                .map(|w| Process::open(w.pid))
+                .collect();
+            Running { pool, processes }
+        }
+
+        fn new(exe: PathBuf, profile: &'static str, every_args: &[&str]) -> Running {
+            Running::start(unstarted(exe, profile, every_args))
+        }
+    }
+
+    impl Deref for Running {
+        type Target = WorkerPool;
+
+        fn deref(&self) -> &WorkerPool {
+            &self.pool
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.pool.shutdown();
+            for process in &self.processes {
+                let ended = process.wait_for_exit(Duration::from_secs(5));
+                if !ended && !std::thread::panicking() {
+                    panic!("a worker did not end after shutdown");
+                }
+            }
+        }
     }
 
     fn in_appcontainer(pid: u32) -> bool {
@@ -337,16 +449,15 @@ mod tests {
     }
 
     /// A temporary copy of the worker and its DLLs in a folder that grants `ALL APPLICATION
-    /// PACKAGES` read and execute access, as the installer does.
+    /// PACKAGES` read and execute access, as the installer will.
     fn staged_worker() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
             .prefix("lv-m5-ac-")
             .tempdir()
             .expect("temp folder");
         let built = worker_exe();
-        let sid = profile_sid().expect("worker profile");
         assert!(
-            !folder_readable(&sid, &dir.path().join("lv-worker.exe")).unwrap(),
+            !folder_readable(&dir.path().join("lv-worker.exe")).unwrap(),
             "a fresh temp folder grants AppContainers nothing"
         );
         let status = Command::new("icacls")
@@ -363,18 +474,8 @@ mod tests {
             }
         }
         let exe = dir.path().join("lv-worker.exe");
-        assert!(folder_readable(&sid, &exe).unwrap());
+        assert!(folder_readable(&exe).unwrap());
         (dir, exe)
-    }
-
-    /// Ends the pool's workers and waits for them, so their folder can be deleted.
-    fn finish(pool: WorkerPool, pids: &[u32]) {
-        let processes: Vec<Process> = pids.iter().map(|&pid| Process::open(pid)).collect();
-        pool.shutdown();
-        drop(pool);
-        for process in processes {
-            assert!(process.wait_for_exit(Duration::from_secs(5)));
-        }
     }
 
     fn probe(pool: &WorkerPool) -> String {
@@ -389,83 +490,101 @@ mod tests {
 
     #[test]
     fn worker_falls_back_without_appcontainer() {
-        let pool = pool_with(worker_exe(), BAD_PROFILE, &[]);
+        // A folder AppContainers cannot read: the profile is not even asked for.
+        if !folder_readable(&worker_exe()).unwrap() {
+            assert!(for_worker(&worker_exe(), || panic!("profile asked for")).is_none());
+        }
+        // A readable folder but no profile (creating it fails).
+        let (_folder, exe) = staged_worker();
+        let pool = Running::new(exe, BAD_PROFILE, &[]);
         assert!(pool.container().is_none(), "the bad profile is refused");
         let pid = single_worker(&pool).pid;
         assert!(!in_appcontainer(pid));
+        assert!(win32k_lockdown(&pool));
         assert_decodes(&pool);
-        finish(pool, &[pid]);
+    }
+
+    #[test]
+    fn failed_appcontainer_start_keeps_mitigations() {
+        let pool = unstarted(worker_exe(), PROFILE_NAME, &[]);
+        let sid = profile_sid().expect("worker profile");
+        // No LOCALAPPDATA: every start in this container fails.
+        assert!(pool.container.set(Some(Container::broken(sid))).is_ok());
+        let pool = Running::start(pool);
+        let pid = single_worker(&pool).pid;
+        assert!(!in_appcontainer(pid));
+        assert!(win32k_lockdown(&pool), "only the AppContainer was dropped");
+        assert_eq!(pool.slot_states(), vec![(0, false)], "not a start failure");
+        assert!(pool.container_failed.load(Ordering::Relaxed));
+        assert!(pool.container().is_none(), "later workers do not try it");
+        assert_decodes(&pool);
+        assert_rotated(
+            pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
+            (32, 64),
+        );
     }
 
     #[test]
     fn appcontainer_worker_cannot_read_user_file() {
-        let user_dir = tempfile::Builder::new()
-            .prefix("lv-m5-probe-")
-            .tempdir()
-            .expect("temp folder");
-        let profile = std::env::var_os("USERPROFILE").expect("USERPROFILE");
-        assert!(
-            user_dir.path().starts_with(&profile),
-            "TEMP is under USERPROFILE"
-        );
-        let secret = user_dir.path().join("secret.txt");
+        let profile = PathBuf::from(std::env::var_os("USERPROFILE").expect("USERPROFILE"));
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("lv-m5-probe-");
+        let user_dir = if std::env::temp_dir().starts_with(&profile) {
+            builder.tempdir()
+        } else {
+            builder.tempdir_in(&profile)
+        }
+        .expect("temp folder under USERPROFILE");
+        let secret = user_dir.path().join("secret file.txt");
         std::fs::write(&secret, b"user data").unwrap();
-        let secret = secret.to_str().unwrap();
-        assert!(
-            !secret.contains(' '),
-            "the probe path goes on the command line unquoted"
-        );
-        let probe_arg = format!("--test-mode=probe-read={secret}");
+        // Quoted as one argument: the path has a space.
+        let probe_arg = format!("\"--test-mode=probe-read={}\"", secret.display());
 
         // In the low integrity sandbox alone the worker can read user files.
-        let low = pool_with(worker_exe(), BAD_PROFILE, &[&probe_arg]);
-        let low_pid = single_worker(&low).pid;
-        assert_eq!(probe(&low), "probe-read: opened");
-        finish(low, &[low_pid]);
-
-        let (folder, exe) = staged_worker();
-        let boxed = pool_with(exe.clone(), PROFILE_NAME, &[&probe_arg]);
-        let boxed_pid = single_worker(&boxed).pid;
-        assert!(
-            in_appcontainer(boxed_pid),
-            "the staged worker runs in the AppContainer"
-        );
-        let answer = probe(&boxed);
-        assert!(
-            answer.starts_with("probe-read: ") && answer.ends_with("(os error 5)"),
-            "access denied expected: {answer}"
-        );
-        // Each rotation's single-use worker is boxed in too.
-        match boxed.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")) {
-            Err(PoolError::Failed(DecodeError::Corrupt(msg))) => {
-                assert!(
-                    msg.ends_with("(os error 5)"),
-                    "access denied expected: {msg}"
-                )
-            }
-            Err(e) => panic!("expected a probe answer, got {e}"),
-            Ok(_) => panic!("expected a probe answer, got a reply"),
+        {
+            let low = Running::new(worker_exe(), BAD_PROFILE, &[&probe_arg]);
+            assert_eq!(probe(&low), "probe-read: opened");
         }
-        finish(boxed, &[boxed_pid]);
+
+        let (_folder, exe) = staged_worker();
+        {
+            let boxed = Running::new(exe.clone(), PROFILE_NAME, &[&probe_arg]);
+            assert!(
+                in_appcontainer(single_worker(&boxed).pid),
+                "the staged worker runs in the AppContainer"
+            );
+            let answer = probe(&boxed);
+            assert!(
+                answer.starts_with("probe-read: ") && answer.ends_with("(os error 5)"),
+                "access denied expected: {answer}"
+            );
+            // Each rotation's single-use worker is boxed in too.
+            match boxed.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")) {
+                Err(PoolError::Failed(DecodeError::Corrupt(msg))) => {
+                    assert!(
+                        msg.ends_with("(os error 5)"),
+                        "access denied expected: {msg}"
+                    )
+                }
+                Err(e) => panic!("expected a probe answer, got {e}"),
+                Ok(_) => panic!("expected a probe answer, got a reply"),
+            }
+        }
 
         // HEIC still opens in the AppContainer, which adds to the other layers.
-        let heic = pool_with(exe, PROFILE_NAME, &[]);
+        let heic = Running::new(exe, PROFILE_NAME, &[]);
         let worker = single_worker(&heic);
-        let heic_pid = worker.pid;
-        assert!(in_appcontainer(heic_pid));
+        assert!(in_appcontainer(worker.pid));
         assert!(win32k_lockdown(&heic), "mitigations kept");
         let mut in_job = BOOL(0);
-        let process = Process::open(heic_pid);
+        let process = Process::open(worker.pid);
         // SAFETY: both handles are valid for the duration of the call.
         unsafe { IsProcessInJob(process.0, worker.job, &mut in_job) }.expect("IsProcessInJob");
         assert!(in_job.as_bool(), "Job kept");
-        drop(process);
         assert_decodes(&heic);
         assert_rotated(
             heic.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
             (32, 64),
         );
-        finish(heic, &[heic_pid]);
-        drop(folder);
     }
 }
