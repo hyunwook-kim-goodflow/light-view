@@ -169,30 +169,55 @@ pub fn normalize_exif_orientation(heif: &[u8]) -> Result<Vec<u8>, String> {
         let Some(item) = file.iloc.items.iter().find(|i| i.id == id) else {
             continue;
         };
-        let [extent] = item.extents.as_slice() else {
-            continue;
-        };
-        if item.method != 0 || item.dref != 0 {
-            continue;
+        if let Some(tiff) = exif_tiff_range(heif, item)? {
+            set_tiff_orientation_in_place(&mut out, tiff, 1)?;
         }
-        let range = extent_range(heif.len(), item.base.value, extent)
-            .ok_or("EXIF item lies outside the file")?;
-        let header = heif
-            .get(range.start..range.start + 4)
-            .ok_or("EXIF item is too short")?;
-        let offset = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-        let mut tiff_start = usize::try_from(offset)
-            .ok()
-            .and_then(|o| (range.start + 4).checked_add(o))
-            .filter(|&s| s <= range.end)
-            .ok_or("EXIF item's TIFF offset is out of bounds")?;
-        // Some writers keep the JPEG-style prefix without counting it in the offset.
-        if heif.get(tiff_start..tiff_start + 6) == Some(b"Exif\0\0") {
-            tiff_start += 6;
-        }
-        set_tiff_orientation_in_place(&mut out, tiff_start..range.end, 1)?;
     }
     Ok(out)
+}
+
+/// The TIFF block of an EXIF item: past the 4-byte `exif_tiff_header_offset` and an optional
+/// JPEG-style `Exif\0\0` prefix. `None` for an item stored in `idat`, in another file or in
+/// more than one extent.
+fn exif_tiff_range(heif: &[u8], item: &IlocItem) -> Result<Option<Range<usize>>, String> {
+    let [extent] = item.extents.as_slice() else {
+        return Ok(None);
+    };
+    if item.method != 0 || item.dref != 0 {
+        return Ok(None);
+    }
+    let range = extent_range(heif.len(), item.base.value, extent)
+        .ok_or("EXIF item lies outside the file")?;
+    let header = heif
+        .get(range.start..range.start + 4)
+        .ok_or("EXIF item is too short")?;
+    let offset = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let mut tiff_start = usize::try_from(offset)
+        .ok()
+        .and_then(|o| (range.start + 4).checked_add(o))
+        .filter(|&s| s <= range.end)
+        .ok_or("EXIF item's TIFF offset is out of bounds")?;
+    // Some writers keep the JPEG-style prefix without counting it in the offset.
+    if heif.get(tiff_start..tiff_start + 6) == Some(b"Exif\0\0") {
+        tiff_start += 6;
+    }
+    Ok(Some(tiff_start..range.end))
+}
+
+/// The TIFF block of the first readable EXIF item of a HEIF file, for read-only use. `None`
+/// when there is none or the file does not parse.
+pub(crate) fn exif_item_tiff(heif: &[u8]) -> Option<&[u8]> {
+    let file = parse(heif).ok()?;
+    let iinf = file.iinf?;
+    for id in item_ids_of_type(heif, &iinf, b"Exif").ok()? {
+        let Some(item) = file.iloc.items.iter().find(|i| i.id == id) else {
+            continue;
+        };
+        if let Ok(Some(range)) = exif_tiff_range(heif, item) {
+            return heif.get(range);
+        }
+    }
+    None
 }
 
 /// How a box stores its size.
