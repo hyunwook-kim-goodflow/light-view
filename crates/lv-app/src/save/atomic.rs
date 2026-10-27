@@ -7,19 +7,23 @@ use std::fs::{self, FileTimes, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use lv_core::decode::DecodeLimits;
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
+use lv_core::listing::same_path;
 use windows::core::{HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    FindClose, FindFirstFileW, FindNextFileW, MoveFileExW, ReplaceFileW, SetFileAttributesW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH,
-    REPLACEFILE_IGNORE_MERGE_ERRORS, WIN32_FIND_DATAW,
+    FindClose, FindFirstFileW, FindNextFileW, GetFileInformationByHandle, MoveFileExW,
+    ReplaceFileW, SetFileAttributesW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH, REPLACEFILE_IGNORE_MERGE_ERRORS,
+    WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -204,12 +208,60 @@ fn move_no_replace(from: &Path, to: &Path) -> windows::core::Result<()> {
     }
 }
 
-/// Temp files kept as the only copy of a photo under their temp name (the rename to a
-/// copy name failed), as extended paths. [`sweep_stale_temps`] never removes them.
-static KEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// A temp file kept as the only copy of a photo under its temp name (the rename to a
+/// copy name failed): its extended path and, when it could be read, its file ID.
+pub(super) struct Kept {
+    path: PathBuf,
+    id: Option<(u32, u64)>,
+}
 
-pub(super) fn kept() -> MutexGuard<'static, Vec<PathBuf>> {
+impl Kept {
+    pub(super) fn new(path: &Path) -> Kept {
+        Kept {
+            path: to_extended_path(path),
+            id: file_id(path),
+        }
+    }
+
+    /// `path`, whose file ID is `id` (if read), is this file: the same file ID when both
+    /// are known (ruling R22), else the same path whatever its case or `\\?\` spelling.
+    pub(super) fn matches(&self, path: &Path, id: Option<(u32, u64)>) -> bool {
+        match (self.id, id) {
+            (Some(a), Some(b)) => a == b,
+            _ => same_path(&self.path, &to_extended_path(path)),
+        }
+    }
+}
+
+/// The kept temp files of this process. [`sweep_stale_temps`] never removes them.
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
+
+fn kept() -> MutexGuard<'static, Vec<Kept>> {
     KEPT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether the file at `path` is a kept temp file.
+#[cfg(test)]
+pub(super) fn is_kept(path: &Path) -> bool {
+    let id = file_id(path);
+    kept().iter().any(|k| k.matches(path, id))
+}
+
+/// The volume serial number and file index of `path`, read through a handle that asks
+/// only for attributes, so a file another program holds open without sharing answers
+/// too. `None` when it cannot be read or the file system has no file IDs (index 0).
+pub(super) fn file_id(path: &Path) -> Option<(u32, u64)> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .open(to_extended_path(path))
+        .ok()?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle comes from a live `File` borrowed for the whole call, and `info`
+    // is a valid, writable out-parameter of the expected type.
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    (index != 0).then_some((info.dwVolumeSerialNumber, index))
 }
 
 /// Most numbered copy names tried (`<stem> (light-view 사본 N).<ext>`).
@@ -227,7 +279,7 @@ fn keep_copy(target: &Path, temp: &Path) -> SaveOutcome {
     let at = match renamed {
         Some(copy) => copy,
         None => {
-            kept().push(to_extended_path(temp));
+            kept().push(Kept::new(temp));
             temp.to_path_buf()
         }
     };
@@ -313,13 +365,14 @@ fn sweep_stale_temps(target: &Path, own: u32) {
             continue;
         };
         let path = dir.join(&file);
-        let is_kept = kept().contains(&to_extended_path(&path));
+        let id = file_id(&path);
+        let is_kept = kept().iter().any(|k| k.matches(&path, id));
         if is_kept {
             if let Some(copy) = copy_names(target)
                 .into_iter()
                 .find(|copy| move_no_replace(&path, copy).is_ok())
             {
-                kept().retain(|k| *k != to_extended_path(&path));
+                kept().retain(|k| !k.matches(&path, id));
                 unhide(&copy);
                 eprintln!(
                     "light-view: the kept copy {} is now {}",

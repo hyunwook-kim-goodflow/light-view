@@ -18,7 +18,9 @@ use crate::worker::{PoolError, Reply, WorkerPool};
 mod atomic;
 use atomic::replace;
 #[cfg(test)]
-use atomic::{after_replace_error, is_stale, kept, process_running, temp_pid, TempFile};
+use atomic::{
+    after_replace_error, file_id, is_kept, is_stale, process_running, temp_pid, Kept, TempFile,
+};
 
 /// How a save ended. Only `Saved` and `SavedAsOrientationTag` changed the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1072,7 +1074,7 @@ mod tests {
         drop(lock);
         assert_eq!(fs::read(&temp).unwrap(), b"new");
         assert!(!c.target.exists());
-        assert!(kept().contains(&to_extended_path(&temp)));
+        assert!(is_kept(&temp));
     }
 
     #[test]
@@ -1122,7 +1124,32 @@ mod tests {
         assert_eq!(save(), SaveOutcome::Saved);
         assert_eq!(fs::read(&copy).unwrap(), b"new");
         assert!(!temp.exists());
-        assert!(!kept().contains(&to_extended_path(&temp)));
+        assert!(!is_kept(&temp));
+    }
+
+    /// A kept copy is known by its file ID (ruling R22), not by how its path is spelled,
+    /// even while another program holds it open without sharing; a new file under its
+    /// name is another file.
+    #[test]
+    fn kept_copies_are_known_by_file_id_whatever_the_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join(".a.jpg.lvtmp-7");
+        fs::write(&temp, b"the only copy").unwrap();
+        let lock = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&temp)
+            .unwrap();
+        let kept = Kept::new(&temp);
+        let upper = PathBuf::from(temp.to_string_lossy().to_uppercase());
+        for p in [&temp, &upper, &to_extended_path(&temp)] {
+            assert!(file_id(p).is_some(), "{}", p.display());
+            assert!(kept.matches(p, file_id(p)), "{}", p.display());
+        }
+        drop(lock);
+        fs::remove_file(&temp).unwrap();
+        fs::write(&temp, b"someone else's").unwrap();
+        assert!(!kept.matches(&temp, file_id(&temp)));
     }
 
     #[test]
