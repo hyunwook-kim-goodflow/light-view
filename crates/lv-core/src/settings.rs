@@ -92,6 +92,61 @@ fn temp_path(path: &Path) -> std::path::PathBuf {
     with_suffix(path, &format!(".{}.tmp", std::process::id()))
 }
 
+/// A temp file younger than this may belong to a save running in another process.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Deletes the `settings.toml.<pid>.tmp` files a process left behind when it crashed
+/// between writing and renaming (a failed write or rename removes its own). Called at
+/// start-up, before this process saves anything. Only that exact name pattern beside
+/// `path` is touched, and only a file older than a minute or carrying this process's id
+/// (a dead process that had the same id left it); a fresh file of another id may be a
+/// save in progress. Returns how many were deleted.
+pub fn sweep_stale_temps(path: &Path, now: std::time::SystemTime) -> usize {
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
+        return 0;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let base = base.to_string_lossy();
+    let mut deleted = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| temp_pid(n, &base)) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if (old || pid == std::process::id()) && std::fs::remove_file(entry.path()).is_ok() {
+            deleted += 1;
+        }
+    }
+    deleted
+}
+
+/// The process id in `<base>.<pid>.tmp` (the name `temp_path` makes), or `None`.
+fn temp_pid(name: &str, base: &str) -> Option<u32> {
+    let digits = name.strip_prefix(base)?.strip_prefix('.')?.strip_suffix(".tmp")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// Changes only what `change` sets: reads the file as it is now (another window in
 /// another process may have saved since this one started), applies `change`, and
 /// writes it back atomically. Returns what was written.
@@ -129,6 +184,59 @@ fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_temp_files_are_swept_at_start() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let now = SystemTime::now();
+        let make = |name: &str, age: Duration| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "x").unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(now - age).unwrap();
+            p
+        };
+        let other = std::process::id().wrapping_add(1);
+        let old_other = make(&format!("settings.toml.{other}.tmp"), Duration::from_secs(120));
+        let fresh_other = make(&format!("settings.toml.{other}.tmp2"), Duration::ZERO);
+        let fresh_live = make(
+            &format!("settings.toml.{}.tmp", other.wrapping_add(1)),
+            Duration::from_secs(5),
+        );
+        let fresh_own = make(
+            &format!("settings.toml.{}.tmp", std::process::id()),
+            Duration::ZERO,
+        );
+        // Names outside the pattern stay, however old.
+        let keep: Vec<_> = [
+            "settings.toml",
+            "settings.toml.bak",
+            "settings.toml..tmp",
+            "settings.toml.12a.tmp",
+            "settings.toml.12.TMP",
+            "other.toml.12.tmp",
+            "xsettings.toml.12.tmp",
+        ]
+        .iter()
+        .map(|n| make(n, Duration::from_secs(3600)))
+        .collect();
+        assert_eq!(sweep_stale_temps(&path, now), 2);
+        assert!(!old_other.exists());
+        assert!(!fresh_own.exists());
+        // A fresh file of another process may be a save in progress.
+        assert!(fresh_live.exists());
+        assert!(fresh_other.exists());
+        for p in &keep {
+            assert!(p.exists(), "{}", p.display());
+        }
+        // A missing folder is fine.
+        assert_eq!(
+            sweep_stale_temps(&dir.path().join("none").join("settings.toml"), now),
+            0
+        );
+    }
 
     fn sample() -> Settings {
         Settings {
