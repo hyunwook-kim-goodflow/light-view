@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use lv_core::decode::DecodeError;
 use lv_ipc::Request;
 
-use appcontainer::OwnedSid;
+use appcontainer::Container;
 use process::{took_request, Event, Worker, WriteOutcome};
 use protocol::{request_data_cap, to_request, Expect};
 pub use protocol::{PoolError, PoolRequest, Reply};
@@ -79,7 +79,9 @@ pub struct WorkerPool {
     /// when one was dead before it took its request).
     single_use_degraded: AtomicBool,
     /// The AppContainer workers start in, looked up by the first start ([`Self::container`]).
-    container: OnceLock<Option<OwnedSid>>,
+    container: OnceLock<Option<Container>>,
+    /// A start in the AppContainer failed: later workers go without it (logged once).
+    container_failed: AtomicBool,
     /// AppContainer profile to use (tests inject a bad one).
     #[cfg(test)]
     profile_name: &'static str,
@@ -180,6 +182,7 @@ impl WorkerPool {
             next_id: AtomicU64::new(1),
             single_use_degraded: AtomicBool::new(false),
             container: OnceLock::new(),
+            container_failed: AtomicBool::new(false),
             #[cfg(test)]
             profile_name: appcontainer::PROFILE_NAME,
             #[cfg(test)]
@@ -266,7 +269,10 @@ impl WorkerPool {
         let container = if mitigations { self.container() } else { None };
         let worker = match Worker::start(&self.exe, self.max_pixels, &args, mitigations, container)
         {
-            Ok(worker) => worker,
+            Ok(worker) => {
+                self.check_container(&worker);
+                worker
+            }
             Err(e) => {
                 log(&format!("cannot start {}: {e}", self.exe.display()));
                 return Err(PoolError::WorkerUnavailable);
@@ -331,20 +337,6 @@ impl WorkerPool {
                 terminate_job(&job, pid);
             }
         }
-    }
-
-    /// The AppContainer for this pool's workers, if they can run in one (ruling R2). Looked
-    /// up and logged once, by the first worker start (normally on the pool's start thread).
-    fn container(&self) -> Option<&OwnedSid> {
-        self.container
-            .get_or_init(|| {
-                #[cfg(test)]
-                let sid = appcontainer::profile_sid_named(self.profile_name);
-                #[cfg(not(test))]
-                let sid = appcontainer::profile_sid();
-                appcontainer::for_worker(&self.exe, sid)
-            })
-            .as_ref()
     }
 
     fn is_closed(&self) -> bool {
@@ -423,6 +415,7 @@ impl WorkerPool {
         };
         match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded, container) {
             Ok(worker) => {
+                self.check_container(&worker);
                 let mut state = self.lock();
                 if state.closed {
                     return; // dropping `worker` ends it
@@ -535,38 +528,6 @@ impl WorkerPool {
             }
         }
     }
-
-    #[cfg(test)]
-    fn single_use_pids(&self) -> Vec<u32> {
-        self.single_use_pids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    #[cfg(test)]
-    fn workers(&self) -> Vec<WorkerInfo> {
-        use std::os::windows::io::AsRawHandle;
-        self.lock()
-            .idle
-            .iter()
-            .filter_map(|slot| slot.worker.as_ref())
-            .map(|w| WorkerInfo {
-                pid: w.sandboxed.pid,
-                job: windows::Win32::Foundation::HANDLE(w.sandboxed.job.as_raw_handle()),
-            })
-            .collect()
-    }
-
-    /// (consecutive start failures, degraded) of every idle slot.
-    #[cfg(test)]
-    fn slot_states(&self) -> Vec<(u32, bool)> {
-        self.lock()
-            .idle
-            .iter()
-            .map(|slot| (slot.spawn_failures, slot.degraded))
-            .collect()
-    }
 }
 
 /// Records a failed start. With `degrade`, the slot's next workers go without the
@@ -615,12 +576,6 @@ impl Drop for SlotGuard<'_> {
 }
 
 #[cfg(test)]
-struct WorkerInfo {
-    pid: u32,
-    job: windows::Win32::Foundation::HANDLE,
-}
-
-#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
@@ -650,6 +605,42 @@ pub(crate) mod tests {
     };
 
     const MAX_PIXELS: u64 = 100_000_000;
+
+    pub(super) struct WorkerInfo {
+        pub(super) pid: u32,
+        pub(super) job: windows::Win32::Foundation::HANDLE,
+    }
+
+    impl WorkerPool {
+        pub(super) fn single_use_pids(&self) -> Vec<u32> {
+            self.single_use_pids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        pub(super) fn workers(&self) -> Vec<WorkerInfo> {
+            use std::os::windows::io::AsRawHandle;
+            self.lock()
+                .idle
+                .iter()
+                .filter_map(|slot| slot.worker.as_ref())
+                .map(|w| WorkerInfo {
+                    pid: w.sandboxed.pid,
+                    job: windows::Win32::Foundation::HANDLE(w.sandboxed.job.as_raw_handle()),
+                })
+                .collect()
+        }
+
+        /// (consecutive start failures, degraded) of every idle slot.
+        pub(super) fn slot_states(&self) -> Vec<(u32, bool)> {
+            self.lock()
+                .idle
+                .iter()
+                .map(|slot| (slot.spawn_failures, slot.degraded))
+                .collect()
+        }
+    }
 
     /// `lv-worker.exe` next to the test binary's profile folder (`target/<profile>`).
     pub(crate) fn worker_exe() -> PathBuf {

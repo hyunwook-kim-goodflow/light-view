@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use lv_ipc::{read_response, write_request, IpcError, Request, Response};
 
-use super::appcontainer::OwnedSid;
+use super::appcontainer::Container;
 use super::protocol::response_cap;
 use super::sandbox::{self, log, Sandboxed, StdinMonitor};
 use super::WRITE_SETTLE;
@@ -74,7 +74,7 @@ impl Worker {
         max_pixels: u64,
         args: &[&str],
         mitigations: bool,
-        container: Option<&OwnedSid>,
+        container: Option<&Container>,
     ) -> Result<Worker, String> {
         let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args, mitigations, container)?;
         let pid = sandboxed.pid;

@@ -18,7 +18,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::sync::Arc;
 
-use super::appcontainer::OwnedSid;
+use super::appcontainer::Container;
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -66,6 +66,9 @@ pub struct Sandboxed {
     pub process: OwnedHandle,
     /// Shared so the pool can end the worker from another thread ([`terminate_job`]).
     pub job: Arc<OwnedHandle>,
+    /// Why the start in the requested AppContainer failed, if it did (the worker then runs
+    /// without it). The pool logs this once and stops asking.
+    pub container_failure: Option<String>,
 }
 
 impl Sandboxed {
@@ -129,13 +132,14 @@ pub fn log(msg: &str) {
 /// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox, inside `container`
 /// when given. With `mitigations` false the best-effort creation attributes (AppContainer,
 /// win32k lockdown, child process policy) are left out; the mandatory layers are always
-/// applied.
+/// applied. A failed start drops the best-effort layers in steps: first the AppContainer
+/// alone, then the mitigation attributes.
 pub fn spawn(
     exe: &Path,
     max_pixels: u64,
     extra_args: &[&str],
     mitigations: bool,
-    container: Option<&OwnedSid>,
+    container: Option<&Container>,
 ) -> Result<(Sandboxed, Pipes), String> {
     let token = low_integrity_token().map_err(|e| format!("low integrity token: {e}"))?;
     let job = create_job(max_pixels).map_err(|e| format!("job object: {e}"))?;
@@ -152,7 +156,17 @@ pub fn spawn(
 
     let launch = Launch::new(exe, max_pixels, extra_args)?;
     let container = container.filter(|_| mitigations);
-    let info = match launch.create(&token, child_ends, mitigations, container) {
+    let mut container_failure = None;
+    let first = match container {
+        Some(container) => launch
+            .create(&token, child_ends, mitigations, Some(container))
+            .or_else(|e| {
+                container_failure = Some(e);
+                launch.create(&token, child_ends, mitigations, None)
+            }),
+        None => launch.create(&token, child_ends, mitigations, None),
+    };
+    let info = match first {
         Ok(info) => info,
         Err(e) if mitigations => {
             log(&format!(
@@ -193,6 +207,7 @@ pub fn spawn(
         pid: info.dwProcessId,
         process,
         job: Arc::new(job),
+        container_failure,
     };
     // SAFETY: valid thread handle of the suspended main thread.
     if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
@@ -342,12 +357,8 @@ struct Launch {
     application: Vec<u16>,
     command_line: Vec<u16>,
     directory: Vec<u16>,
-    /// `SystemRoot` alone.
+    /// `SystemRoot` alone (an AppContainer start uses [`Container::environment`]).
     environment: Vec<u16>,
-    /// For an AppContainer start: `SystemRoot` and `LOCALAPPDATA`. Windows points
-    /// `LOCALAPPDATA`, `TEMP` and `TMP` at the container's own folder and refuses the start
-    /// (ERROR_ENVVAR_NOT_FOUND) when `LOCALAPPDATA` is missing.
-    container_environment: Vec<u16>,
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
@@ -388,7 +399,6 @@ impl Launch {
             command_line: wide(OsStr::new(&command_line)),
             directory: wide(directory.as_os_str()),
             environment: environment_block(&["SystemRoot"]),
-            container_environment: environment_block(&["SystemRoot", "LOCALAPPDATA"]),
         })
     }
 
@@ -399,12 +409,12 @@ impl Launch {
         token: &OwnedHandle,
         child_ends: [HANDLE; 3],
         mitigations: bool,
-        container: Option<&OwnedSid>,
+        container: Option<&Container>,
     ) -> Result<PROCESS_INFORMATION, String> {
         let win32k = WIN32K_SYSTEM_CALL_DISABLE;
         let child_policy = CHILD_PROCESS_RESTRICTED;
-        let capabilities = container.map(|sid| SECURITY_CAPABILITIES {
-            AppContainerSid: sid.as_psid(),
+        let capabilities = container.map(|container| SECURITY_CAPABILITIES {
+            AppContainerSid: container.sid().as_psid(),
             Capabilities: std::ptr::null_mut(),
             CapabilityCount: 0,
             Reserved: 0,
@@ -433,8 +443,7 @@ impl Launch {
             }
         }
         if let Some(capabilities) = &capabilities {
-            // Not best-effort once asked for: a failure here fails the start, and `spawn`
-            // retries without it.
+            // A failure here fails the start, and `spawn` retries without the container.
             attributes.set(
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
                 std::ptr::from_ref(capabilities).cast(),
@@ -457,11 +466,8 @@ impl Launch {
         // STATUS_DLL_INIT_FAILED). The standard handles are the pipes either way.
         // CreateProcessAsUserW may write into the command line buffer.
         let mut command_line = self.command_line.clone();
-        let environment = if capabilities.is_some() {
-            &self.container_environment
-        } else {
-            &self.environment
-        };
+        let container_environment = container.map(|c| environment_block(c.environment()));
+        let environment = container_environment.as_ref().unwrap_or(&self.environment);
         let mut info = PROCESS_INFORMATION::default();
         // SAFETY: every string is NUL-terminated (the environment double-NUL-terminated)
         // and, like the attribute list and what it points to (the handle array, the
