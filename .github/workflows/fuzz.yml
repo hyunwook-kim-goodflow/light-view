@@ -1,4 +1,4 @@
-# Weekly fuzzing of the parsers of untrusted input (ruling R3): every target in fuzz/
+# Twice-weekly fuzzing of the parsers of untrusted input (ruling R3): every target in fuzz/
 # runs for 10 minutes with cargo-fuzz (libFuzzer + AddressSanitizer) on nightly, starting
 # from its seeds in testdata/fuzz/<target>/. A crash or timeout fails the job and its
 # input is uploaded as the artifact `fuzz-<target>`; fix it, then add the input to
@@ -6,12 +6,15 @@
 #
 # The working corpus (fuzz/corpus/<target>: the seeds plus what libFuzzer kept) carries
 # over between scheduled runs on main through the Actions cache, and each scheduled run
-# also uploads it as the artifact `fuzz-corpus-<target>`.
+# also uploads it as the artifact `fuzz-corpus-<target>`. Carrying it over is best-effort:
+# GitHub evicts cache entries unused for 7 days (and the oldest ones once the repository
+# passes its cache quota), which is why the runs are 3-4 days apart. When the entry is
+# gone, a run starts again from the seeds; nothing restores the uploaded artifact.
 name: Fuzz
 
 on:
   schedule:
-    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+    - cron: "17 3 * * 1,4" # Mondays and Thursdays 03:17 UTC
   workflow_dispatch:
 
 permissions:
