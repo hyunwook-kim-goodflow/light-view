@@ -811,8 +811,15 @@ mod tests {
         assert!(stuck_for < limit + Duration::from_secs(2), "{stuck_for:?}");
         assert_eq!(live, Err(UpdateError::TimedOut));
         assert_eq!(late, Err(UpdateError::TimedOut));
-        // Request first, then connect and session; one opened after the cancel too.
-        assert_eq!(closed(), [3, 2, 1, 4]);
+        // Each handle closed exactly once, the request first (that is what ends the
+        // stuck call) and the one opened after the cancel last. Connect and session may
+        // be closed by the watchdog or by the stub's `live()`, in either interleaving.
+        let order = closed();
+        let mut each = order.clone();
+        each.sort_unstable();
+        assert_eq!(each, [1, 2, 3, 4], "{order:?}");
+        assert_eq!(order.first(), Some(&3), "{order:?}");
+        assert_eq!(order.last(), Some(&4), "{order:?}");
 
         // A check that ends in time: no cancel, each closed once at the end.
         CLOSED.lock().unwrap().clear();
