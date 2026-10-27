@@ -940,9 +940,15 @@ impl Viewer {
         self.generation
     }
 
-    /// The shown image and the frame to draw.
-    pub fn frame_to_upload(&self) -> Option<(&DecodedImage, usize)> {
-        self.image().map(|i| (i, self.frame))
+    /// The shown image (always a decoded one) and the frame to draw.
+    pub fn frame_to_upload(&self) -> Option<(&DecodeResult, usize)> {
+        match &self.shown {
+            Some(Shown {
+                content: Content::Image { result, .. },
+                ..
+            }) if result.is_ok() => Some((result, self.frame)),
+            _ => None,
+        }
     }
 
     /// The current frame's delay in ms, if the shown photo is animated.

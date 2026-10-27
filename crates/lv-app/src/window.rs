@@ -37,7 +37,7 @@ use crate::instance;
 use crate::menu::{self, Menu, MenuView};
 use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
-use crate::render::{Align, Renderer, TextRun};
+use crate::render::{self, Align, Renderer, TextRun};
 use crate::settings_win::{self, SettingsWindow};
 use crate::start::{self, StartScreen};
 use crate::strings::{t, S};
@@ -564,6 +564,10 @@ fn handle(
         WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
             app.try_borrow().ok().map(|a| uia::main_tree_of(&a))
         }),
+        render::WM_APP_MIPS_READY => {
+            invalidate(hwnd);
+            Some(LRESULT(0))
+        }
         uia_provider::WM_APP_UIA => {
             if let Some(act) = uia_provider::action(hwnd, wparam) {
                 uia::run_main(app, hwnd, act);
