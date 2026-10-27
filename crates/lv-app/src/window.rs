@@ -6,6 +6,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use anyhow::Context;
+use lv_core::decode::DecodeLimits;
 use lv_core::settings::{save_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -66,6 +67,8 @@ pub struct App {
     pub overlay: Overlay,
     /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
     pub pool: Option<Arc<WorkerPool>>,
+    /// The prefetcher's decode limits; a save checks its result within them.
+    pub decode_limits: DecodeLimits,
     /// The rotation save running in the background, if any (one at a time).
     pub saving: Option<Saving>,
     /// Save threads report here, then post `WM_APP_SAVE_DONE`.
@@ -79,7 +82,7 @@ pub fn run(
     settings_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let hwnd_cell = HwndCell::default();
-    let (viewer, pool) = commands::new_viewer(&settings, hwnd_cell.clone());
+    let (viewer, pool, decode_limits) = commands::new_viewer(&settings, hwnd_cell.clone());
     let (save_tx, save_rx) = channel();
     let app = RefCell::new(App {
         renderer: None,
@@ -96,6 +99,7 @@ pub fn run(
         pointer: Pointer::default(),
         overlay: Overlay::default(),
         pool,
+        decode_limits,
         saving: None,
         save_tx,
         save_rx,

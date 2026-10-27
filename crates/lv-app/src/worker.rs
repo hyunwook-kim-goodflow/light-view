@@ -7,7 +7,8 @@
 //! within the request's deadline (ruling R4: 10 s for a decode, 10 s + 10 s per 100 MP for
 //! a rotation), or the worker dies or breaks the protocol (an answer of the wrong kind
 //! included), its Job is terminated, the slot is emptied and the call fails with
-//! `Corrupt("작업자가 응답하지 않아요")`; the next call starts a fresh worker. A worker that
+//! `PoolError::WorkerUnavailable` (a decode with `Corrupt("작업자가 응답하지 않아요")`);
+//! the next call starts a fresh worker. A worker that
 //! died while idle, after answering, is replaced before the next request without failing
 //! it. Decodes and rotations follow the same rules throughout.
 //!
@@ -50,7 +51,7 @@ use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
-pub(crate) const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
+const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
 /// Longest worker stderr line copied into the log, in bytes.
 const MAX_LOG_LINE: usize = 4096;
 /// How long a failed first request waits for the writer thread to report its write.
@@ -225,12 +226,12 @@ impl WorkerPool {
     }
 
     /// Takes an idle slot, waiting at most `timeout` for one.
-    fn acquire(&self) -> Result<SlotGuard<'_>, DecodeError> {
+    fn acquire(&self) -> Result<SlotGuard<'_>, PoolError> {
         let deadline = Instant::now() + self.timeout;
         let mut state = self.lock();
         loop {
             if state.live == 0 || state.closed {
-                return Err(DecodeError::Unsupported);
+                return Err(DecodeError::Unsupported.into());
             }
             if let Some(slot) = state.idle.pop() {
                 return Ok(SlotGuard {
@@ -241,7 +242,7 @@ impl WorkerPool {
             let now = Instant::now();
             if now >= deadline {
                 log("no worker slot became free in time");
-                return Err(DecodeError::Corrupt(NOT_RESPONDING.into()));
+                return Err(PoolError::WorkerUnavailable);
             }
             state = self
                 .slot_freed
@@ -315,7 +316,7 @@ impl WorkerPool {
         timeout: Duration,
     ) -> Result<Reply, PoolError> {
         let Some(worker) = slot.worker.as_mut() else {
-            return Err(DecodeError::Corrupt(NOT_RESPONDING.into()).into());
+            return Err(PoolError::WorkerUnavailable);
         };
         let id = request.id();
         let bytes = match &request {
@@ -369,7 +370,7 @@ impl WorkerPool {
                 // `shutdown` ended the worker: not its fault, nothing to count.
                 log(&format!("request {id} ended by shutdown: {why}"));
                 slot.worker = None;
-                Err(DecodeError::Corrupt(NOT_RESPONDING.into()).into())
+                Err(PoolError::WorkerUnavailable)
             }
             Err(why) => {
                 let (pid, answered) = (worker.sandboxed.pid, worker.answered);
@@ -395,7 +396,7 @@ impl WorkerPool {
                     let why = format!("worker {pid} failed its first request: {why}");
                     start_failed(slot, &why, degrade);
                 }
-                Err(DecodeError::Corrupt(NOT_RESPONDING.into()).into())
+                Err(PoolError::WorkerUnavailable)
             }
         }
     }
@@ -1131,8 +1132,8 @@ pub(crate) mod tests {
 
     fn assert_pool_not_responding(result: Result<Reply, PoolError>) {
         match result {
-            Err(PoolError::Failed(DecodeError::Corrupt(msg))) => assert_eq!(msg, NOT_RESPONDING),
-            Err(e) => panic!("expected Corrupt, got {e}"),
+            Err(PoolError::WorkerUnavailable) => {}
+            Err(e) => panic!("expected WorkerUnavailable, got {e}"),
             Ok(_) => panic!("expected an error, got a reply"),
         }
     }
