@@ -97,6 +97,9 @@ pub fn first_supported_in(dir: &Path) -> std::io::Result<Option<PathBuf>> {
 pub struct FolderList {
     entries: Vec<PathBuf>,
     current: Option<usize>,
+    /// Files kept out of `entries` although they are on disk (pending deletes). A
+    /// `refresh` keeps them out; `unhide` puts one back, `forget` drops it.
+    hidden: Vec<PathBuf>,
 }
 
 impl FolderList {
@@ -121,7 +124,11 @@ impl FolderList {
         }
         let entries = Self::build(paths, Some(current));
         let current = entries.iter().position(|p| same_path(p, current));
-        FolderList { entries, current }
+        FolderList {
+            entries,
+            current,
+            hidden: Vec::new(),
+        }
     }
 
     /// Lists the files (not sub-folders) in the parent folder of `file`.
@@ -174,10 +181,15 @@ impl FolderList {
     }
 
     /// Replaces the listing, keeping the current file by path; if it is gone,
-    /// moves to the same index (or the last entry).
+    /// moves to the same index (or the last entry). Hidden files stay hidden.
     pub fn refresh(&mut self, paths: Vec<PathBuf>) {
         let old_path = self.current().map(Path::to_path_buf);
         let old_index = self.current.unwrap_or(0);
+        let hidden = &self.hidden;
+        let paths = paths
+            .into_iter()
+            .filter(|p| !hidden.iter().any(|h| same_path(p, h)))
+            .collect();
         self.entries = Self::build(paths, None);
         self.current = if self.entries.is_empty() {
             None
@@ -186,6 +198,53 @@ impl FolderList {
                 .and_then(|c| self.entries.iter().position(|p| same_path(p, &c)))
                 .or(Some(old_index.min(self.entries.len() - 1)))
         };
+    }
+}
+
+impl FolderList {
+    /// Takes `path` out of the listing until `unhide` or `forget`; `refresh` keeps it
+    /// out. If it was the current file, the next one becomes current (the previous one
+    /// at the end of the folder). False if it is not listed.
+    pub fn hide(&mut self, path: &Path) -> bool {
+        let Some(i) = self.entries.iter().position(|p| same_path(p, path)) else {
+            return false;
+        };
+        let p = self.entries.remove(i);
+        self.hidden.push(p);
+        self.current = match self.current {
+            _ if self.entries.is_empty() => None,
+            Some(c) if c == i => Some(i.min(self.entries.len() - 1)),
+            Some(c) if c > i => Some(c - 1),
+            c => c,
+        };
+        true
+    }
+
+    /// Puts a hidden file back in Explorer order and makes it current. False if it is
+    /// not hidden.
+    pub fn unhide(&mut self, path: &Path) -> bool {
+        let Some(h) = self.hidden.iter().position(|p| same_path(p, path)) else {
+            return false;
+        };
+        let p = self.hidden.remove(h);
+        let name = p.file_name().unwrap_or_default().to_owned();
+        let i = self
+            .entries
+            .partition_point(|e| natural_cmp(e.file_name().unwrap_or_default(), &name).is_lt());
+        self.entries.insert(i, p);
+        self.current = Some(i);
+        true
+    }
+
+    /// Drops a hidden file for good (it was deleted). False if it is not hidden.
+    pub fn forget(&mut self, path: &Path) -> bool {
+        let before = self.hidden.len();
+        self.hidden.retain(|p| !same_path(p, path));
+        self.hidden.len() != before
+    }
+
+    pub fn hidden(&self) -> &[PathBuf] {
+        &self.hidden
     }
 }
 
@@ -288,5 +347,53 @@ mod tests {
         let r = FolderList::scan(Path::new("a.jpg"));
         std::env::set_current_dir(old).unwrap();
         assert_eq!(r.unwrap().position(), Some((1, 2)));
+    }
+
+    #[test]
+    fn hide_moves_to_next_or_previous_at_the_end() {
+        let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("b.jpg"));
+        assert!(l.hide(&p("b.jpg")));
+        assert_eq!(l.current(), Some(p("c.jpg").as_path()));
+        assert_eq!(l.position(), Some((2, 2)));
+        assert!(l.hide(&p("c.jpg")));
+        assert_eq!(l.current(), Some(p("a.jpg").as_path()));
+        assert!(l.hide(&p("a.jpg")));
+        assert_eq!(l.current(), None);
+        assert!(!l.hide(&p("x.jpg")));
+        assert_eq!(l.hidden().len(), 3);
+    }
+    #[test]
+    fn hiding_another_file_keeps_the_current_one() {
+        let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("c.jpg"));
+        l.hide(&p("a.jpg"));
+        assert_eq!(l.current(), Some(p("c.jpg").as_path()));
+        assert_eq!(l.position(), Some((2, 2)));
+    }
+    #[test]
+    fn unhide_restores_order_and_makes_it_current() {
+        let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("b.jpg"));
+        l.hide(&p("b.jpg"));
+        assert!(l.unhide(&p("b.jpg")));
+        assert_eq!(l.current(), Some(p("b.jpg").as_path()));
+        assert_eq!(l.position(), Some((2, 3)));
+        assert!(!l.unhide(&p("b.jpg")));
+        assert!(l.hidden().is_empty());
+        // Back into an empty list.
+        let mut l = FolderList::from_paths(vec![p("a.jpg")], &p("a.jpg"));
+        l.hide(&p("a.jpg"));
+        assert!(l.unhide(&p("a.jpg")));
+        assert_eq!(l.position(), Some((1, 1)));
+    }
+    #[test]
+    fn refresh_keeps_hidden_files_out() {
+        let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("a.jpg"));
+        l.hide(&p("b.jpg"));
+        l.refresh(vec![p("a.jpg"), p("B.JPG"), p("c.jpg"), p("d.jpg")]);
+        assert_eq!(l.position(), Some((1, 3)));
+        assert_eq!(l.neighbor(1), Some(p("c.jpg").as_path()));
+        assert!(l.forget(&p("b.jpg")));
+        assert!(!l.unhide(&p("b.jpg")));
+        l.refresh(vec![p("a.jpg"), p("b.jpg")]);
+        assert_eq!(l.position(), Some((1, 2)));
     }
 }
