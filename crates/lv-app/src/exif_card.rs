@@ -391,8 +391,9 @@ impl Model {
     }
 }
 
+/// A part of the card that takes clicks (and UI Automation invocations).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Target {
+pub enum Target {
     Close,
     Expand,
     Copy,
@@ -624,7 +625,23 @@ impl ExifCard {
         if Some(pressed) != self.target_at(x, y, m) {
             return Some(None);
         }
-        let action = match pressed {
+        Some(self.act(pressed, m))
+    }
+
+    /// Does what a click on `target` does; `None` for the card's background (and for a
+    /// part the card does not show now).
+    pub fn act(&mut self, target: Target, m: &Model) -> Option<CardAction> {
+        let l = &m.layout;
+        let shown = match target {
+            Target::Expand => l.expand.is_some(),
+            Target::Copy => l.copy.is_some(),
+            Target::Row(i) => m.expanded && m.rows.get(i).is_some_and(|r| r.is_entry()),
+            Target::Close | Target::Card => true,
+        };
+        if !self.open || !shown {
+            return None;
+        }
+        let action = match target {
             Target::Close if m.expanded => {
                 self.expanded = false;
                 CardAction::Redraw
@@ -642,9 +659,9 @@ impl ExifCard {
                 self.selected = Some(i);
                 CardAction::Redraw
             }
-            Target::Card => return Some(None),
+            Target::Card => return None,
         };
-        Some(Some(action))
+        Some(action)
     }
 }
 
@@ -1213,6 +1230,35 @@ mod tests {
             click(&mut c, center(m.layout.copy.unwrap()), &m),
             Some(Some(CardAction::Copy("value 3".into())))
         );
+    }
+
+    #[test]
+    fn parts_act_like_clicks() {
+        let mut c = open_card();
+        let m = model(&c, info(4), VIEW);
+        // Only the parts shown act: no list rows or [복사] on the card.
+        assert_eq!(c.act(Target::Copy, &m), None);
+        assert_eq!(c.act(Target::Row(1), &m), None);
+        assert_eq!(c.act(Target::Card, &m), None);
+        assert_eq!(c.act(Target::Expand, &m), Some(CardAction::Redraw));
+        let m = model(&c, info(4), VIEW);
+        assert!(m.expanded);
+        assert_eq!(c.act(Target::Expand, &m), None);
+        // A group heading is not a row to select.
+        assert_eq!(c.act(Target::Row(0), &m), None);
+        assert_eq!(c.act(Target::Row(2), &m), Some(CardAction::Redraw));
+        assert_eq!(c.selected(&m), Some(2));
+        assert_eq!(
+            c.act(Target::Copy, &m),
+            Some(CardAction::Copy("value 1".into()))
+        );
+        // Back, then close.
+        c.act(Target::Close, &m);
+        let m = model(&c, info(4), VIEW);
+        assert!(!m.expanded && c.is_open());
+        c.act(Target::Close, &m);
+        assert!(!c.is_open());
+        assert_eq!(c.act(Target::Close, &m), None, "closed");
     }
 
     #[test]

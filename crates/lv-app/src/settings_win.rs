@@ -34,9 +34,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, IsWindow, LoadCursorW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, IDC_ARROW,
     SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETOBJECT, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN,
+    WNDCLASSEXW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::about;
@@ -48,6 +48,8 @@ use crate::shell;
 use crate::strings::{self, t, text, Lang, S};
 use crate::theme::{self, palette, Palette, Rgb};
 use crate::toolbar::Rect;
+use crate::uia::Act;
+use crate::uia_provider;
 use crate::viewer::Redraw;
 use crate::window::{invalidate, App};
 
@@ -292,6 +294,27 @@ impl Model {
             self.focused = c;
         }
         self.pressed.is_some()
+    }
+
+    /// UI Automation invoked option `option` of control `c` (a choice), or the
+    /// checkbox or button `c` (`None`): it acts as a click would, and takes the focus.
+    pub fn invoke(&mut self, c: usize, option: Option<usize>, s: &Settings) -> Action {
+        let Some(&control) = CONTROLS.get(c) else {
+            return Action::Nothing;
+        };
+        self.focused = c;
+        let action = match (control.kind(), option) {
+            (Kind::Choice, Some(o)) if o < control.option_count() => {
+                pick(control, control.selected(s), o)
+            }
+            (Kind::Check | Kind::Button, None) => press_control(control, s),
+            _ => Action::Nothing,
+        };
+        if action == Action::Nothing {
+            Action::Redraw
+        } else {
+            action
+        }
     }
 
     /// The mouse capture ended without a release (another window took it).
@@ -774,12 +797,35 @@ fn handle(
                 let (p, icons) = (palette(a.dark()), a.icon_family());
                 if let Some(w) = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd) {
                     draw(&mut w.renderer, &w.model, &a.settings, p, icons);
+                    let focused = w.model.focused;
+                    uia_provider::publish(hwnd, || uia_tree(hwnd, focused, &a.settings));
                 }
             }
             // SAFETY: as above.
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
             }
+            uia_provider::flush(hwnd);
+            Some(LRESULT(0))
+        }
+        WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
+            let a = app.try_borrow().ok()?;
+            let w = a.settings_win.as_ref().filter(|w| w.hwnd == hwnd)?;
+            Some(uia_tree(hwnd, w.model.focused, &a.settings))
+        }),
+        uia_provider::WM_APP_UIA => {
+            let action = {
+                let act = uia_provider::action(hwnd, wparam)?;
+                let mut a = app.try_borrow_mut().ok()?;
+                let a = &mut *a;
+                let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
+                match act {
+                    Act::Pick(c, o) => w.model.invoke(c, Some(o), &a.settings),
+                    Act::Press(c) => w.model.invoke(c, None, &a.settings),
+                    _ => Action::Nothing,
+                }
+            };
+            act(app, hwnd, action);
             Some(LRESULT(0))
         }
         WM_SIZE => {
@@ -865,6 +911,7 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_DESTROY => {
+            uia_provider::detach(hwnd);
             if let Ok(mut a) = app.try_borrow_mut() {
                 if a.settings_win.as_ref().is_some_and(|w| w.hwnd == hwnd) {
                     a.settings_win = None;
@@ -881,13 +928,22 @@ fn handle(
     }
 }
 
-/// A mouse message's point in client DIPs.
-fn to_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+/// The window's UI Automation tree in the current language.
+fn uia_tree(hwnd: HWND, focused: usize, s: &Settings) -> crate::uia::Tree {
+    crate::uia::settings_tree(focused, s, strings::current(), dip_per_px(hwnd))
+}
+
+fn dip_per_px(hwnd: HWND) -> f32 {
     // SAFETY: plain call on our window.
-    let dip = match unsafe { GetDpiForWindow(hwnd) } {
+    match unsafe { GetDpiForWindow(hwnd) } {
         0 => 1.0,
         dpi => 96.0 / dpi as f32,
-    };
+    }
+}
+
+/// A mouse message's point in client DIPs.
+fn to_dips(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
+    let dip = dip_per_px(hwnd);
     let (x, y) = input::point(lparam);
     (x as f32 * dip, y as f32 * dip)
 }
@@ -1170,6 +1226,27 @@ mod tests {
         assert_eq!(m.on_key(VK_ESCAPE, NONE, false, &s), Some(Action::Close));
         assert_eq!(m.on_key(0x73, ALT, false, &s), None); // Alt+F4
         assert_eq!(m.on_key(0x41, NONE, false, &s), Some(Action::Nothing));
+    }
+
+    #[test]
+    fn invocations_act_like_clicks_and_take_the_focus() {
+        let s = Settings::default();
+        let mut m = Model::default();
+        assert_eq!(
+            m.invoke(4, Some(2), &s),
+            Action::Change(Change::Memory(Some(512)))
+        );
+        assert_eq!(m.focused, 4);
+        // The chosen option again: only the focus moves.
+        assert_eq!(m.invoke(0, Some(0), &s), Action::Redraw);
+        assert_eq!(m.focused, 0);
+        assert_eq!(m.invoke(1, None, &s), Action::Change(Change::PinMenu(true)));
+        assert_eq!(m.invoke(5, None, &s), Action::OpenDefaultApps);
+        // Mismatched or out-of-range parts do nothing.
+        assert_eq!(m.invoke(0, None, &s), Action::Redraw);
+        assert_eq!(m.invoke(1, Some(0), &s), Action::Redraw);
+        assert_eq!(m.invoke(0, Some(7), &s), Action::Redraw);
+        assert_eq!(m.invoke(9, None, &s), Action::Nothing);
     }
 
     #[test]

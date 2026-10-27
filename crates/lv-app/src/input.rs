@@ -558,7 +558,7 @@ fn card_key(app: &RefCell<App>, vk: u16, mods: lv_core::command::Mods) -> Option
 
 /// Repaints after the card took an input; a copy goes to the clipboard and says
 /// "복사했어요" (on failure only the log hears of it).
-fn card_action(app: &RefCell<App>, hwnd: HWND, action: CardAction) {
+pub fn card_action(app: &RefCell<App>, hwnd: HWND, action: CardAction) {
     match action {
         CardAction::Redraw => invalidate(hwnd),
         CardAction::Copy(text) => match clipboard::set_text(hwnd, &text) {
@@ -575,7 +575,7 @@ fn card_action(app: &RefCell<App>, hwnd: HWND, action: CardAction) {
 /// action was used, restore the toolbar tooltips and act on it. Then a path forwarded
 /// while the dialog was open is opened, after the answer was applied to its target,
 /// unless the answer closes the window.
-fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) {
+pub fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) {
     invalidate(hwnd);
     let Some(event) = event else {
         return;
@@ -638,7 +638,7 @@ fn debug_overlay(
     Some(LRESULT(0))
 }
 
-fn on_button(app: &RefCell<App>, hwnd: HWND, b: ToolButton) {
+pub fn on_button(app: &RefCell<App>, hwnd: HWND, b: ToolButton) {
     if let Some(c) = b.command() {
         commands::run(app, hwnd, c, None);
     }

@@ -399,6 +399,11 @@ impl Toast {
         self.parts.as_ref().is_some_and(|p| p.bg.contains(x, y))
     }
 
+    /// Where the toast was last drawn.
+    pub fn parts(&self) -> Option<ToastParts> {
+        self.parts
+    }
+
     pub fn place(&mut self, parts: ToastParts) {
         self.parts = Some(parts);
     }
@@ -563,6 +568,26 @@ impl Overlay {
     pub fn on_key(&mut self, vk: u16, mods: Mods) -> Option<OverlayEvent> {
         let result = self.dialog.as_mut()?.on_key(vk, mods)?;
         self.finish(result)
+    }
+
+    /// Activates the open dialog's item `i` as a click on it would (UI Automation):
+    /// the item takes the focus; `Some` once the dialog closes.
+    pub fn activate(&mut self, i: usize) -> Option<OverlayEvent> {
+        let d = self.dialog.as_mut()?;
+        if i >= d.prompt.items().len() {
+            return None;
+        }
+        d.focused = i;
+        let result = d.activate(i)?;
+        self.finish(result)
+    }
+
+    /// Uses the toast's action (UI Automation's invoke on [실행 취소]): the toast goes.
+    pub fn take_toast_action(&mut self) -> Option<OverlayEvent> {
+        let action = self.toast.as_ref()?.action.as_ref()?.1;
+        self.toast = None;
+        self.pressed = None;
+        Some(OverlayEvent::Toast(action))
     }
 
     /// Mouse down at (x, y) in a `view`-sized client area; true if the overlay takes
@@ -1308,6 +1333,44 @@ mod tests {
         o.on_key(VK_ESCAPE, NONE);
         assert_eq!(o.take_deferred_open(), Some(PathBuf::from("c.jpg")));
         assert_eq!(o.take_deferred_open(), None);
+    }
+
+    #[test]
+    fn activation_answers_the_dialog_and_uses_the_toast_action() {
+        let target = DialogTarget {
+            path: PathBuf::from("a.jpg"),
+            generation: 1,
+        };
+        let mut o = Overlay::default();
+        o.show_dialog(Prompt::SaveRotation, target.clone());
+        // The checkbox toggles and takes the focus; the dialog stays.
+        assert_eq!(o.activate(0), None);
+        let d = o.dialog.as_ref().unwrap();
+        assert!(d.dont_ask);
+        assert_eq!(d.focused, 0);
+        assert_eq!(o.activate(9), None, "out of range");
+        // A button answers with the checkbox's state.
+        assert_eq!(
+            o.activate(2),
+            Some(OverlayEvent::Dialog {
+                prompt: Prompt::SaveRotation,
+                result: PromptResult::Discard,
+                dont_ask: true,
+                target,
+            })
+        );
+        assert!(!o.dialog_open());
+        assert_eq!(o.activate(0), None, "no dialog");
+        // A toast without an action stays; [실행 취소] is used once.
+        o.show_toast(Toast::new(S::ToastCopied, 0));
+        assert_eq!(o.take_toast_action(), None);
+        assert!(o.toast.is_some());
+        o.show_toast(Toast::recycled(0));
+        assert_eq!(
+            o.take_toast_action(),
+            Some(OverlayEvent::Toast(ToastAction::Undo))
+        );
+        assert!(o.toast.is_none());
     }
 
     #[test]
