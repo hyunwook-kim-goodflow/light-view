@@ -40,6 +40,7 @@ use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::viewer::{Scene, Viewer};
+use crate::watch::Watching;
 use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
@@ -82,6 +83,8 @@ pub struct App {
     pub deleter: Deleter,
     /// Recycle results, announced with `WM_APP_DELETE_DONE`.
     pub delete_rx: Receiver<CommitReport>,
+    /// The shown folder's change watch.
+    pub watching: Watching,
 }
 
 pub fn run(
@@ -119,6 +122,7 @@ pub fn run(
         save_rx,
         deleter: Deleter::new(Box::new(trash)),
         delete_rx,
+        watching: Watching::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the

@@ -24,6 +24,7 @@ use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
 use crate::viewer::Redraw;
+use crate::watch;
 use crate::window::{invalidate, App};
 
 const TIMER_ID: usize = 1;
@@ -463,6 +464,9 @@ fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) 
     if let Some(path) = deferred {
         commands::open(app, hwnd, &path);
     }
+    // Then a rescan held back by the dialog (of the newly opened folder, if any; it
+    // waits again if the open asks to save first).
+    watch::rescan_if_due(app, hwnd);
 }
 
 /// Debug builds only: Ctrl+Shift+1 and 3 to 7 show the save prompt and each toast, for

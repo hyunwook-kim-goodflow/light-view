@@ -209,8 +209,9 @@ impl Prefetcher {
         self.shared.cond.notify_all();
     }
 
-    /// The file at `path` changed (the app saved it): drops its cached result, and the
-    /// result of a decode of it still running, and decodes it again if it is wanted.
+    /// The file at `path` changed (saved by the app, or by another program): drops its
+    /// cached result, and the result of a decode of it still running, and decodes it
+    /// again if it is wanted.
     pub fn invalidate(&self, path: &Path) {
         let mut st = self.shared.lock();
         st.cache.remove(path);
@@ -478,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_discards_a_decode_in_flight() {
+    fn invalidate_drops_inflight_result() {
         let h = harness(1, u64::MAX, &["a"], &[]);
         h.prefetcher.request(&[p("a")]);
         assert_eq!(h.wait_started(), p("a"));

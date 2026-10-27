@@ -43,6 +43,7 @@ use crate::overlay::{
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
+use crate::watch::{self, WM_APP_FOLDER_CHANGED};
 use crate::window::{self, invalidate, App};
 use crate::worker::WorkerPool;
 
@@ -349,8 +350,13 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
         input::show_toast(app, hwnd, |now| Toast::new(&text, now));
     }
     after(app, hwnd, Redraw::Full);
+    let closing = pending == Some(LeaveReason::Close);
     if let Some(reason) = pending {
         perform(app, hwnd, reason);
+    }
+    // A rescan held back by the save runs now (a closing window needs none).
+    if !closing {
+        watch::rescan_if_due(app, hwnd);
     }
 }
 
@@ -422,6 +428,7 @@ pub fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     }
     input::sync_tooltips(app, hwnd);
     invalidate(hwnd);
+    watch::follow_folder(app, hwnd);
 }
 
 /// Acts on a closed dialog or a used toast action. Returns false when the answer closes
@@ -553,6 +560,10 @@ pub fn handle(
         }
         WM_APP_DELETE_DONE => {
             delete::on_reports(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_FOLDER_CHANGED => {
+            watch::on_changed(app, hwnd);
             Some(LRESULT(0))
         }
         WM_APP_SAVE_DONE => {

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
-use lv_core::identity::FileIdentity;
-use lv_core::listing::FolderList;
+use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
+use lv_core::listing::{same_path, FolderList};
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
 
@@ -24,6 +24,16 @@ const FIT_EPS: f32 = 1e-4;
 pub enum Redraw {
     None,
     Full,
+}
+
+/// What a folder rescan has to tell the user about the current photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescanNotice {
+    /// It left the folder while its rotation was unsaved; the rotation is gone.
+    Vanished,
+    /// It was changed by another program while its rotation was unsaved; it is decoded
+    /// again, unrotated.
+    Reloaded,
 }
 
 /// What to draw in the image area (the loading pill is drawn on top, see `loading`).
@@ -161,6 +171,20 @@ fn rescaled(old: &Viewport, old_size: (f32, f32), size: (f32, f32), image: (f32,
     let (x, y, w, h) = v.image_rect();
     v.pan(centre.0 - (x + rel.0 * w), centre.1 - (y + rel.1 * h));
     v
+}
+
+/// `path` was changed since `id` was read from it. A file that cannot be read
+/// (`Verify::Missing`) does not count: that may be a sharing violation or a network blip.
+fn changed_on_disk(path: &Path, id: Option<&FileIdentity>) -> bool {
+    id.is_some_and(|id| identity::verify(path, id) == Verify::Changed)
+}
+
+/// `path` is gone: its metadata reads "not found" (any other error may be passing).
+fn confirmed_absent(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(to_extended_path(path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 fn frame_delay(img: &DecodedImage, frame: usize) -> Option<u32> {
@@ -316,7 +340,9 @@ impl Viewer {
         }
     }
 
-    fn after_move(&mut self) -> Redraw {
+    /// Asks the prefetcher for the current photo and its neighbours, in the direction
+    /// of the last move first.
+    fn request_wanted(&mut self) {
         let offsets: [isize; 4] = if self.backward {
             [0, -1, 1, -2]
         } else {
@@ -328,6 +354,10 @@ impl Viewer {
             .map(Path::to_path_buf)
             .collect();
         self.prefetcher.request(&self.wanted);
+    }
+
+    fn after_move(&mut self) -> Redraw {
+        self.request_wanted();
         match &self.shown {
             // Back on the photo still on screen (the move away never finished): take up
             // its rotation again, drop the loading note and restart its animation.
@@ -540,14 +570,19 @@ impl Viewer {
         self.quarters = 0;
         self.backward = false;
         if self.list.current().is_none() {
-            self.shown = None;
-            self.generation += 1;
-            self.loading = false;
-            self.wanted.clear();
-            self.prefetcher.request(&[]);
-            return Redraw::Full;
+            return self.clear_shown();
         }
         self.after_move()
+    }
+
+    /// Nothing left to show: the folder has no (listed) photo.
+    fn clear_shown(&mut self) -> Redraw {
+        self.shown = None;
+        self.generation += 1;
+        self.loading = false;
+        self.wanted.clear();
+        self.prefetcher.request(&[]);
+        Redraw::Full
     }
 
     /// Like `hide`, for good (the photo was deleted permanently).
@@ -621,6 +656,92 @@ impl Viewer {
     pub fn on_save_failed(&mut self) {
         self.save_failed = true;
         self.pending_leave = None;
+    }
+
+    /// The folder listed (and watched).
+    pub fn folder(&self) -> Option<&Path> {
+        self.list.dir()
+    }
+
+    /// Lists the folder again after a change on disk. The current photo stays current
+    /// (by path); pending deletes stay hidden. A current photo gone from the folder (not
+    /// listed and confirmed absent) gives way to the one at its place, its unsaved
+    /// rotation dropped: there is no file left to save it to. A current photo changed by
+    /// another program is decoded again, unrotated, as is a changed prefetched neighbour.
+    /// A file that only fails to read (`Verify::Missing`: shared, locked, a network
+    /// blip) is left alone, and so is everything when the folder cannot be read.
+    pub fn rescan(&mut self) -> (Redraw, Option<RescanNotice>) {
+        let Some(dir) = self.list.dir().map(Path::to_path_buf) else {
+            return (Redraw::None, None);
+        };
+        let Ok(mut paths) = FolderList::read_files(&dir) else {
+            return (Redraw::None, None);
+        };
+        let current = self.list.current().map(Path::to_path_buf);
+        if let Some(c) = &current {
+            if !paths.iter().any(|p| same_path(p, c)) && !confirmed_absent(c) {
+                // Not listed this time, yet still there.
+                paths.push(c.clone());
+            }
+        }
+        let rotated = self.unsaved_rotation();
+        let position = self.list.position();
+        self.list.refresh(paths, current.as_deref());
+        let stayed = match (&current, self.list.current()) {
+            (Some(old), Some(new)) => same_path(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if !stayed {
+            self.quarters = 0;
+            self.backward = false;
+            let notice = (current.is_some() && rotated).then_some(RescanNotice::Vanished);
+            let redraw = if self.list.current().is_none() {
+                self.clear_shown()
+            } else {
+                self.after_move()
+            };
+            return (redraw, notice);
+        }
+        self.request_wanted();
+        let reloaded = self.reload_if_changed();
+        for (i, path) in self.wanted.clone().iter().enumerate() {
+            if reloaded && i == 0 {
+                continue; // the current photo, already decoding again
+            }
+            let cached = self.prefetcher.get_with_identity(path);
+            if cached.is_some_and(|(_, id)| changed_on_disk(path, id.as_ref())) {
+                self.prefetcher.invalidate(path);
+            }
+        }
+        if reloaded {
+            return (Redraw::Full, rotated.then_some(RescanNotice::Reloaded));
+        }
+        if self.list.position() != position {
+            return (Redraw::Full, None);
+        }
+        (Redraw::None, None)
+    }
+
+    /// The current photo on screen was changed by another program: it stays drawn until
+    /// its new decode replaces it (saves and deletes refuse meanwhile, as its identity is
+    /// the old file's), and its rotation is dropped. True if it changed.
+    fn reload_if_changed(&mut self) -> bool {
+        let Some(current) = self.list.current().map(Path::to_path_buf) else {
+            return false;
+        };
+        let Some(s) = self.shown.as_mut().filter(|s| same_path(&s.path, &current)) else {
+            return false;
+        };
+        if !changed_on_disk(&s.path, s.identity.as_ref()) {
+            return false;
+        }
+        s.stale = true;
+        self.prefetcher.invalidate(&s.path);
+        self.quarters = 0;
+        self.touched = false;
+        self.show_current();
+        true
     }
 
     /// (1-based index, count), or (0, 0) with no file.
@@ -1119,6 +1240,127 @@ mod tests {
         wait_shown(&mut v, &rx);
         v.forget_hidden(&p("d.jpg"));
         assert_eq!(v.position(), (1, 1));
+    }
+
+    /// A folder with `names` (each file holds its own name) and a viewer opened on
+    /// `open` in it, shown.
+    fn viewer_in_folder(
+        names: &[&str],
+        open: &str,
+    ) -> (tempfile::TempDir, Viewer, Receiver<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        for n in names {
+            std::fs::write(dir.path().join(n), n.as_bytes()).unwrap();
+        }
+        let (mut v, rx) = viewer_at("a.jpg");
+        v.open(&dir.path().join(open));
+        wait_shown(&mut v, &rx);
+        (dir, v, rx)
+    }
+
+    #[test]
+    fn rescan_keeps_current_and_hidden() {
+        let (dir, mut v, _rx) = viewer_in_folder(&["a.jpg", "b.jpg", "c.jpg", "d.jpg"], "c.jpg");
+        assert_eq!(v.folder(), Some(dir.path()));
+        // b is a pending delete: still on disk, kept out of the list.
+        v.hide(&dir.path().join("b.jpg"));
+        let generation = v.generation();
+        assert_eq!(v.rescan(), (Redraw::None, None));
+        std::fs::write(dir.path().join("0.jpg"), b"new").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"").unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        assert_eq!(v.title(), "c.jpg · 3 / 4");
+        assert_eq!(v.current_path(), Some(dir.path().join("c.jpg").as_path()));
+        assert_eq!(v.generation(), generation);
+        assert!(!v.pending());
+        assert_eq!(
+            v.wanted[..2],
+            [dir.path().join("c.jpg"), dir.path().join("d.jpg")]
+        );
+        // Undo still puts b back in place.
+        v.restore(&dir.path().join("b.jpg"));
+        assert_eq!(v.title(), "b.jpg · 3 / 5");
+    }
+
+    #[test]
+    fn current_removed_moves_to_neighbor_and_drops_rotation() {
+        let (dir, mut v, rx) = viewer_in_folder(&["a.jpg", "b.jpg", "c.jpg"], "b.jpg");
+        v.apply(Command::RotateRight);
+        std::fs::remove_file(dir.path().join("b.jpg")).unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, Some(RescanNotice::Vanished)));
+        assert_eq!(v.title(), "c.jpg · 2 / 2");
+        assert!(!v.unsaved_rotation());
+        assert_eq!(v.save_request(), None);
+        wait_shown(&mut v, &rx);
+        assert!(matches!(v.scene(), Scene::Image { quarters: 0, .. }));
+        // Without a rotation the move is silent; at the end it goes to the previous one.
+        std::fs::remove_file(dir.path().join("c.jpg")).unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        assert_eq!(v.title(), "a.jpg · 1 / 1");
+        std::fs::remove_file(dir.path().join("a.jpg")).unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        assert!(!v.has_file());
+        assert!(matches!(v.scene(), Scene::Empty));
+        // The folder is still watched: a new file is shown.
+        std::fs::write(dir.path().join("n.jpg"), b"n").unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        assert_eq!(v.title(), "n.jpg · 1 / 1");
+    }
+
+    #[test]
+    fn external_modification_invalidates() {
+        let (dir, mut v, rx) = viewer_in_folder(&["a.jpg", "b.jpg"], "a.jpg");
+        let path = dir.path().join("a.jpg");
+        let generation = v.generation();
+        v.apply(Command::RotateRight);
+        std::fs::write(&path, b"edited elsewhere, longer").unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, Some(RescanNotice::Reloaded)));
+        assert!(!v.unsaved_rotation());
+        assert_eq!(v.save_request(), None);
+        wait_shown(&mut v, &rx);
+        assert!(v.generation() > generation);
+        let (_, id) = v.delete_target().unwrap();
+        assert_eq!(id, identity::capture(&path).ok());
+        // Unchanged since: nothing more to do. Without a rotation a reload is silent.
+        assert_eq!(v.rescan(), (Redraw::None, None));
+        std::fs::write(&path, b"edited again").unwrap();
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        wait_shown(&mut v, &rx);
+    }
+
+    #[test]
+    fn a_changed_neighbor_is_decoded_again() {
+        let (dir, mut v, rx) = viewer_in_folder(&["a.jpg", "b.jpg"], "a.jpg");
+        let b = dir.path().join("b.jpg");
+        while v.prefetcher.get(&b).is_none() {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        std::fs::write(&b, b"edited elsewhere, longer").unwrap();
+        assert_eq!(v.rescan(), (Redraw::None, None));
+        v.apply(Command::Next);
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.delete_target().unwrap().1, identity::capture(&b).ok());
+    }
+
+    #[test]
+    fn a_transient_missing_does_not_remove_the_current_photo() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, mut v, _rx) = viewer_in_folder(&["a.jpg", "b.jpg"], "a.jpg");
+        v.apply(Command::RotateRight);
+        let path = dir.path().join("a.jpg");
+        // Held open without sharing: reading its identity fails (a sharing violation),
+        // but it is still listed and on disk.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(identity::capture(&path).is_err());
+        assert_eq!(v.rescan(), (Redraw::None, None));
+        drop(lock);
+        assert_eq!(v.current_path(), Some(path.as_path()));
+        assert!(v.unsaved_rotation());
+        assert!(!v.pending());
     }
 
     #[test]
