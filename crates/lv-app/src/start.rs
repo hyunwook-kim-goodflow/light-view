@@ -20,7 +20,7 @@ use windows::Win32::UI::Shell::{
 
 use crate::commands;
 use crate::render::{Align, Renderer, TextRun};
-use crate::shell::{user_path, with_com};
+use crate::shell::user_path;
 use crate::strings::{t, S};
 use crate::theme::Palette;
 use crate::toolbar::Rect;
@@ -166,44 +166,42 @@ fn pick_file(hwnd: HWND, folder: Option<&Path>) -> Option<PathBuf> {
         },
     ];
     let folder = folder.map(|f| HSTRING::from(user_path(f).as_os_str()));
-    with_com(|| {
-        // SAFETY: COM is initialized for this thread by `with_com`; the filter strings
-        // and `folder` outlive the dialog; the returned path is freed once with
-        // CoTaskMemFree after copying it.
-        let result = unsafe {
-            (|| -> windows::core::Result<PathBuf> {
-                let dialog: IFileOpenDialog =
-                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-                dialog.SetFileTypes(&filters)?;
-                let options = dialog.GetOptions()?;
-                dialog.SetOptions(
-                    options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST,
-                )?;
-                if let Some(dir) = &folder {
-                    if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(dir, None) {
-                        let _ = dialog.SetFolder(&item);
-                    }
+    // SAFETY: on the UI thread, whose COM apartment `main` holds; the filter strings
+    // and `folder` outlive the dialog; the returned path is freed once with
+    // CoTaskMemFree after copying it.
+    let result = unsafe {
+        (|| -> windows::core::Result<PathBuf> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetFileTypes(&filters)?;
+            let options = dialog.GetOptions()?;
+            dialog.SetOptions(
+                options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST,
+            )?;
+            if let Some(dir) = &folder {
+                if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(dir, None) {
+                    let _ = dialog.SetFolder(&item);
                 }
-                dialog.Show(hwnd)?;
-                let item = dialog.GetResult()?;
-                let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
-                // Copied as UTF-16 units, so names that are not valid Unicode open too.
-                let path = PathBuf::from(OsString::from_wide(name.as_wide()));
-                CoTaskMemFree(Some(name.0 as *const _));
-                Ok(path)
-            })()
-        };
-        match result {
-            Ok(path) => Some(path),
-            Err(e) => {
-                // ERROR_CANCELLED as an HRESULT: the user closed the dialog.
-                if e.code().0 as u32 != 0x8007_04C7 {
-                    eprintln!("light-view: the Open dialog failed: {e}");
-                }
-                None
             }
+            dialog.Show(hwnd)?;
+            let item = dialog.GetResult()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+            // Copied as UTF-16 units, so names that are not valid Unicode open too.
+            let path = PathBuf::from(OsString::from_wide(name.as_wide()));
+            CoTaskMemFree(Some(name.0 as *const _));
+            Ok(path)
+        })()
+    };
+    match result {
+        Ok(path) => Some(path),
+        Err(e) => {
+            // ERROR_CANCELLED as an HRESULT: the user closed the dialog.
+            if e.code().0 as u32 != 0x8007_04C7 {
+                eprintln!("light-view: the Open dialog failed: {e}");
+            }
+            None
         }
-    })
+    }
 }
 
 #[cfg(test)]
