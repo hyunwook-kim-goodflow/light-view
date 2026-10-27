@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{IsWindowEnabled, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
     GetWindowRect, IsWindow, LoadCursorW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
@@ -286,14 +286,12 @@ fn handle(
         uia_provider::WM_APP_UIA => {
             let action = {
                 let act = uia_provider::action(hwnd, wparam)?;
+                // SAFETY: plain query on our own window handle.
+                let enabled = unsafe { IsWindowEnabled(hwnd) }.as_bool();
                 let mut a = app.try_borrow_mut().ok()?;
                 let a = &mut *a;
                 let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
-                match act {
-                    Act::Pick(c, o) => w.model.invoke(c, Some(o), &a.settings),
-                    Act::Press(c) => w.model.invoke(c, None, &a.settings),
-                    _ => Action::Nothing,
-                }
+                uia_action(&mut w.model, act, enabled, &a.settings)
             };
             act(app, hwnd, action);
             Some(LRESULT(0))
@@ -501,6 +499,20 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
     invalidate(hwnd);
 }
 
+/// What a UI Automation invocation does in the settings window. Nothing while the window
+/// is disabled (held while the modal Open dialog is up), as for a click and as in the
+/// main window (`uia_glue::run_main`).
+fn uia_action(m: &mut Model, act: Act, enabled: bool, s: &Settings) -> Action {
+    if !enabled {
+        return Action::Nothing;
+    }
+    match act {
+        Act::Pick(c, o) => m.invoke(c, Some(o), s),
+        Act::Press(c) => m.invoke(c, None, s),
+        _ => Action::Nothing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +549,30 @@ mod tests {
 
     fn focus(m: &mut Model, c: Control) {
         m.focused = CONTROLS.iter().position(|x| *x == c).unwrap();
+    }
+
+    #[test]
+    fn uia_invocations_wait_while_the_window_is_held() {
+        let s = Settings::default();
+        let language = CONTROLS
+            .iter()
+            .position(|c| *c == Control::Language)
+            .unwrap();
+        let mut m = Model::default();
+        focus(&mut m, Control::PinMenu);
+        let before = m.focused;
+        // Disabled by the Open dialog: neither the pick nor the focus move happens.
+        assert_eq!(
+            uia_action(&mut m, Act::Pick(language, 2), false, &s),
+            Action::Nothing
+        );
+        assert_eq!(m.focused, before);
+        // Enabled again: the same invocation acts as a click.
+        assert!(matches!(
+            uia_action(&mut m, Act::Pick(language, 2), true, &s),
+            Action::Change(_)
+        ));
+        assert_eq!(m.focused, language);
     }
 
     #[test]
