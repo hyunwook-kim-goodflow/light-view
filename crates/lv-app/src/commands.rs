@@ -35,13 +35,10 @@ use crate::delete;
 use crate::fullscreen;
 use crate::input;
 use crate::instance;
-use crate::overlay::{
-    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction, TOAST_FILE_CHANGED,
-    TOAST_KEPT_COPY, TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED,
-    TOAST_UNSUPPORTED_FORMAT,
-};
+use crate::overlay::{DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction};
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
+use crate::strings::{t, tf, S};
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
 use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
 use crate::window::{self, invalidate, App};
@@ -260,7 +257,7 @@ fn start_save(app: &RefCell<App>, hwnd: HWND) {
         // The file could not be read when it was shown.
         a.viewer.on_save_failed();
         drop(a);
-        input::show_toast(app, hwnd, |now| Toast::new(TOAST_FILE_CHANGED, now));
+        input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastFileChanged), now));
         return;
     };
     if a.viewer.closing_after_save() {
@@ -314,17 +311,17 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
     }
     let toast = match &done.outcome {
         SaveOutcome::Saved => None,
-        SaveOutcome::SavedAsOrientationTag => Some(TOAST_SAVED_AS_TAG.to_owned()),
-        SaveOutcome::Unsupported => Some(TOAST_UNSUPPORTED_FORMAT.to_owned()),
-        SaveOutcome::Changed => Some(TOAST_FILE_CHANGED.to_owned()),
-        SaveOutcome::ReadOnly => Some(TOAST_READ_ONLY.to_owned()),
+        SaveOutcome::SavedAsOrientationTag => Some(t(S::ToastSavedAsTag).to_owned()),
+        SaveOutcome::Unsupported => Some(t(S::ToastUnsupportedFormat).to_owned()),
+        SaveOutcome::Changed => Some(t(S::ToastFileChanged).to_owned()),
+        SaveOutcome::ReadOnly => Some(t(S::ToastReadOnly).to_owned()),
         SaveOutcome::Failed(e) => {
             eprintln!("light-view: could not save {}: {e}", done.path.display());
-            Some(TOAST_SAVE_FAILED.to_owned())
+            Some(t(S::ToastSaveFailed).to_owned())
         }
         SaveOutcome::KeptCopy(copy) => {
             let name = copy.file_name().unwrap_or_default().to_string_lossy();
-            Some(format!("{TOAST_KEPT_COPY}{name}"))
+            Some(tf(S::ToastKeptCopy, &[&name]))
         }
     };
     let pending = {

@@ -12,6 +12,28 @@ pub struct WindowPlacement {
     pub maximized: bool,
 }
 
+/// UI language choice. "auto" follows the Windows UI language; an unknown value in the
+/// file falls back to `Auto`.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LangSetting {
+    #[default]
+    Auto,
+    Ko,
+    En,
+}
+
+impl<'de> Deserialize<'de> for LangSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(match s.as_str() {
+            "ko" => LangSetting::Ko,
+            "en" => LangSetting::En,
+            _ => LangSetting::Auto,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct Settings {
@@ -21,6 +43,7 @@ pub struct Settings {
     pub memory_budget_mb: Option<u32>,
     /// Save a view rotation without asking when leaving the photo.
     pub auto_save_rotation: bool,
+    pub language: LangSetting,
 }
 
 /// 설정을 읽는다. 파일이 없으면 기본값, 파싱에 실패하면 원본을 `.bak`으로 옮기고 기본값을 돌려준다.
@@ -76,6 +99,7 @@ mod tests {
             open_in_new_window: true,
             memory_budget_mb: Some(512),
             auto_save_rotation: true,
+            language: LangSetting::En,
         }
     }
 
@@ -124,5 +148,31 @@ mod tests {
         assert_eq!(s.window, None);
         // Settings files from before M3 ask before saving a rotation.
         assert!(!s.auto_save_rotation);
+        assert_eq!(s.language, LangSetting::Auto);
+    }
+
+    #[test]
+    fn language_is_lowercase_and_unknown_falls_back_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        for (text, want) in [
+            ("language = \"ko\"\n", LangSetting::Ko),
+            ("language = \"en\"\n", LangSetting::En),
+            ("language = \"auto\"\n", LangSetting::Auto),
+            ("language = \"fr\"\n", LangSetting::Auto),
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(load_settings(&path).language, want, "{text}");
+        }
+        for want in [LangSetting::Auto, LangSetting::Ko, LangSetting::En] {
+            let s = Settings {
+                language: want,
+                ..Settings::default()
+            };
+            save_settings(&path, &s).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let name = format!("{want:?}").to_lowercase();
+            assert!(text.contains(&format!("language = \"{name}\"")), "{text}");
+        }
     }
 }
