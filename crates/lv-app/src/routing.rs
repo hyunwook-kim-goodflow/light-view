@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lv_core::decode::{decode_file, open_image, DecodeError, DecodeLimits, DecodedImage, Frame};
+use lv_core::exif_info::ExifData;
 use lv_core::format::ImageFormat;
 use lv_core::prefetch::Decode;
 
@@ -75,6 +76,8 @@ impl Decode for RoutingDecoder {
         // Within `max_file_bytes`, which is also the most a worker accepts.
         let bytes = image.read_all(&self.limits)?;
         let byte_len = bytes.len() as u64;
+        // Read here, on the prefetch thread, from the bytes the worker decodes (R5).
+        let exif = ExifData::read(&bytes).map(Arc::new);
         let (width, height, bgra) = pool.decode_heif(bytes)?;
         Ok(DecodedImage {
             width,
@@ -82,6 +85,7 @@ impl Decode for RoutingDecoder {
             frames: vec![Frame { bgra, delay_ms: 0 }],
             format: ImageFormat::Heif,
             byte_len,
+            exif,
         })
     }
 }
@@ -132,6 +136,9 @@ mod tests {
         assert_eq!(heic.frames[0].delay_ms, 0);
         assert_eq!(heic.frames[0].bgra.len(), 451 * 461 * 4);
         assert_eq!(heic.byte_len, std::fs::metadata(heic_path()).unwrap().len());
+        // EXIF comes from the same bytes the worker decoded (the sample has none).
+        let bytes = std::fs::read(heic_path()).unwrap();
+        assert_eq!(heic.exif.as_deref(), ExifData::read(&bytes).as_ref());
 
         let dir = tempfile::tempdir().unwrap();
         let bmp = decoder.decode(&bmp_file(&dir)).expect("the BMP decodes");
