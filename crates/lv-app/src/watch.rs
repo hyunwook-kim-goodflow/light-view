@@ -41,7 +41,8 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::commands;
 use crate::input;
-use crate::overlay::{Overlay, Toast, TOAST_PHOTO_RELOADED, TOAST_PHOTO_VANISHED};
+use crate::overlay::{Overlay, Toast};
+use crate::strings::{t, S};
 use crate::viewer::{RescanFound, RescanNotice};
 use crate::window::App;
 
@@ -484,8 +485,8 @@ pub fn on_rescan_done(app: &RefCell<App>, hwnd: HWND) {
         drop(a);
         commands::after(app, hwnd, redraw);
         let text = match notice {
-            Some(RescanNotice::Vanished) => TOAST_PHOTO_VANISHED,
-            Some(RescanNotice::Reloaded) => TOAST_PHOTO_RELOADED,
+            Some(RescanNotice::Vanished) => t(S::ToastPhotoVanished),
+            Some(RescanNotice::Reloaded) => t(S::ToastPhotoReloaded),
             None => continue,
         };
         input::show_toast(app, hwnd, |now| Toast::new(text, now));

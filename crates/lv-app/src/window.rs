@@ -36,6 +36,7 @@ use crate::instance;
 use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
+use crate::strings::{t, S};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
@@ -44,8 +45,6 @@ use crate::watch::Watching;
 use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
-const LOADING: &str = "불러오는 중…";
-const SAVING: &str = "저장하는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
@@ -335,9 +334,9 @@ impl App {
             Scene::Message(_) | Scene::Empty => {}
         }
         if saving {
-            draw_pill(r, p, self.dark, (view_w, view_h), SAVING);
+            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Saving));
         } else if loading {
-            draw_pill(r, p, self.dark, (view_w, view_h), LOADING);
+            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Loading));
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {

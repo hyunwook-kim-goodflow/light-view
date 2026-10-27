@@ -12,9 +12,8 @@ use lv_core::listing::{same_path, FolderList};
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
 
-pub const CANNOT_OPEN: &str = "이 사진은 열 수 없어요";
-/// Followed by the pixel size when it is known.
-const TOO_LARGE: &str = "너무 커서 열 수 없어요";
+use crate::strings::{t, too_large_with_size, S};
+
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
 const MIN_DELAY_MS: u32 = 20;
 const DEFAULT_DELAY_MS: u32 = 100;
@@ -141,11 +140,9 @@ pub struct Viewer {
 
 pub fn error_message(e: &DecodeError) -> String {
     match e {
-        DecodeError::TooLarge { width, height } => {
-            format!("{TOO_LARGE} ({width}×{height})")
-        }
-        DecodeError::FileTooLarge { .. } => TOO_LARGE.to_owned(),
-        _ => CANNOT_OPEN.to_owned(),
+        DecodeError::TooLarge { width, height } => too_large_with_size(*width, *height),
+        DecodeError::FileTooLarge { .. } => t(S::TooLarge).to_owned(),
+        _ => t(S::CannotOpen).to_owned(),
     }
 }
 
@@ -468,7 +465,7 @@ impl Viewer {
                 view: Viewport::initial(self.view_size, image_dips(img, self.dip, self.quarters)),
                 result: result.clone(),
             },
-            Ok(_) => Content::Message(CANNOT_OPEN.to_owned()),
+            Ok(_) => Content::Message(t(S::CannotOpen).to_owned()),
             Err(e) => Content::Message(error_message(e)),
         };
         self.shown = Some(Shown {
@@ -875,7 +872,7 @@ impl Viewer {
         let (i, n) = self.position();
         let mut title = format!("{name} · {i} / {n}");
         if self.unsaved_rotation() {
-            title.push_str(" · 회전됨 · 저장 안 됨");
+            title.push_str(t(S::TitleRotatedUnsaved));
         }
         title
     }
@@ -1510,7 +1507,7 @@ mod tests {
             height: 20000,
         };
         assert_eq!(error_message(&e), "너무 커서 열 수 없어요 (30000×20000)");
-        assert_eq!(error_message(&DecodeError::Unsupported), CANNOT_OPEN);
+        assert_eq!(error_message(&DecodeError::Unsupported), t(S::CannotOpen));
         assert_eq!(
             error_message(&DecodeError::FileTooLarge { bytes: 1 << 40 }),
             "너무 커서 열 수 없어요"

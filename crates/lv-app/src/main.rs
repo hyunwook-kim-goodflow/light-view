@@ -11,6 +11,7 @@ mod placement;
 mod render;
 mod routing;
 mod save;
+mod strings;
 mod theme;
 mod timing;
 mod toolbar;
@@ -59,6 +60,7 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
+    strings::set(settings.language);
     // Held until the window closes, so later launches forward to it.
     let _guard = if settings.open_in_new_window {
         None

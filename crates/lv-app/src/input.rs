@@ -479,9 +479,7 @@ fn debug_overlay(
     vk: u16,
     mods: lv_core::command::Mods,
 ) -> Option<LRESULT> {
-    use crate::overlay::{
-        TOAST_FILE_CHANGED, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
-    };
+    use crate::strings::{t, S};
     if !mods.ctrl || !mods.shift || mods.alt {
         return None;
     }
@@ -497,10 +495,10 @@ fn debug_overlay(
         }
     };
     let texts = [
-        TOAST_SAVED_AS_TAG,
-        TOAST_FILE_CHANGED,
-        TOAST_SAVE_FAILED,
-        TOAST_UNSUPPORTED_FORMAT,
+        t(S::ToastSavedAsTag),
+        t(S::ToastFileChanged),
+        t(S::ToastSaveFailed),
+        t(S::ToastUnsupportedFormat),
     ];
     match vk {
         0x31 => show_dialog(app, hwnd, Prompt::SaveRotation, target),

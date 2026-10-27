@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
 use crate::render::{Align, Renderer, TextRun};
+use crate::strings::{t, S};
 use crate::theme::{Palette, Rgb};
 use crate::toolbar::{pinned_bar_height, Rect};
 
@@ -18,27 +19,6 @@ const VK_TAB: u16 = 0x09;
 const VK_SPACE: u16 = 0x20;
 
 pub const TOAST_MS: u64 = 6000;
-
-pub const CHECKBOX_LABEL: &str = "다음부터 묻지 않고 바로 저장";
-pub const TOAST_RECYCLED: &str = "휴지통으로 옮겼어요";
-pub const TOAST_UNDO: &str = "실행 취소";
-pub const TOAST_SAVED_AS_TAG: &str = "이 사진은 회전 정보로 저장했어요";
-pub const TOAST_FILE_CHANGED: &str = "파일이 바뀌었어요, 다시 열어 주세요";
-pub const TOAST_SAVE_FAILED: &str = "저장하지 못했어요";
-pub const TOAST_UNSUPPORTED_FORMAT: &str = "이 형식은 아직 회전 저장을 지원하지 않아요";
-pub const TOAST_READ_ONLY: &str = "읽기 전용 파일이에요";
-/// Followed by the kept copy's file name.
-pub const TOAST_KEPT_COPY: &str = "저장 중 문제가 생겨 사본을 남겼어요: ";
-pub const TOAST_NO_PERMISSION: &str = "삭제할 권한이 없어요";
-pub const TOAST_IN_USE: &str = "다른 프로그램이 쓰고 있어 삭제할 수 없어요";
-pub const TOAST_NOT_A_FILE: &str = "이 항목은 삭제할 수 없어요";
-pub const TOAST_DELETE_FAILED: &str = "삭제하지 못했어요";
-/// Followed by the file name.
-pub const TOAST_RECYCLE_FAILED: &str = "휴지통으로 옮기지 못했어요: ";
-/// The photo on screen left its folder (its unsaved rotation is gone with it).
-pub const TOAST_PHOTO_VANISHED: &str = "보던 사진이 폴더에서 사라졌어요";
-/// The photo on screen was changed by another program (its unsaved rotation dropped).
-pub const TOAST_PHOTO_RELOADED: &str = "사진이 바깥에서 바뀌어 다시 불러왔어요";
 
 // Dialog layout (DIPs).
 const CARD_MAX_W: f32 = 420.0;
@@ -89,8 +69,8 @@ pub enum Item {
 impl Prompt {
     pub fn title(&self) -> &'static str {
         match self {
-            Prompt::SaveRotation => "회전한 내용을 저장할까요?",
-            Prompt::PermanentDelete { .. } => "이 위치는 휴지통이 없어 영구 삭제돼요. 삭제할까요?",
+            Prompt::SaveRotation => t(S::PromptSaveRotation),
+            Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
         }
     }
 
@@ -139,10 +119,10 @@ impl Prompt {
 impl PromptResult {
     pub fn label(self) -> &'static str {
         match self {
-            PromptResult::Save => "저장",
-            PromptResult::Discard => "저장 안 함",
-            PromptResult::Cancel => "취소",
-            PromptResult::Confirm => "삭제",
+            PromptResult::Save => t(S::BtnSave),
+            PromptResult::Discard => t(S::BtnDiscard),
+            PromptResult::Cancel => t(S::BtnCancel),
+            PromptResult::Confirm => t(S::BtnDelete),
         }
     }
 }
@@ -337,8 +317,8 @@ impl Toast {
     /// "휴지통으로 옮겼어요 [실행 취소]".
     pub fn recycled(now_ms: u64) -> Toast {
         Toast {
-            action: Some((TOAST_UNDO.to_owned(), ToastAction::Undo)),
-            ..Toast::new(TOAST_RECYCLED, now_ms)
+            action: Some((t(S::ToastUndo).to_owned(), ToastAction::Undo)),
+            ..Toast::new(t(S::ToastRecycled), now_ms)
         }
     }
 
@@ -771,7 +751,7 @@ fn draw_checkbox(r: &mut Renderer, row: Rect, checked: bool, focused: bool, v: &
     let label = (label_x, row.y, row.x + row.w - label_x, row.h);
     r.draw_runs(
         label,
-        &[ui_run(CHECKBOX_LABEL, p.ink, TEXT_SIZE, false)],
+        &[ui_run(t(S::CheckboxAutoSave), p.ink, TEXT_SIZE, false)],
         Align::Leading,
     );
     if focused {
@@ -854,14 +834,17 @@ mod tests {
         assert_eq!(PromptResult::Discard.label(), "저장 안 함");
         assert_eq!(PromptResult::Cancel.label(), "취소");
         assert_eq!(PromptResult::Confirm.label(), "삭제");
-        assert_eq!(CHECKBOX_LABEL, "다음부터 묻지 않고 바로 저장");
-        assert_eq!(TOAST_RECYCLED, "휴지통으로 옮겼어요");
-        assert_eq!(TOAST_UNDO, "실행 취소");
-        assert_eq!(TOAST_SAVED_AS_TAG, "이 사진은 회전 정보로 저장했어요");
-        assert_eq!(TOAST_FILE_CHANGED, "파일이 바뀌었어요, 다시 열어 주세요");
-        assert_eq!(TOAST_SAVE_FAILED, "저장하지 못했어요");
+        assert_eq!(t(S::CheckboxAutoSave), "다음부터 묻지 않고 바로 저장");
+        assert_eq!(t(S::ToastRecycled), "휴지통으로 옮겼어요");
+        assert_eq!(t(S::ToastUndo), "실행 취소");
+        assert_eq!(t(S::ToastSavedAsTag), "이 사진은 회전 정보로 저장했어요");
         assert_eq!(
-            TOAST_UNSUPPORTED_FORMAT,
+            t(S::ToastFileChanged),
+            "파일이 바뀌었어요, 다시 열어 주세요"
+        );
+        assert_eq!(t(S::ToastSaveFailed), "저장하지 못했어요");
+        assert_eq!(
+            t(S::ToastUnsupportedFormat),
             "이 형식은 아직 회전 저장을 지원하지 않아요"
         );
     }
@@ -999,13 +982,13 @@ mod tests {
 
     #[test]
     fn toast_lasts_six_seconds() {
-        let t = Toast::new(TOAST_SAVE_FAILED, 1_000);
-        assert_eq!(t.duration_ms, 6000);
-        assert!(t.visible(1_000));
-        assert!(t.visible(6_999));
-        assert!(!t.visible(7_000));
+        let toast = Toast::new(t(S::ToastSaveFailed), 1_000);
+        assert_eq!(toast.duration_ms, 6000);
+        assert!(toast.visible(1_000));
+        assert!(toast.visible(6_999));
+        assert!(!toast.visible(7_000));
         let mut o = Overlay::default();
-        o.show_toast(t);
+        o.show_toast(toast);
         assert!(!o.expire(6_999));
         assert!(o.toast.is_some());
         assert!(o.expire(7_000));
@@ -1017,10 +1000,10 @@ mod tests {
     fn a_new_toast_replaces_the_old_one() {
         let mut o = Overlay::default();
         o.show_toast(Toast::recycled(0));
-        o.show_toast(Toast::new(TOAST_FILE_CHANGED, 5_000));
-        let t = o.toast.as_ref().unwrap();
-        assert_eq!(t.text, TOAST_FILE_CHANGED);
-        assert_eq!(t.action, None);
+        o.show_toast(Toast::new(t(S::ToastFileChanged), 5_000));
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, t(S::ToastFileChanged));
+        assert_eq!(toast.action, None);
         // The new toast's own six seconds count.
         assert!(!o.expire(10_999));
         assert!(o.expire(11_000));
@@ -1064,15 +1047,15 @@ mod tests {
 
     #[test]
     fn toast_action_hit() {
-        let mut t = Toast::recycled(0);
-        assert_eq!(t.hit_action(10.0, 10.0), None); // not placed yet
+        let mut undo = Toast::recycled(0);
+        assert_eq!(undo.hit_action(10.0, 10.0), None); // not placed yet
         let parts = toast_parts(toast_layout(1000.0, 700.0, false), 120.0, Some(56.0));
-        t.place(parts);
+        undo.place(parts);
         let (x, y) = center(parts.action.unwrap());
-        assert_eq!(t.hit_action(x, y), Some(ToastAction::Undo));
+        assert_eq!(undo.hit_action(x, y), Some(ToastAction::Undo));
         let (x, y) = center(parts.text);
-        assert_eq!(t.hit_action(x, y), None);
-        let mut plain = Toast::new(TOAST_SAVE_FAILED, 0);
+        assert_eq!(undo.hit_action(x, y), None);
+        let mut plain = Toast::new(t(S::ToastSaveFailed), 0);
         plain.place(parts);
         let (x, y) = center(parts.action.unwrap());
         assert_eq!(plain.hit_action(x, y), None);
