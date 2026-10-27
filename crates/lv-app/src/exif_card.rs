@@ -292,6 +292,9 @@ pub fn card_layout(
     let mut y = top + HEADER_INSET + HEADER_H + HEADER_INSET;
     let mut lines = Vec::new();
     let (mut expand, mut list, mut copy) = (None, None, None);
+    // Whatever does not fit above `bottom` is dropped (the heading row always stays):
+    // in a very short window lines go first, then the button; keys still work.
+    let fits = |y: f32, h: f32| y + h + PAD <= bottom + 0.01;
     if expanded {
         let natural: f32 = rows.iter().map(|r| r.height()).sum();
         let room = (bottom - y - GAP - BUTTON_H - PAD).max(0.0);
@@ -301,21 +304,29 @@ pub fn card_layout(
             w: (w - PAD).max(0.0),
             h: natural.min(room),
         };
-        y = l.y + l.h + GAP;
         list = Some(l);
-        copy = Some(Rect {
-            x: inner_x,
-            y,
-            w: inner_w,
-            h: BUTTON_H,
-        });
-        y += BUTTON_H;
+        let copy_y = l.y + l.h + GAP;
+        if fits(copy_y, BUTTON_H) {
+            copy = Some(Rect {
+                x: inner_x,
+                y: copy_y,
+                w: inner_w,
+                h: BUTTON_H,
+            });
+            y = copy_y + BUTTON_H;
+        } else {
+            y = l.y + l.h;
+        }
     } else {
+        let reserve = if text.can_expand { GAP + BUTTON_H } else { 0.0 };
         for line in &text.lines {
             let h = match line {
                 Line::Plain(_) => LINE_H,
                 Line::Exposure(_) => EXPOSURE_H,
             };
+            if !fits(y, h + reserve) {
+                break;
+            }
             lines.push(Rect {
                 x: inner_x,
                 y,
@@ -324,15 +335,21 @@ pub fn card_layout(
             });
             y += h + LINE_GAP;
         }
-        if text.can_expand {
-            y += GAP - LINE_GAP;
+        let button_y = if lines.is_empty() {
+            y
+        } else {
+            y - LINE_GAP + GAP
+        };
+        if text.can_expand && fits(button_y, BUTTON_H) {
             expand = Some(Rect {
                 x: inner_x,
-                y,
+                y: button_y,
                 w: inner_w,
                 h: BUTTON_H,
             });
-            y += BUTTON_H;
+            y = button_y + BUTTON_H;
+        } else if !lines.is_empty() {
+            y -= LINE_GAP;
         }
     }
     CardLayout {
@@ -426,8 +443,12 @@ impl ExifCard {
     }
 
     /// Another photo is shown: the list starts again from its top (the card stays open,
-    /// and so does the list).
-    pub fn sync(&mut self, generation: u64) {
+    /// and so does the list). `None` (no file open) closes the card.
+    pub fn sync(&mut self, generation: Option<u64>) {
+        let Some(generation) = generation else {
+            self.close();
+            return;
+        };
         if self.generation != Some(generation) {
             self.generation = Some(generation);
             self.selected = None;
@@ -847,7 +868,7 @@ mod tests {
     fn open_card() -> ExifCard {
         let mut c = ExifCard::default();
         c.toggle();
-        c.sync(1);
+        c.sync(Some(1));
         c
     }
 
@@ -991,6 +1012,55 @@ mod tests {
     }
 
     #[test]
+    fn short_window_drops_lines_rather_than_overflow() {
+        let mut c = open_card();
+        for h in [700.0, 300.0, 240.0, 200.0, 160.0, 120.0] {
+            for expanded in [false, true] {
+                c.expanded = expanded;
+                let view = (800.0, h);
+                let bottom = card_bottom(view, true);
+                let m = c.model(info(40), view, bottom, Lang::Ko);
+                let l = &m.layout;
+                let end = l.card.y + l.card.h;
+                // Only the heading row is kept whatever the height.
+                let header_end = l.close.y + l.close.h + HEADER_INSET + PAD;
+                assert!(
+                    end <= bottom.max(header_end) + 0.01,
+                    "{h} {expanded}: {end} > {bottom}"
+                );
+                for r in l
+                    .lines
+                    .iter()
+                    .chain(&l.expand)
+                    .chain(&l.copy)
+                    .chain(&l.list)
+                {
+                    assert!(r.y + r.h <= l.card.y + l.card.h, "{h} {expanded}");
+                }
+            }
+        }
+        // Tall enough: nothing is dropped; short: lines go before the button does.
+        c.expanded = false;
+        let m = c.model(info(4), VIEW, card_bottom(VIEW, false), Lang::Ko);
+        assert_eq!(m.layout.lines.len(), m.text.lines.len());
+        let view = (800.0, 250.0);
+        let m = c.model(info(4), view, card_bottom(view, false), Lang::Ko);
+        assert!(m.layout.lines.len() < m.text.lines.len());
+        assert!(m.layout.expand.is_some());
+    }
+
+    #[test]
+    fn sync_without_a_file_closes_the_card() {
+        let mut c = open_card();
+        c.expanded = true;
+        c.sync(None);
+        assert!(!c.is_open());
+        c.toggle();
+        assert!(c.is_open());
+        assert!(!model(&c, info(4), VIEW).expanded);
+    }
+
+    #[test]
     fn keys_open_close_and_pass_navigation() {
         let mut c = ExifCard::default();
         let m = model(&c, info(4), VIEW);
@@ -1105,7 +1175,7 @@ mod tests {
         assert!(c.on_wheel(over.0, over.1, -1, &m));
         // A new photo starts the list from the top again.
         c.expanded = true;
-        c.sync(2);
+        c.sync(Some(2));
         let m = model(&c, info(40), view);
         assert_eq!((c.scroll(&m), c.selected(&m)), (0, Some(1)));
     }

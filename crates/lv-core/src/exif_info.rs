@@ -221,12 +221,23 @@ fn entries(exif: &Exif) -> Vec<ExifEntry> {
             } else {
                 format!("Tag 0x{:04X}", field.tag.number())
             };
-            let mut value = Capped::default();
-            let _ = write!(value, "{}", field.display_value().with_unit(exif));
+            let value = match &field.value {
+                // One string: the bare text, not kamadak's quoted form, so the list
+                // shows and the card copies what the camera wrote.
+                Value::Ascii(parts) if parts.len() == 1 => {
+                    let s = String::from_utf8_lossy(&parts[0]);
+                    clean(s.trim_end_matches('\0'))
+                }
+                _ => {
+                    let mut value = Capped::default();
+                    let _ = write!(value, "{}", field.display_value().with_unit(exif));
+                    value.finish()
+                }
+            };
             ExifEntry {
                 group: group_name(field.tag, field.ifd_num),
                 name: clean(&name),
-                value: value.finish(),
+                value,
             }
         })
         .collect()
@@ -537,7 +548,7 @@ mod tests {
         let make = entries.iter().find(|e| e.name == "Make").unwrap();
         assert_eq!(
             (make.group.as_str(), make.value.as_str()),
-            ("IFD0", "\"Canon\"")
+            ("IFD0", "Canon")
         );
         assert!(entries
             .iter()
@@ -668,8 +679,8 @@ mod tests {
         assert_eq!(long.value.chars().count(), 512);
         assert!(long.value.ends_with('\u{2026}'));
         let artist = entries.iter().find(|e| e.name == "Artist").unwrap();
-        // kamadak already shows the raw bytes as `\x01`; nothing raw reaches the card.
-        assert!(artist.value.contains("\\x01"), "{:?}", artist.value);
+        // Control characters show as escapes; nothing raw reaches the card.
+        assert!(artist.value.contains("\\u{1}"), "{:?}", artist.value);
         assert!(!artist.value.contains('\u{202e}'));
         // Unnamed tags still get a name.
         assert!(entries.iter().any(|e| e.name == "Tag 0x1000"));
@@ -734,6 +745,32 @@ mod tests {
         let (a, b) = gps_of(gps(("N", lat), ("W", zero))).unwrap();
         assert_eq!(a, 37.5);
         assert!(b == 0.0 && b.is_sign_positive(), "{b}");
+    }
+
+    #[test]
+    fn single_string_values_are_unquoted() {
+        let fields = [
+            ascii(Tag::Make, "NIKON CORPORATION"),
+            ascii(Tag::Model, "NIKON D90"),
+            Field {
+                tag: Tag::Software,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![b"one".to_vec(), b"two".to_vec()]),
+            },
+        ];
+        let (_, entries) = read_exif(&app1_jpeg(&tiff(&fields))).unwrap();
+        let value = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.value.clone())
+                .unwrap()
+        };
+        // The list shows, and the card copies, the bare text.
+        assert_eq!(value("Model"), "NIKON D90");
+        assert_eq!(value("Make"), "NIKON CORPORATION");
+        // Several strings keep kamadak's quoted list.
+        assert!(value("Software").contains('"'), "{}", value("Software"));
     }
 
     #[test]
