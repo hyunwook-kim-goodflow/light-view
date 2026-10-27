@@ -24,10 +24,12 @@ Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
 
 출력의 `Hash`가 `SHA256SUMS.txt`의 같은 이름 줄과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.
 
+**Visual C++ 런타임:** 설치판과 포터블판은 HEIC 디코더 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`)을 `lv-worker.exe` 옆에 함께 넣어요. 이렇게 앱 폴더에 둔 런타임은 Windows Update가 고쳐 주지 않아요. 런타임의 보안 수정은 light-view의 새 릴리스로 받아요.
+
 ## 현재 상태 (M4)
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
-- HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고, 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 그 폴더 권한은 설치 파일(M5 Task 7)이 줄 예정이에요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요). 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
+- HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고, 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 설치판은 설치할 때 그 폴더에 이 권한을 줘요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요). 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
 - HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 무시). AVIF는 아직 열 수 없어요.
 - `lv-worker.exe`가 앱 옆에 없으면 HEIC만 "이 사진은 열 수 없어요"로 나오고 다른 형식은 그대로 열려요.
 - 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전, 다크 모드를 지원해요.

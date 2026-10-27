@@ -36,7 +36,9 @@ VersionInfoVersion={#AppVersion}
 ; Per-user install: no UAC prompt, HKCU only, and no dialog offering an all-users install.
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\light-view
-DisableDirPage=auto
+; The folder is fixed (spec §9): icacls grants ALL APPLICATION PACKAGES read access to it,
+; which must never land on a folder the user picked (an existing folder, a drive root).
+DisableDirPage=yes
 DisableProgramGroupPage=yes
 ; Windows 10 22H2 or later, x64 (spec §9).
 MinVersion=10.0.19045

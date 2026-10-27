@@ -37,6 +37,10 @@ jobs:
     name: Build, package and sign (Windows)
     runs-on: windows-latest
     timeout-minutes: 120
+    # actions: read lets SignPath's connector download the uploaded artifact.
+    permissions:
+      contents: read
+      actions: read
     env:
       # Secrets cannot appear in `if:`; this says whether signing is set up.
       SIGNING_ENABLED: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
@@ -168,7 +172,7 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -ChecksumsOnly
+          powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version "${{ steps.version.outputs.version }}" -ChecksumsOnly
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload release files
