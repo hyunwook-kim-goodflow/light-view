@@ -1,5 +1,9 @@
 //! Single instance: a named mutex marks the primary process; later launches forward
 //! their path to its window with WM_COPYDATA and exit.
+//!
+//! Each portable copy is its own single instance, apart from the installed copy and
+//! from other portable folders: its mutex name carries a hash of its folder, and a
+//! launch forwards only to a window whose process runs from a folder with the same key.
 
 use std::cell::RefCell;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -7,15 +11,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, PCWSTR};
+use lv_core::portable;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, IsIconic, PeekMessageW,
+    AllowSetForegroundWindow, FindWindowExW, GetWindowThreadProcessId, IsIconic, PeekMessageW,
     SendMessageTimeoutW, SetForegroundWindow, ShowWindow, MSG, PM_NOREMOVE, SMTO_ABORTIFHUNG,
     SW_RESTORE, WM_CLOSE, WM_COPYDATA,
 };
@@ -27,7 +35,8 @@ use crate::window::{App, CLASS_NAME};
 pub const COPYDATA_OPEN: usize = 0x4C56_0001;
 /// The longest path accepted, in UTF-16 units, without the terminating NUL.
 const MAX_PATH_UNITS: usize = 32767;
-const MUTEX_NAME: PCWSTR = w!(r"Local\goodflow.LightView.Instance");
+/// The installed copy's mutex; a portable copy appends `.<key>` (see `instance_key`).
+const MUTEX_NAME: &str = r"Local\goodflow.LightView.Instance";
 /// While the primary is still starting, its window is looked for this often, this long.
 const FIND_INTERVAL: Duration = Duration::from_millis(50);
 const FIND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -55,19 +64,55 @@ pub enum Launch {
     Forwarded,
 }
 
-/// Becomes the primary instance, or hands `path` to the running one. Falls back to
-/// `Primary` when the running window cannot be reached, so a launch is never lost.
-pub fn acquire_or_forward(path: Option<&Path>) -> Launch {
-    // SAFETY: plain call with a static name. GetLastError is read right after it.
+/// Which single instance the copy whose exe is in `exe_dir` belongs to: `None` for an
+/// installed copy (all share the original name), or a hash of the folder for a portable
+/// one, so a portable copy never forwards to (or receives from) another copy. The folder
+/// is compared without case and trailing separators, as Windows does.
+pub fn instance_key(exe_dir: &Path) -> Option<String> {
+    portable::data_dir(exe_dir)
+        .is_portable()
+        .then(|| folder_hash(exe_dir))
+}
+
+/// FNV-1a (64-bit) of the lower-cased folder, as 16 hex digits.
+fn folder_hash(dir: &Path) -> String {
+    let text = dir.to_string_lossy().to_lowercase();
+    let text = text.trim_end_matches(['\\', '/']);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The mutex name for an instance key (see `instance_key`).
+fn mutex_name(key: Option<&str>) -> String {
+    match key {
+        None => MUTEX_NAME.to_owned(),
+        Some(k) => format!("{MUTEX_NAME}.{k}"),
+    }
+}
+
+/// Becomes the primary instance, or hands `path` to the running one of the same copy
+/// (`key`, from `instance_key`). Falls back to `Primary` when the running window cannot
+/// be reached, so a launch is never lost.
+pub fn acquire_or_forward(path: Option<&Path>, key: Option<&str>) -> Launch {
+    let name: Vec<u16> = mutex_name(key)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `name` is NUL-terminated and outlives the call. GetLastError is read
+    // right after it.
     let (handle, existed) = unsafe {
-        match CreateMutexW(None, false, MUTEX_NAME) {
+        match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(h) => (h, GetLastError() == ERROR_ALREADY_EXISTS),
             // Without a mutex there is nothing to coordinate with; just run.
             Err(_) => return Launch::Primary(InstanceGuard(HANDLE::default())),
         }
     };
     let guard = InstanceGuard(handle);
-    if existed && forward(path) {
+    if existed && forward(path, key) {
         Launch::Forwarded
     } else {
         Launch::Primary(guard)
@@ -76,8 +121,8 @@ pub fn acquire_or_forward(path: Option<&Path>) -> Launch {
 
 /// Sends `path` to the primary window, or just brings it forward when there is no
 /// path. False when the window was not found in time or did not answer.
-fn forward(path: Option<&Path>) -> bool {
-    let Some(hwnd) = find_primary_window() else {
+fn forward(path: Option<&Path>, key: Option<&str>) -> bool {
+    let Some(hwnd) = find_primary_window(key) else {
         return false;
     };
     let mut pid = 0u32;
@@ -120,21 +165,55 @@ fn forward(path: Option<&Path>) -> bool {
     forwarded(sent, answer)
 }
 
-/// The primary's window, retried while it may still be starting.
-fn find_primary_window() -> Option<HWND> {
+/// The primary's window: a viewer window whose process belongs to the instance `key`.
+/// Retried while it may still be starting.
+fn find_primary_window(key: Option<&str>) -> Option<HWND> {
     let start = Instant::now();
     loop {
-        // SAFETY: plain call with a static class name.
-        if let Ok(hwnd) = unsafe { FindWindowW(CLASS_NAME, PCWSTR::null()) } {
-            if !hwnd.is_invalid() {
+        let mut after = HWND::default();
+        // SAFETY: plain calls with a static class name; `after` is a window it returned.
+        while let Ok(hwnd) = unsafe { FindWindowExW(None, after, CLASS_NAME, PCWSTR::null()) } {
+            if hwnd.is_invalid() {
+                break;
+            }
+            if window_key(hwnd).is_some_and(|k| k.as_deref() == key) {
                 return Some(hwnd);
             }
+            after = hwnd;
         }
         if start.elapsed() >= FIND_TIMEOUT {
             return None;
         }
         std::thread::sleep(FIND_INTERVAL);
     }
+}
+
+/// The instance key of the process that owns `hwnd`, from the folder of its exe; `None`
+/// when that process cannot be asked.
+fn window_key(hwnd: HWND) -> Option<Option<String>> {
+    let mut pid = 0u32;
+    // SAFETY: plain call; `pid` is a live local.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; MAX_PATH_UNITS + 1];
+    let mut len = buf.len() as u32;
+    // SAFETY: the handle is closed below; `buf` holds `len` units and outlives the call,
+    // which writes at most `len` units and sets `len` to the length without the NUL.
+    let image = unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(process);
+        ok.ok()?;
+        PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]))
+    };
+    Some(instance_key(image.parent()?))
 }
 
 /// WM_COPYDATA from another launch: opens the path if it is an existing file (or a
@@ -259,6 +338,37 @@ mod tests {
 
     fn bytes(units: &[u16]) -> Vec<u8> {
         units.iter().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn portable_copies_get_their_own_instance_name() {
+        let installed = tempfile::tempdir().unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for d in [&a, &b] {
+            std::fs::write(d.path().join(portable::MARKER), "").unwrap();
+        }
+        // The installed copy keeps the name every earlier version used.
+        assert_eq!(instance_key(installed.path()), None);
+        assert_eq!(mutex_name(None), r"Local\goodflow.LightView.Instance");
+        // Each portable folder has its own name, apart from the installed one.
+        let (ka, kb) = (
+            instance_key(a.path()).unwrap(),
+            instance_key(b.path()).unwrap(),
+        );
+        assert_ne!(ka, kb);
+        assert_eq!(ka.len(), 16);
+        assert!(ka.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            mutex_name(Some(&ka)),
+            format!(r"Local\goodflow.LightView.Instance.{ka}")
+        );
+        // The same folder spelled with another case or a trailing separator is the same
+        // copy (the window's process path may be spelled differently from current_exe).
+        let upper = PathBuf::from(a.path().to_string_lossy().to_uppercase());
+        let slash = PathBuf::from(format!("{}\\", a.path().display()));
+        assert_eq!(folder_hash(&upper), ka);
+        assert_eq!(folder_hash(&slash), ka);
     }
 
     #[test]
