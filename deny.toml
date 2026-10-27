@@ -1,0 +1,57 @@
+# cargo-deny configuration (`cargo deny check`, run in CI). Docs:
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# light-view ships for 64-bit Windows only; dependencies of other targets are not checked.
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Every RustSec advisory (vulnerability, unmaintained, unsound, yanked) fails the check.
+# An entry here needs a comment saying why it does not affect light-view.
+ignore = []
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+# The licenses the dependency tree actually has (`cargo deny list`). Each must permit
+# binary redistribution with a notice (THIRD_PARTY_NOTICES.md); no copyleft crate.
+# libheif/libde265 (LGPL-3.0) and libjpeg-turbo are vcpkg C libraries, not crates, and are
+# covered by scripts/setup-deps.ps1's codec check and the notices.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[licenses.private]
+# The workspace's own crates are checked like any other (they are MIT OR Apache-2.0).
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+# `*` version requirements are refused; the workspace's own path dependencies (all
+# `publish = false`) are the only exception.
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io only: no other registry, no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

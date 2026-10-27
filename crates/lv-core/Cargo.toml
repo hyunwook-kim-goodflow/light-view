@@ -3,6 +3,7 @@ name = "lv-core"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
@@ -16,4 +17,6 @@ toml = "1.1.8"
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Shell"] }
 
 [dev-dependencies]
+# The fuzz corpus replay test runs lv-ipc's framing entry too.
+lv-ipc = { path = "../lv-ipc" }
 tempfile = "3"

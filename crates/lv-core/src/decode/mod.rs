@@ -246,7 +246,10 @@ fn image_limits(l: &DecodeLimits) -> Limits {
     limits
 }
 
-fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, DecodeError> {
+pub(crate) fn decode_inner(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<DecodedImage, DecodeError> {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let format = sniff_format(head).ok_or(DecodeError::Unsupported)?;
     let img_format = to_image_format(format).ok_or(DecodeError::Unsupported)?;
