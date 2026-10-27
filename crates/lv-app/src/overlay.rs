@@ -29,6 +29,12 @@ pub const TOAST_UNSUPPORTED_FORMAT: &str = "이 형식은 아직 회전 저장�
 pub const TOAST_READ_ONLY: &str = "읽기 전용 파일이에요";
 /// Followed by the kept copy's file name.
 pub const TOAST_KEPT_COPY: &str = "저장 중 문제가 생겨 사본을 남겼어요: ";
+pub const TOAST_NO_PERMISSION: &str = "삭제할 권한이 없어요";
+pub const TOAST_IN_USE: &str = "다른 프로그램이 쓰고 있어 삭제할 수 없어요";
+pub const TOAST_NOT_A_FILE: &str = "이 항목은 삭제할 수 없어요";
+pub const TOAST_DELETE_FAILED: &str = "삭제하지 못했어요";
+/// Followed by the file name.
+pub const TOAST_RECYCLE_FAILED: &str = "휴지통으로 옮기지 못했어요: ";
 
 // Dialog layout (DIPs).
 const CARD_MAX_W: f32 = 420.0;

@@ -31,12 +31,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ENDSESSION, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
+use crate::delete;
 use crate::fullscreen;
 use crate::input;
 use crate::instance;
 use crate::overlay::{
-    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, TOAST_FILE_CHANGED, TOAST_KEPT_COPY,
-    TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
+    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction, TOAST_FILE_CHANGED,
+    TOAST_KEPT_COPY, TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED,
+    TOAST_UNSUPPORTED_FORMAT,
 };
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
@@ -48,6 +50,8 @@ use crate::worker::WorkerPool;
 pub const WM_APP_IMAGE_READY: u32 = WM_APP + 1;
 /// Posted by a save thread once its `SaveDone` is in `App::save_rx`.
 pub const WM_APP_SAVE_DONE: u32 = WM_APP + 2;
+/// Posted by the recycle thread once a report is in `App::delete_rx`.
+pub const WM_APP_DELETE_DONE: u32 = WM_APP + 3;
 const ANIMATION_TIMER: usize = 2;
 const LOADING_TIMER: usize = 3;
 /// One-shot: a save still running after `LOADING_DELAY_MS` shows "저장하는 중…".
@@ -68,6 +72,17 @@ pub struct HwndCell(Arc<AtomicIsize>);
 impl HwndCell {
     pub fn set(&self, hwnd: HWND) {
         self.0.store(hwnd.0 as isize, Ordering::Release);
+    }
+
+    /// Posts `msg` to the window, once there is one.
+    pub fn post(&self, msg: u32) {
+        let h = self.0.load(Ordering::Acquire);
+        if h != 0 {
+            // SAFETY: plain call; posting to a destroyed window just fails.
+            unsafe {
+                let _ = PostMessageW(HWND(h as *mut _), msg, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 }
 
@@ -101,13 +116,7 @@ pub fn new_viewer(
     let decoder = RoutingDecoder::start(limits, PREFETCH_WORKERS);
     let pool = decoder.pool();
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
-        let h = hwnd.0.load(Ordering::Acquire);
-        if h != 0 {
-            // SAFETY: plain call; posting to a destroyed window just fails.
-            unsafe {
-                let _ = PostMessageW(HWND(h as *mut _), WM_APP_IMAGE_READY, WPARAM(0), LPARAM(0));
-            }
-        }
+        hwnd.post(WM_APP_IMAGE_READY);
     });
     let mut viewer = Viewer::new(prefetcher);
     viewer.set_auto_save(settings.auto_save_rotation);
@@ -159,7 +168,7 @@ pub fn request_close(app: &RefCell<App>, hwnd: HWND) {
 /// Every way of leaving the current photo. With an unsaved rotation it shows the save
 /// prompt, or saves first with `auto_save_rotation`; the leave then waits for the answer
 /// or the save. While a save runs, a leave waits for it to end.
-fn leave(app: &RefCell<App>, hwnd: HWND, reason: LeaveReason) {
+pub fn leave(app: &RefCell<App>, hwnd: HWND, reason: LeaveReason) {
     let decision = {
         let Ok(mut a) = app.try_borrow_mut() else {
             return;
@@ -194,12 +203,23 @@ fn perform(app: &RefCell<App>, hwnd: HWND, reason: LeaveReason) {
         match reason {
             LeaveReason::Move(cmd) => a.viewer.apply(cmd),
             LeaveReason::Open(path) => {
+                delete::cancel_if_pending(&mut a, &path);
                 a.viewer.open(&path);
                 Redraw::Full
             }
             LeaveReason::Close => {
                 drop(a);
                 window::close(app, hwnd);
+                return;
+            }
+            LeaveReason::Delete => {
+                drop(a);
+                delete::delete_current(app, hwnd);
+                return;
+            }
+            LeaveReason::Undo => {
+                drop(a);
+                delete::undo(app, hwnd);
                 return;
             }
         }
@@ -340,6 +360,8 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
         Command::Next | Command::Prev => leave(app, hwnd, LeaveReason::Move(cmd)),
         // Ctrl+S and the Save button save without asking.
         Command::Save => start_save(app, hwnd),
+        Command::Delete => delete::request(app, hwnd),
+        Command::Undo => delete::request_undo(app, hwnd),
         // The rotation being saved must not change under the save.
         Command::RotateLeft | Command::RotateRight
             if app.try_borrow().map_or(true, |a| a.saving.is_some()) => {}
@@ -374,7 +396,7 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
 
 /// After the viewer changed: title, toolbar tools (Save comes and goes), the loading
 /// and animation timers and a repaint.
-fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
+pub fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     if redraw == Redraw::None {
         return;
     }
@@ -404,8 +426,7 @@ fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
 
 /// Acts on a closed dialog or a used toast action. Returns false when the answer closes
 /// the window (now, or once its save ends): a path forwarded while the dialog was open
-/// must then not be opened. (The delete undo and permanent-delete confirmation arrive in
-/// Task 7.)
+/// must then not be opened.
 pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> bool {
     match event {
         OverlayEvent::Dialog {
@@ -414,10 +435,17 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             dont_ask,
             target,
         } => on_save_prompt(app, hwnd, result, dont_ask, &target),
-        event => {
-            if cfg!(debug_assertions) {
-                eprintln!("light-view: overlay {event:?}");
-            }
+        OverlayEvent::Dialog {
+            prompt: Prompt::PermanentDelete { .. },
+            result,
+            target,
+            ..
+        } => {
+            delete::on_permanent_answer(app, hwnd, result, &target);
+            true
+        }
+        OverlayEvent::Toast(ToastAction::Undo) => {
+            delete::request_undo(app, hwnd);
             true
         }
     }
@@ -523,6 +551,10 @@ pub fn handle(
             }
             Some(LRESULT(0))
         }
+        WM_APP_DELETE_DONE => {
+            delete::on_reports(app, hwnd);
+            Some(LRESULT(0))
+        }
         WM_APP_SAVE_DONE => {
             loop {
                 let done = app.try_borrow().ok()?.save_rx.try_recv();
@@ -533,12 +565,14 @@ pub fn handle(
         }
         // Windows is ending the session: the process may be ended once this returns, so
         // a running save gets up to `END_SESSION_WAIT` to finish its replace (blocking
-        // the shutdown with WM_QUERYENDSESSION would be worse).
+        // the shutdown with WM_QUERYENDSESSION would be worse), and so does sending the
+        // pending delete to the Recycle Bin.
         WM_ENDSESSION if wparam.0 != 0 => {
-            let a = app.try_borrow().ok()?;
+            let mut a = app.try_borrow_mut().ok()?;
             if a.saving.is_some() {
                 let _ = a.save_rx.recv_timeout(END_SESSION_WAIT);
             }
+            a.deleter.commit_all(END_SESSION_WAIT);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == SAVING_TIMER => {
