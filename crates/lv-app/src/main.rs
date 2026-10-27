@@ -1,20 +1,30 @@
 // Release builds are GUI-subsystem (no console window); debug builds keep stderr.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
+mod clipboard;
 mod commands;
 mod delete;
+mod exif_card;
 mod fullscreen;
 mod input;
 mod instance;
+mod menu;
 mod overlay;
 mod placement;
 mod render;
 mod routing;
 mod save;
+mod settings_win;
+mod shell;
+mod start;
+mod strings;
 mod theme;
 mod timing;
 mod toolbar;
 mod tooltip;
+mod uia;
+mod uia_provider;
 mod viewer;
 mod watch;
 mod window;
@@ -59,6 +69,7 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
+    strings::set(settings.language);
     // Held until the window closes, so later launches forward to it.
     let _guard = if settings.open_in_new_window {
         None

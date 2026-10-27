@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use lv_core::decode::DecodeLimits;
-use lv_core::settings::{save_settings, Settings};
+use lv_core::settings::{update_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
@@ -23,29 +23,34 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DEVICECHANGE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell, SaveDone, Saving};
 use crate::delete::{CommitReport, Deleter, ShellTrash};
+use crate::exif_card::{self, CardInfo, CardView, ExifCard};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
+use crate::menu::{self, Menu, MenuView};
 use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
+use crate::settings_win::{self, SettingsWindow};
+use crate::start::{self, StartScreen};
+use crate::strings::{t, S};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
+use crate::uia;
+use crate::uia_provider;
 use crate::viewer::{Scene, Viewer};
-use crate::watch::Watching;
+use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
-const LOADING: &str = "불러오는 중…";
-const SAVING: &str = "저장하는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
@@ -70,6 +75,12 @@ pub struct App {
     icon_family: &'static str,
     pub pointer: Pointer,
     pub overlay: Overlay,
+    /// The EXIF card (spec §4.6), drawn under the overlay.
+    pub exif_card: ExifCard,
+    /// The right-click menu, drawn over the card and under the overlay.
+    pub menu: Menu,
+    /// The empty start screen's [열기] button.
+    pub start: StartScreen,
     /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
     pub pool: Option<Arc<WorkerPool>>,
     /// The prefetcher's decode limits; a save checks its result within them.
@@ -85,6 +96,8 @@ pub struct App {
     pub delete_rx: Receiver<CommitReport>,
     /// The shown folder's change watch.
     pub watching: Watching,
+    /// The settings window, while it is open.
+    pub settings_win: Option<SettingsWindow>,
 }
 
 pub fn run(
@@ -115,6 +128,9 @@ pub fn run(
         icon_family: "",
         pointer: Pointer::default(),
         overlay: Overlay::default(),
+        exif_card: ExifCard::default(),
+        menu: Menu::default(),
+        start: StartScreen::default(),
         pool,
         decode_limits,
         saving: None,
@@ -123,6 +139,7 @@ pub fn run(
         deleter: Deleter::new(Box::new(trash)),
         delete_rx,
         watching: Watching::default(),
+        settings_win: None,
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -267,6 +284,15 @@ impl App {
         self.viewer.set_view(view, dip);
     }
 
+    pub fn dark(&self) -> bool {
+        self.dark
+    }
+
+    /// The icon font's family name (empty until the renderer exists).
+    pub fn icon_family(&self) -> &'static str {
+        self.icon_family
+    }
+
     /// Client area size in DIPs.
     pub fn client(&self) -> (f32, f32) {
         self.client_dips
@@ -296,10 +322,43 @@ impl App {
         })
     }
 
+    /// The open EXIF card's state for the shown photo, or `None` when it is closed (or
+    /// no file is open). Moves its selection back to the top when the photo changed.
+    pub fn card_model(&mut self) -> Option<exif_card::Model> {
+        if self.exif_card.is_open() {
+            let file = self.viewer.has_file();
+            self.exif_card.sync(file.then(|| self.viewer.generation()));
+        }
+        self.card_layout()
+    }
+
+    /// Like `card_model`, without touching the card's state (for hit tests).
+    pub fn card_layout(&self) -> Option<exif_card::Model> {
+        if !self.exif_card.is_open() || !self.viewer.has_file() {
+            return None;
+        }
+        let info = CardInfo {
+            exif: self.viewer.exif().cloned(),
+            file: self.viewer.info(),
+            modified: self.viewer.modified().and_then(exif_card::local_time),
+        };
+        let pinned = self.toolbar_input().is_some_and(|i| i.pinned);
+        let bottom = exif_card::card_bottom(self.client_dips, pinned);
+        Some(
+            self.exif_card
+                .model(info, self.client_dips, bottom, crate::strings::current()),
+        )
+    }
+
+    /// The empty start screen's layout, shown while no file is open.
+    pub fn start_layout(&self) -> Option<start::StartLayout> {
+        (!self.viewer.has_file()).then(|| start::start_layout(self.client_dips))
+    }
+
     /// Pins or unpins the toolbar, saves the choice and resizes the image area.
     pub fn toggle_pin(&mut self, hwnd: HWND) {
-        self.settings.toolbar_pinned = !self.settings.toolbar_pinned;
-        self.persist_settings();
+        let pinned = !self.settings.toolbar_pinned;
+        self.persist(|s| s.toolbar_pinned = pinned);
         self.on_size(hwnd);
     }
 
@@ -319,6 +378,9 @@ impl App {
         let (view_w, view_h) = self.view_dips();
         let now_ms = self.pointer.now_ms();
         let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
+        let card = self.card_model();
+        let start = self.start_layout();
+        let menu = self.menu.layout(self.client_dips);
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -331,13 +393,16 @@ impl App {
                 r.draw_image(rect, quarters);
                 drew_image = r.has_image();
             }
-            Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
+            Scene::Message(text) if !loading => r.draw_text_center(&text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
         }
+        if let Some(l) = &start {
+            start::draw(r, l, p);
+        }
         if saving {
-            draw_pill(r, p, self.dark, (view_w, view_h), SAVING);
+            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Saving));
         } else if loading {
-            draw_pill(r, p, self.dark, (view_w, view_h), LOADING);
+            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Loading));
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -349,6 +414,21 @@ impl App {
                 info: (&info, &zoom),
             };
             toolbar::draw(r, &view);
+        }
+        if let Some(m) = &card {
+            let view = CardView {
+                palette: p,
+                dark: self.dark,
+                icon_family: self.icon_family,
+            };
+            exif_card::draw(r, &self.exif_card, m, &view);
+        }
+        if let Some(l) = &menu {
+            let view = MenuView {
+                palette: p,
+                dark: self.dark,
+            };
+            menu::draw(r, &self.menu, l, &view);
         }
         let view = OverlayView {
             client: self.client_dips,
@@ -364,6 +444,8 @@ impl App {
             Ok(()) => {}
             Err(e) => eprintln!("light-view: EndDraw failed: {e}"),
         }
+        // What was just drawn is what a screen reader sees.
+        uia_provider::publish(hwnd, || uia::main_tree_of(self));
     }
 
     /// Saves the normal-window placement (the one from before fullscreen, if active).
@@ -375,15 +457,24 @@ impl App {
         let Some(wp) = wp else {
             return;
         };
-        self.settings.window = Some(wp);
-        self.persist_settings();
+        self.persist(|s| s.window = Some(wp.clone()));
     }
 
-    pub fn persist_settings(&self) {
+    /// Applies `change` to the settings and saves just that: the file is read again
+    /// and only `change` is applied to it, so a change another window (another
+    /// process, with "새 창") saved meanwhile is kept. The fields this window does not
+    /// apply live are then taken from what was written. An open settings window
+    /// repaints to show them.
+    pub fn persist(&mut self, change: impl Fn(&mut Settings)) {
+        change(&mut self.settings);
         if let Some(path) = &self.settings_path {
-            if let Err(e) = save_settings(path, &self.settings) {
-                eprintln!("light-view: could not save settings: {e}");
+            match update_settings(path, &change) {
+                Ok(written) => self.settings.sync_from(&written),
+                Err(e) => eprintln!("light-view: could not save settings: {e}"),
             }
+        }
+        if let Some(w) = &self.settings_win {
+            invalidate(w.hwnd);
         }
     }
 }
@@ -467,6 +558,16 @@ fn handle(
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
             }
+            uia_provider::flush(hwnd);
+            Some(LRESULT(0))
+        }
+        WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
+            app.try_borrow().ok().map(|a| uia::main_tree_of(&a))
+        }),
+        uia_provider::WM_APP_UIA => {
+            if let Some(act) = uia_provider::action(hwnd, wparam) {
+                uia::run_main(app, hwnd, act);
+            }
             Some(LRESULT(0))
         }
         WM_DPICHANGED => {
@@ -514,6 +615,7 @@ fn handle(
                 if let Some(tt) = tooltip {
                     tooltip::set_dark(tt, dark);
                 }
+                settings_win::on_theme(app, dark);
                 invalidate(hwnd);
             }
             None
@@ -527,7 +629,10 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_COPYDATA => Some(instance::on_copy_data(app, hwnd, lparam)),
+        WM_DEVICECHANGE => watch::on_device_change(app, hwnd, wparam, lparam),
         WM_DESTROY => {
+            watch::stop(app);
+            uia_provider::detach(hwnd);
             // SAFETY: plain call.
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))

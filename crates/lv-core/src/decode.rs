@@ -5,6 +5,7 @@ use std::fmt;
 use std::io::{Cursor, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::Arc;
 
 use image::codecs::gif::GifDecoder;
 use image::codecs::webp::WebPDecoder;
@@ -12,6 +13,7 @@ use image::metadata::Orientation;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, Limits};
 
 use crate::color::{premultiply_to_bgra, ColorSource, SrgbConverter};
+use crate::exif_info::ExifData;
 use crate::format::{sniff_format, ImageFormat, SNIFF_LEN};
 
 /// One sRGB, premultiplied BGRA8 frame.
@@ -33,6 +35,9 @@ pub struct DecodedImage {
     pub frames: Vec<Frame>,
     pub format: ImageFormat,
     pub byte_len: u64,
+    /// The file's EXIF, parsed from the same bytes on the decoding thread (ruling R5),
+    /// so the UI never reads the file for it. `None` without readable EXIF.
+    pub exif: Option<Arc<ExifData>>,
 }
 
 impl fmt::Debug for DecodedImage {
@@ -246,6 +251,7 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     }
 
     let byte_len = bytes.len() as u64;
+    let exif = ExifData::read(bytes).map(Arc::new);
     let finish = |frames: Vec<RgbaFrame>, icc: Option<Vec<u8>>, orientation: u16| {
         let (frames, width, height) = to_output(frames, width, height, icc.as_deref(), orientation);
         DecodedImage {
@@ -254,6 +260,7 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             frames,
             format,
             byte_len,
+            exif: exif.clone(),
         }
     };
 
@@ -405,6 +412,19 @@ fn decode_still(dec: impl ImageDecoder) -> Result<RgbaFrame, DecodeError> {
 mod tests {
     use super::*;
     use crate::test_fixtures as fixtures;
+
+    #[test]
+    fn exif_is_read_with_the_decode() {
+        let img = decode_bytes(
+            &fixtures::jpeg_16x8_with_orientation(6),
+            &DecodeLimits::default(),
+        )
+        .unwrap();
+        let exif = img.exif.expect("exif");
+        assert!(exif.entries.iter().any(|e| e.name == "Orientation"));
+        let img = decode_bytes(&fixtures::png_2x1(), &DecodeLimits::default()).unwrap();
+        assert!(img.exif.is_none());
+    }
 
     #[test]
     fn decodes_png() {

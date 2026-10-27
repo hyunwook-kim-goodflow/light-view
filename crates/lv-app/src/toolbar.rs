@@ -4,6 +4,7 @@
 use lv_core::command::Command;
 
 use crate::render::{Align, Renderer, TextRun};
+use crate::strings::{t, S};
 use crate::theme::{Palette, Rgb};
 
 pub const AUTO_HIDE_MS: u64 = 2000;
@@ -76,8 +77,8 @@ impl ToolButton {
         }
     }
 
-    /// Whether the button acts in this build. EXIF arrives in M4.
-    /// Disabled buttons are drawn in ink2.
+    /// Whether the button acts in this build. Disabled buttons are drawn in ink2.
+    /// (Every button acts since M4 brought the EXIF card.)
     pub fn enabled(self) -> bool {
         matches!(
             self,
@@ -88,6 +89,7 @@ impl ToolButton {
                 | ToolButton::RotateLeft
                 | ToolButton::RotateRight
                 | ToolButton::Save
+                | ToolButton::Exif
                 | ToolButton::Delete
                 | ToolButton::Pin
         )
@@ -96,16 +98,16 @@ impl ToolButton {
     /// Tooltip text: name and shortcut. The counter has none.
     pub fn tooltip(self) -> Option<&'static str> {
         Some(match self {
-            ToolButton::Prev => "이전 사진 (←)",
-            ToolButton::Next => "다음 사진 (→)",
-            ToolButton::ZoomOut => "축소 (−)",
-            ToolButton::ZoomIn => "확대 (+)",
-            ToolButton::RotateLeft => "왼쪽으로 회전 (Ctrl+←)",
-            ToolButton::RotateRight => "오른쪽으로 회전 (Ctrl+→)",
-            ToolButton::Save => "저장 (Ctrl+S)",
-            ToolButton::Exif => "정보 (I)",
-            ToolButton::Delete => "삭제 (Delete)",
-            ToolButton::Pin => "메뉴 고정",
+            ToolButton::Prev => t(S::TipPrev),
+            ToolButton::Next => t(S::TipNext),
+            ToolButton::ZoomOut => t(S::TipZoomOut),
+            ToolButton::ZoomIn => t(S::TipZoomIn),
+            ToolButton::RotateLeft => t(S::TipRotateLeft),
+            ToolButton::RotateRight => t(S::TipRotateRight),
+            ToolButton::Save => t(S::TipSave),
+            ToolButton::Exif => t(S::TipInfo),
+            ToolButton::Delete => t(S::TipDelete),
+            ToolButton::Pin => t(S::TipPin),
             ToolButton::Counter => return None,
         })
     }
@@ -412,7 +414,7 @@ fn draw_button(r: &mut Renderer, v: &ToolbarView, b: ToolButton, rect: Rect) {
             let color = p.on_highlighter;
             r.draw_runs(
                 tuple(rect),
-                &[ui_run("저장", color, 13.0, true)],
+                &[ui_run(t(S::ToolbarSave), color, 13.0, true)],
                 Align::Center,
             );
         }
