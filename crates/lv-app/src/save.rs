@@ -321,7 +321,9 @@ fn check(
             let shown = decode_bytes(bytes, limits).map_err(|e| e.to_string())?;
             let (w, h) = (u32::from(width), u32::from(height));
             let expected = if orientation >= 5 { (h, w) } else { (w, h) };
-            if (shown.width, shown.height) != expected {
+            // Over the limit it decodes at reduced size (ruling R1); its full size counts.
+            let full = shown.scaled_from.unwrap_or((shown.width, shown.height));
+            if full != expected {
                 return Err("the new JPEG decodes to the wrong size".into());
             }
         }
@@ -973,6 +975,21 @@ mod tests {
     }
 
     #[test]
+    fn over_limit_jpeg_saves_like_the_full_one() {
+        // 64x32 is over 1000 px: the viewer shows it, and the check decodes it, at 1/2
+        // size (ruling R1); the rotation is lossless on the original all the same.
+        let small = DecodeLimits { max_pixels: 1000 };
+        for o in [1, 6] {
+            let old = jpeg(64, 32, o);
+            let f = fixture("s.jpg", &old);
+            let outcome = save_rotation(&f.path, &f.id, 1, &Fake::new(Behavior::Honest), &small);
+            assert_eq!(outcome, SaveOutcome::Saved, "orientation {o}");
+            assert_shows_turned(&old, &f.bytes(), 1, &format!("orientation {o}"));
+            f.assert_no_temp();
+        }
+    }
+
+    #[test]
     fn saves_aligned_jpeg_pixels_and_resets_orientation() {
         for o in [1, 3, 6, 8] {
             for q in 1..=3 {
@@ -1232,9 +1249,10 @@ mod tests {
         assert_eq!(f.bytes(), old);
         assert!(blocker.is_dir());
 
-        // The check decode is held to the viewer's limits (here 2048 px > 1000).
+        // The check decode is held to the viewer's limits: 2048 px is over 31 even at
+        // 1/8 size (8x4), so it cannot be checked.
         let f = fixture("f.jpg", &old);
-        let small = DecodeLimits { max_pixels: 1000 };
+        let small = DecodeLimits { max_pixels: 31 };
         let outcome = save_rotation(&f.path, &f.id, 1, &Fake::new(Behavior::Honest), &small);
         assert!(matches!(outcome, SaveOutcome::Failed(_)), "{outcome:?}");
         assert_eq!(f.bytes(), old);

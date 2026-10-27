@@ -341,6 +341,7 @@ impl App {
             exif: self.viewer.exif().cloned(),
             file: self.viewer.info(),
             modified: self.viewer.modified().and_then(exif_card::local_time),
+            scaled_from: self.viewer.scaled_from(),
         };
         let pinned = self.toolbar_input().is_some_and(|i| i.pinned);
         let bottom = exif_card::card_bottom(self.client_dips, pinned);

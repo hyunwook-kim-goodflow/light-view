@@ -939,6 +939,7 @@ mod tests {
             exif: Some(exif),
             file: Some((10, 10, 100)),
             modified: None,
+            scaled_from: None,
         };
         // Open the full list (Enter).
         let m = card.model(info.clone(), CLIENT, 600.0, Lang::Ko);

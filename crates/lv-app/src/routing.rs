@@ -86,6 +86,7 @@ impl Decode for RoutingDecoder {
             format: ImageFormat::Heif,
             byte_len,
             exif,
+            scaled_from: None,
         })
     }
 }
