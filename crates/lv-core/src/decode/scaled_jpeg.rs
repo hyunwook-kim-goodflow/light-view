@@ -7,23 +7,21 @@
 //! decode may allocate; otherwise, like anything over the limit even at 1/8, it is
 //! `TooLarge`.
 //!
-//! `jpeg-decoder` decodes every block of the full-size image (zero-filling what the file
-//! lacks) and cannot be cancelled, so a header claiming a huge image over a few bytes of
-//! data, or one scan repeated many times, would keep a decoding thread busy for many
-//! seconds (rulings R9, R10). So, before decoding: a source over `MAX_SOURCE_PIXELS`
-//! (32768², about 12 s at worst on a 4-core laptop) is `TooLarge`; and it is `Corrupt`
-//! when a sequential frame codes a component in two scans, a progressive frame has more
-//! than 64 scans, or a scan that codes every block of its components (any sequential
-//! scan, a progressive DC-first scan) has fewer bits of entropy-coded data (not
-//! metadata, tables or anything after EOI) than it has blocks: every block takes at
-//! least one bit.
+//! `jpeg-decoder` decodes every block of the full-size image and cannot be cancelled.
+//! Every JPEG has passed `jpeg_budget::check` before it gets here (scans in proportion
+//! to the image, rulings R9–R11); on top of that a source over `MAX_SOURCE_PIXELS` is
+//! `TooLarge`. Worst cases measured (release, 16-thread laptop): a sequential 32768²
+//! about 12 s; a progressive frame is bounded by the coefficient cap (gray 23168² at
+//! the default limit) and the work budget: a noise-filled gray 23168² written with
+//! libjpeg's default progressive script (191 of the 192 coefficients per block allowed,
+//! 354 MB) took 21 s.
 
 use std::io::Cursor;
 
 use jpeg_decoder::{Decoder, PixelFormat};
 
+use super::jpeg_budget::JpegFrame;
 use super::{corrupt, DecodeError, DecodeLimits, RgbaFrame};
-use crate::jpeg_markers::{is_frame_header, skip_entropy_data, Markers, SOS};
 
 /// The largest source a scaled decode takes on (R9): 32768 x 32768.
 const MAX_SOURCE_PIXELS: u64 = 1 << 30;
@@ -50,12 +48,14 @@ pub(super) struct Scaled {
 }
 
 /// Decodes the `width`x`height` JPEG in `bytes`, which is over `limits.max_pixels`, at
-/// the largest size within it.
+/// the largest size within it. `frame` is what `jpeg_budget::check` found (`None`: a
+/// frame other than SOF0..2, which is not scaled).
 pub(super) fn decode(
     bytes: &[u8],
     width: u32,
     height: u32,
     limits: &DecodeLimits,
+    frame: Option<JpegFrame>,
 ) -> Result<Scaled, DecodeError> {
     let too_large = || DecodeError::TooLarge { width, height };
     // Over 64 times the limit cannot fit even at 1/8; over `MAX_SOURCE_PIXELS` takes
@@ -66,14 +66,16 @@ pub(super) fn decode(
     }
     let denom = pick_scale(width, height, limits.max_pixels).ok_or_else(too_large)?;
     let alloc_cap = limits.max_pixels.saturating_mul(4);
-    check_frame(bytes, alloc_cap).map_err(|e| e.unwrap_or_else(too_large))?;
+    if !frame.is_some_and(|f| scalable(&f, alloc_cap)) {
+        return Err(too_large());
+    }
 
     let side = |len: u32| u16::try_from(len.div_ceil(u32::from(denom)));
     let (Ok(want_w), Ok(want_h)) = (side(width), side(height)) else {
         return Err(too_large());
     };
     let mut dec = Decoder::new(Cursor::new(bytes));
-    // Bounds only the final output; `check_frame` and `pick_scale` are the real guards.
+    // Bounds only the final output; `jpeg_budget`, `scalable` and `pick_scale` guard.
     dec.set_max_decoding_buffer_size(usize::try_from(alloc_cap).unwrap_or(usize::MAX));
     let (w, h) = dec.scale(want_w, want_h).map_err(corrupt)?;
     let (w, h) = (u32::from(w), u32::from(h));
@@ -91,166 +93,14 @@ pub(super) fn decode(
     })
 }
 
-/// The most scans a progressive frame may have (R10).
-const MAX_PROGRESSIVE_SCANS: usize = 64;
-
-/// Checks the first frame and its scans before anything is decoded (R9, R10).
-/// `Err(None)` if it cannot be scaled (not SOF0..2, or progressive coefficients over
-/// `alloc_cap` bytes); `Err(Some(Corrupt))` if the frame header is missing or malformed,
-/// there is no scan, a scan is malformed or names an unknown component, a sequential
-/// frame has a component in two scans, a progressive frame has more than
-/// `MAX_PROGRESSIVE_SCANS` scans, or a scan that must code every block of its
-/// components (any sequential scan, a progressive DC-first scan) has fewer bits of data
-/// than it has blocks.
-fn check_frame(bytes: &[u8], alloc_cap: u64) -> Result<(), Option<DecodeError>> {
-    let bad = |what: &str| Some(corrupt(what));
-    let mut markers = Markers::new(bytes).map_while(Result::ok);
-    let frame = markers
-        .by_ref()
-        .find(|m| is_frame_header(m.code))
-        .ok_or_else(|| bad("no frame header"))?;
-    let progressive = match frame.code {
-        0xC0 | 0xC1 => false,
-        0xC2 => true,
-        _ => return Err(None),
-    };
-    let sof = Sof::parse(frame.payload).ok_or_else(|| bad("bad frame header"))?;
-    if progressive && sof.blocks().saturating_mul(COEFFICIENT_BYTES) > alloc_cap {
-        return Err(None);
-    }
-    let mut seen: Vec<u8> = Vec::new();
-    let mut scans = 0;
-    for scan in markers.filter(|m| m.code == SOS) {
-        scans += 1;
-        if progressive && scans > MAX_PROGRESSIVE_SCANS {
-            return Err(bad("too many scans"));
-        }
-        let header = ScanHeader::parse(scan.payload).ok_or_else(|| bad("bad scan header"))?;
-        if !progressive {
-            if header.ids.iter().any(|id| seen.contains(id)) {
-                return Err(bad("a component in two scans"));
-            }
-            seen.extend_from_slice(&header.ids);
-        }
-        let blocks = sof
-            .scan_blocks(&header.ids)
-            .ok_or_else(|| bad("scan of an unknown component"))?;
-        let codes_every_block = !progressive || header.dc_first;
-        let bits = scan_data_len(bytes, scan.end).saturating_mul(8);
-        if codes_every_block && bits < blocks {
-            return Err(bad("too little data for the image size"));
-        }
-    }
-    if scans == 0 {
-        return Err(bad("no scan"));
-    }
-    Ok(())
-}
-
-/// The bytes of a scan's entropy-coded data, from its header's end (`start`) to the next
-/// marker that is not `RSTn` or a stuffed `FF00` (or the end of the file).
-fn scan_data_len(bytes: &[u8], start: usize) -> u64 {
-    let end = skip_entropy_data(bytes, start).unwrap_or(bytes.len());
-    end.saturating_sub(start) as u64
+/// Whether a checked frame can be decoded at reduced size: a progressive frame's
+/// full-size coefficients must fit in `alloc_cap` bytes.
+fn scalable(frame: &JpegFrame, alloc_cap: u64) -> bool {
+    !frame.progressive || frame.blocks.saturating_mul(COEFFICIENT_BYTES) <= alloc_cap
 }
 
 /// The bytes a progressive decode holds per block: 64 `i16` coefficients.
 const COEFFICIENT_BYTES: u64 = 64 * 2;
-
-/// A frame header: its size and each component's id and sampling factors.
-struct Sof {
-    width: u64,
-    height: u64,
-    /// (id, horizontal, vertical), every factor at least 1.
-    components: Vec<(u8, u64, u64)>,
-    h_max: u64,
-    v_max: u64,
-}
-
-impl Sof {
-    /// `None` if the SOF payload is malformed.
-    fn parse(sof: &[u8]) -> Option<Sof> {
-        let height = u64::from(u16::from_be_bytes([*sof.get(1)?, *sof.get(2)?]));
-        let width = u64::from(u16::from_be_bytes([*sof.get(3)?, *sof.get(4)?]));
-        let count = usize::from(*sof.get(5)?);
-        let components: Vec<(u8, u64, u64)> = sof
-            .get(6..6 + 3 * count)?
-            .chunks_exact(3)
-            .map(|c| (c[0], u64::from(c[1] >> 4), u64::from(c[1] & 0xF)))
-            .collect();
-        if components.iter().any(|c| c.1 == 0 || c.2 == 0) {
-            return None;
-        }
-        Some(Sof {
-            width,
-            height,
-            h_max: components.iter().map(|c| c.1).max()?,
-            v_max: components.iter().map(|c| c.2).max()?,
-            components,
-        })
-    }
-
-    fn mcus(&self) -> (u64, u64) {
-        (
-            self.width.div_ceil(8 * self.h_max),
-            self.height.div_ceil(8 * self.v_max),
-        )
-    }
-
-    /// Every component's blocks over the MCU-padded image.
-    fn blocks(&self) -> u64 {
-        let (mx, my) = self.mcus();
-        self.components.iter().map(|c| mx * c.1 * my * c.2).sum()
-    }
-
-    /// The blocks a scan of these components codes: MCU-padded when interleaved, the
-    /// component's own (unpadded) blocks when alone. `None` for an unknown component.
-    fn scan_blocks(&self, ids: &[u8]) -> Option<u64> {
-        let find = |id: &u8| self.components.iter().find(|c| c.0 == *id);
-        if let [id] = ids {
-            let (_, h, v) = find(id)?;
-            let w = (self.width * h).div_ceil(self.h_max);
-            let ht = (self.height * v).div_ceil(self.v_max);
-            return Some(w.div_ceil(8) * ht.div_ceil(8));
-        }
-        let (mx, my) = self.mcus();
-        ids.iter()
-            .map(|id| find(id).map(|c| mx * c.1 * my * c.2))
-            .sum()
-    }
-}
-
-/// A scan header: its components and whether it is a DC-first scan (Ss = 0, Ah = 0).
-struct ScanHeader {
-    ids: Vec<u8>,
-    dc_first: bool,
-}
-
-impl ScanHeader {
-    /// `None` if the SOS payload is malformed or names no component.
-    fn parse(sos: &[u8]) -> Option<ScanHeader> {
-        let count = usize::from(*sos.first()?);
-        let ids: Vec<u8> = sos
-            .get(1..1 + 2 * count)?
-            .iter()
-            .step_by(2)
-            .copied()
-            .collect();
-        let ss = *sos.get(1 + 2 * count)?;
-        let ah = *sos.get(3 + 2 * count)? >> 4;
-        (!ids.is_empty()).then_some(ScanHeader {
-            ids,
-            dc_first: ss == 0 && ah == 0,
-        })
-    }
-}
-
-/// The blocks of the frame whose SOF payload this is: per component, its blocks over the
-/// MCU-padded image. `None` if the header is malformed.
-#[cfg(test)]
-fn frame_blocks(sof: &[u8]) -> Option<u64> {
-    Sof::parse(sof).map(|s| s.blocks())
-}
 
 /// Expands `jpeg-decoder` output of `pixels` pixels to RGBA8.
 fn to_rgba(data: &[u8], format: PixelFormat, pixels: usize) -> Result<Vec<u8>, DecodeError> {
@@ -282,10 +132,25 @@ fn to_rgba(data: &[u8], format: PixelFormat, pixels: usize) -> Result<Vec<u8>, D
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::decode::jpeg_budget::{check, scan_data_len, Sof};
     use crate::decode::{decode_bytes, DecodedImage};
+    use crate::jpeg_markers::{is_frame_header, Markers, SOS};
     use crate::test_fixtures as fixtures;
+
+    /// The checks before a scaled decode: `Err(None)` where it would be `TooLarge`.
+    fn check_frame(bytes: &[u8], alloc_cap: u64) -> Result<(), Option<DecodeError>> {
+        match check(bytes) {
+            Err(e) => Err(Some(e)),
+            Ok(Some(f)) if scalable(&f, alloc_cap) => Ok(()),
+            Ok(_) => Err(None),
+        }
+    }
+
+    fn frame_blocks(sof: &[u8]) -> Option<u64> {
+        Sof::parse(sof).map(|s| s.blocks())
+    }
 
     const P3_ICC: &[u8] = include_bytes!("../../../../testdata/icc/DisplayP3-compact.icc");
 
@@ -452,15 +317,13 @@ mod tests {
 
     #[test]
     fn huge_header_over_little_data_fails_fast() {
-        // At the source cap the data check refuses it; past the cap, the size does.
-        assert!(matches!(
-            refused_fast(&crafted(32768)),
-            DecodeError::Corrupt(_)
-        ));
-        assert!(matches!(
-            refused_fast(&crafted(65535)),
-            DecodeError::TooLarge { .. }
-        ));
+        // The data check runs on every JPEG before the size decides the path.
+        for side in [32768, 65535] {
+            assert!(matches!(
+                refused_fast(&crafted(side)),
+                DecodeError::Corrupt(_)
+            ));
+        }
     }
 
     #[test]
@@ -487,7 +350,13 @@ mod tests {
     fn far_over_the_limit_is_too_large_before_the_frame_is_read() {
         // Over 64 times the limit cannot fit at 1/8; the bytes are not even looked at.
         assert!(matches!(
-            decode(b"not a jpeg", 64, 48, &DecodeLimits { max_pixels: 47 }),
+            decode(
+                b"not a jpeg",
+                64,
+                48,
+                &DecodeLimits { max_pixels: 47 },
+                None
+            ),
             Err(DecodeError::TooLarge {
                 width: 64,
                 height: 48
@@ -495,7 +364,7 @@ mod tests {
         ));
         // Over 32768² is too slow to decode whatever the limit (R9).
         assert!(matches!(
-            decode(b"not a jpeg", 40000, 30000, &DecodeLimits::default()),
+            decode(b"not a jpeg", 40000, 30000, &DecodeLimits::default(), None),
             Err(DecodeError::TooLarge {
                 width: 40000,
                 height: 30000
@@ -504,7 +373,7 @@ mod tests {
     }
 
     /// SOF payload: 8-bit, `w`x`h`, components with the given (H, V) sampling.
-    fn sof(w: u16, h: u16, sampling: &[(u8, u8)]) -> Vec<u8> {
+    pub(crate) fn sof(w: u16, h: u16, sampling: &[(u8, u8)]) -> Vec<u8> {
         let mut p = vec![8];
         p.extend_from_slice(&h.to_be_bytes());
         p.extend_from_slice(&w.to_be_bytes());
@@ -581,7 +450,7 @@ mod tests {
     }
 
     /// SOS payload: the components `ids`, spectral range `ss..=se`, and `ah`.
-    fn sos(ids: &[u8], ss: u8, se: u8, ah: u8) -> Vec<u8> {
+    pub(crate) fn sos(ids: &[u8], ss: u8, se: u8, ah: u8) -> Vec<u8> {
         let mut p = vec![ids.len() as u8];
         for id in ids {
             p.extend([*id, 0]);
@@ -629,6 +498,13 @@ mod tests {
     /// zero bytes for every block, then `repeats` more scans of the same component with
     /// one byte each.
     fn gray_crafted(repeats: usize) -> Vec<u8> {
+        crafted_scans(32768, false, repeats)
+    }
+
+    /// A real 64x48 gray JPEG claiming `side`x`side` (as progressive if asked): one
+    /// scan with enough zero bytes for every block (sequential, or progressive DC-first),
+    /// then `extra` scans with one byte each (the same scan again, or AC 1..63).
+    fn crafted_scans(side: u16, progressive: bool, extra: usize) -> Vec<u8> {
         let gray = image::GrayImage::from_pixel(64, 48, image::Luma([128]));
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
@@ -643,15 +519,69 @@ mod tests {
             let sos = markers.iter().find(|m| m.code == SOS).unwrap();
             (at(sof), at(sos) - 4, sos.end)
         };
-        let mut out = jpeg[..sos_end].to_vec();
-        out[sof_at + 1..sof_at + 5].copy_from_slice(&[0x80, 0, 0x80, 0]);
-        out.resize(out.len() + 4096 * 4096 / 8, 0);
-        for _ in 0..repeats {
-            out.extend_from_slice(&jpeg[sos_at..sos_end]);
+        let seg = crate::jpeg_markers::tests::segment;
+        let (first, more) = if progressive {
+            (
+                seg(SOS, &sos(&[1], 0, 0, 0)),
+                seg(SOS, &sos(&[1], 1, 63, 0)),
+            )
+        } else {
+            let header = jpeg[sos_at..sos_end].to_vec();
+            (header.clone(), header)
+        };
+        let mut out = jpeg[..sos_at].to_vec();
+        let s = side.to_be_bytes();
+        out[sof_at + 1..sof_at + 5].copy_from_slice(&[s[0], s[1], s[0], s[1]]);
+        if progressive {
+            out[sof_at - 3] = 0xC2;
+        }
+        out.extend(first);
+        let blocks = usize::from(side).div_ceil(8).pow(2);
+        out.resize(out.len() + blocks.div_ceil(8), 0);
+        for _ in 0..extra {
+            out.extend_from_slice(&more);
             out.push(0);
         }
         out.extend([0xFF, 0xD9]);
         out
+    }
+
+    #[test]
+    fn crafted_scans_fail_fast_on_both_paths() {
+        // 16384² is the default limit (full decode); with 2^23 it is decoded at 1/8.
+        let limits = [
+            DecodeLimits::default(),
+            DecodeLimits {
+                max_pixels: 1 << 23,
+            },
+        ];
+        // Honest, these pass the check (they are not decoded here: that takes seconds).
+        assert!(check(&crafted_scans(16384, true, 0)).unwrap().is_some());
+        assert!(check(&crafted_scans(16384, false, 0)).unwrap().is_some());
+        for file in [
+            crafted_scans(16384, true, 63),
+            crafted_scans(16384, false, 16),
+        ] {
+            for limits in &limits {
+                let start = std::time::Instant::now();
+                let result = decode_bytes(&file, limits);
+                assert!(matches!(result, Err(DecodeError::Corrupt(_))), "{result:?}");
+                assert!(start.elapsed() < std::time::Duration::from_secs(1));
+            }
+        }
+    }
+
+    #[test]
+    fn real_jpegs_still_decode() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/jpeg");
+        for name in ["gradient-64x32.jpg", "gradient-65x33.jpg"] {
+            let bytes = std::fs::read(format!("{dir}/{name}")).unwrap();
+            assert!(check(&bytes).unwrap().is_some(), "{name}");
+            decode_bytes(&bytes, &DecodeLimits::default()).expect(name);
+            // And at reduced size.
+            let img = decode_bytes(&bytes, &DecodeLimits { max_pixels: 600 }).expect(name);
+            assert!(img.scaled_from.is_some(), "{name}");
+        }
     }
 
     #[test]
@@ -710,7 +640,7 @@ mod tests {
         // A DC-first scan of all 3 * 4800 blocks, then near-empty AC scans.
         let scans = |total: usize| {
             let mut v = vec![(sos(&[1, 2, 3], 0, 0, 0), 3 * 4800 / 8)];
-            v.extend((1..total).map(|_| (sos(&[1], 1, 63, 0), 1)));
+            v.extend((1..total).map(|_| (sos(&[1], 1, 1, 0), 1)));
             file(0xC2, &s, &v)
         };
         let start = std::time::Instant::now();

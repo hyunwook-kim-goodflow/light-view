@@ -16,6 +16,7 @@ use crate::color::{premultiply_to_bgra, ColorSource, SrgbConverter};
 use crate::exif_info::ExifData;
 use crate::format::{sniff_format, ImageFormat, SNIFF_LEN};
 
+mod jpeg_budget;
 pub mod scaled_jpeg;
 
 /// One sRGB, premultiplied BGRA8 frame.
@@ -255,6 +256,12 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     if over_limit && format != ImageFormat::Jpeg {
         return Err(DecodeError::TooLarge { width, height });
     }
+    // Every JPEG, full or reduced, is checked for work out of proportion to its size
+    // before any decoder sees it (rulings R10, R11).
+    let jpeg_frame = match format {
+        ImageFormat::Jpeg => jpeg_budget::check(bytes)?,
+        _ => None,
+    };
 
     let byte_len = bytes.len() as u64;
     let exif = ExifData::read(bytes).map(Arc::new);
@@ -275,7 +282,7 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     if over_limit {
         // A JPEG over the limit opens at reduced size (ruling R1), oriented and color
         // converted like the full one.
-        let scaled = scaled_jpeg::decode(bytes, width, height, limits)?;
+        let scaled = scaled_jpeg::decode(bytes, width, height, limits, jpeg_frame)?;
         let orientation = exif_orientation(bytes);
         let mut image = output(
             vec![scaled.frame],
