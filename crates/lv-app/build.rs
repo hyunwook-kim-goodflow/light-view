@@ -12,12 +12,11 @@ fn main() {
         // (SetDefaultDllDirectories in main only covers later dynamic loads).
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
-            // winhttp.dll is only used by the opt-in update check, on its own thread:
-            // load it then, not at every start. By then `main` has called
-            // SetDefaultDllDirectories (System32 and the app folder), so the helper's
-            // LoadLibrary never searches the working folder or PATH.
-            println!("cargo:rustc-link-arg-bins=/DELAYLOAD:winhttp.dll");
-            println!("cargo:rustc-link-arg-bins=delayimp.lib");
+            // Every DLL stays a normal (static) import, winhttp.dll included (ruling
+            // R15): a delay-loaded DLL would be resolved by the delay-load helper, which
+            // does not apply these flags (a winhttp.dll next to the exe could load), and
+            // a failed delay load raises an SEH exception. Loading it at start measured
+            // as noise.
         }
     }
 }
