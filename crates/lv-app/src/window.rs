@@ -23,9 +23,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DEVICECHANGE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell, SaveDone, Saving};
@@ -47,7 +47,7 @@ use crate::tooltip;
 use crate::uia;
 use crate::uia_provider;
 use crate::viewer::{Scene, Viewer};
-use crate::watch::Watching;
+use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
@@ -629,7 +629,9 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_COPYDATA => Some(instance::on_copy_data(app, hwnd, lparam)),
+        WM_DEVICECHANGE => watch::on_device_change(app, hwnd, wparam, lparam),
         WM_DESTROY => {
+            watch::stop(app);
             uia_provider::detach(hwnd);
             // SAFETY: plain call.
             unsafe { PostQuitMessage(0) };
