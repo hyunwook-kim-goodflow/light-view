@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::time::Instant;
 
-use lv_core::command::{command_for_wheel, Command, Mods};
+use lv_core::command::{command_for_wheel, Command};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -20,10 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::commands;
-use crate::overlay::{
-    OverlayEvent, Prompt, Toast, TOAST_FILE_CHANGED, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED,
-    TOAST_UNSUPPORTED_FORMAT,
-};
+use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
 use crate::viewer::Redraw;
@@ -325,21 +322,38 @@ pub fn handle(
     }
 }
 
-/// Shows a dialog. Until it closes it takes every key, click and wheel turn, and
-/// cancels WM_CLOSE; its answer goes to `commands::on_overlay_event`.
-pub fn show_dialog(app: &RefCell<App>, hwnd: HWND, prompt: Prompt) {
+/// Shows a dialog about `target`. Until it closes it takes every key, click and wheel
+/// turn, cancels WM_CLOSE and defers forwarded opens; its answer, with `target`, goes
+/// to `commands::on_overlay_event`. A drag in progress ends.
+// Release builds call it only from Tasks 6 and 7 (debug builds also from `debug_overlay`).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub fn show_dialog(app: &RefCell<App>, hwnd: HWND, prompt: Prompt, target: DialogTarget) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
     };
-    a.overlay.show_dialog(prompt);
+    a.overlay.show_dialog(prompt, target);
     a.pointer.pressed = None;
+    let dragging = a.pointer.drag.take().is_some();
     drop(a);
+    if dragging {
+        // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+    }
     sync_tooltips(app, hwnd);
     invalidate(hwnd);
 }
 
+/// Whether a dialog is open. Anything that would change the current photo outside
+/// the user's own input (a forwarded open, a folder refresh) waits while it is.
+pub fn dialog_open(app: &RefCell<App>) -> bool {
+    app.try_borrow().is_ok_and(|a| a.overlay.dialog_open())
+}
+
 /// Shows a toast for six seconds, replacing any toast already up. `make` gets the
 /// current time, e.g. `show_toast(app, hwnd, Toast::recycled)`.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn show_toast(app: &RefCell<App>, hwnd: HWND, make: impl FnOnce(u64) -> Toast) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
@@ -368,7 +382,10 @@ pub fn overlay(
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let (vk, mods) = (wparam.0 as u16, commands::mods());
             if !dialog {
+                #[cfg(debug_assertions)]
                 return debug_overlay(app, hwnd, vk, mods);
+                #[cfg(not(debug_assertions))]
+                return None;
             }
             if mods.alt {
                 return None;
@@ -430,21 +447,50 @@ pub fn overlay(
 }
 
 /// After the overlay handled input: repaint and, once a dialog closed or a toast
-/// action was used, restore the toolbar tooltips and act on it.
+/// action was used, restore the toolbar tooltips and act on it. Then a path forwarded
+/// while the dialog was open is opened, after the answer was applied to its target.
 fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) {
     invalidate(hwnd);
-    if let Some(event) = event {
-        sync_tooltips(app, hwnd);
-        commands::on_overlay_event(app, hwnd, event);
+    let Some(event) = event else {
+        return;
+    };
+    sync_tooltips(app, hwnd);
+    commands::on_overlay_event(app, hwnd, event);
+    let deferred = app
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut a| a.overlay.take_deferred_open());
+    if let Some(path) = deferred {
+        commands::open(app, hwnd, &path);
     }
 }
 
 /// Debug builds only: Ctrl+Shift+1 to 7 show each dialog and toast, for smoke tests
-/// until Tasks 6 and 7 show them for real.
-fn debug_overlay(app: &RefCell<App>, hwnd: HWND, vk: u16, mods: Mods) -> Option<LRESULT> {
-    if !cfg!(debug_assertions) || !mods.ctrl || !mods.shift || mods.alt {
+/// until Tasks 6 and 7 show them for real. The dialogs target the current photo.
+#[cfg(debug_assertions)]
+fn debug_overlay(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    vk: u16,
+    mods: lv_core::command::Mods,
+) -> Option<LRESULT> {
+    use crate::overlay::{
+        TOAST_FILE_CHANGED, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
+    };
+    if !mods.ctrl || !mods.shift || mods.alt {
         return None;
     }
+    let target = {
+        let a = app.try_borrow().ok()?;
+        DialogTarget {
+            path: a
+                .viewer
+                .current_path()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            generation: a.viewer.generation(),
+        }
+    };
     let texts = [
         TOAST_SAVED_AS_TAG,
         TOAST_FILE_CHANGED,
@@ -452,10 +498,11 @@ fn debug_overlay(app: &RefCell<App>, hwnd: HWND, vk: u16, mods: Mods) -> Option<
         TOAST_UNSUPPORTED_FORMAT,
     ];
     match vk {
-        0x31 => show_dialog(app, hwnd, Prompt::SaveRotation),
+        0x31 => show_dialog(app, hwnd, Prompt::SaveRotation, target),
         0x32 => {
-            let name = "IMG_0001.jpg".to_owned();
-            show_dialog(app, hwnd, Prompt::PermanentDelete { name });
+            let name =
+                "IMG_0001_a_very_long_file_name_from_the_camera_roll_backup_2026.jpg".to_owned();
+            show_dialog(app, hwnd, Prompt::PermanentDelete { name }, target);
         }
         0x33 => show_toast(app, hwnd, Toast::recycled),
         0x34..=0x37 => {

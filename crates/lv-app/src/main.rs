@@ -5,6 +5,8 @@ mod commands;
 mod fullscreen;
 mod input;
 mod instance;
+// Until Tasks 6 and 7 show dialogs and toasts, only the debug triggers use parts of it.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 mod overlay;
 mod placement;
 mod render;

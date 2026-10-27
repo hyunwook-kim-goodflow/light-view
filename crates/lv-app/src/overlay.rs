@@ -6,6 +6,8 @@
 //! button or on the checkbox), Esc cancels, Tab/→ and Shift+Tab/← move the focus
 //! (wrapping), Space toggles the focused checkbox or presses the focused button.
 
+use std::path::PathBuf;
+
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
 use crate::render::{Align, Renderer, TextRun};
@@ -95,11 +97,12 @@ impl Prompt {
         }
     }
 
-    /// The Enter button, drawn in highlighter.
+    /// The Enter button, focused first and drawn in highlighter. Permanent delete has
+    /// no undo, so its default is [취소] (ruling R13).
     pub fn default_result(&self) -> PromptResult {
         match self {
             Prompt::SaveRotation => PromptResult::Save,
-            Prompt::PermanentDelete { .. } => PromptResult::Confirm,
+            Prompt::PermanentDelete { .. } => PromptResult::Cancel,
         }
     }
 
@@ -407,6 +410,16 @@ pub fn toast_parts(anchor: Rect, text_w: f32, action_w: Option<f32>) -> ToastPar
     }
 }
 
+/// The photo a dialog asks about, given by its caller and handed back with the answer,
+/// so the answer applies to that photo even if the current one changed meanwhile
+/// (ruling R14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogTarget {
+    pub path: PathBuf,
+    /// `Viewer::generation()` when the dialog was shown.
+    pub generation: u64,
+}
+
 /// What the window acts on when the overlay closes a dialog or a toast action is used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverlayEvent {
@@ -414,6 +427,7 @@ pub enum OverlayEvent {
         prompt: Prompt,
         result: PromptResult,
         dont_ask: bool,
+        target: DialogTarget,
     },
     Toast(ToastAction),
 }
@@ -431,14 +445,37 @@ enum Target {
 #[derive(Debug, Default)]
 pub struct Overlay {
     pub dialog: Option<Dialog>,
+    /// The open dialog's target.
+    target: Option<DialogTarget>,
     pub toast: Option<Toast>,
     pressed: Option<Target>,
+    /// The latest path forwarded by another launch while a dialog was open.
+    deferred_open: Option<PathBuf>,
 }
 
 impl Overlay {
-    pub fn show_dialog(&mut self, prompt: Prompt) {
+    pub fn show_dialog(&mut self, prompt: Prompt, target: DialogTarget) {
         self.dialog = Some(Dialog::new(prompt));
+        self.target = Some(target);
         self.pressed = None;
+    }
+
+    /// While a dialog is open, keeps `path` (replacing any kept before) to open once
+    /// the dialog closes, and returns true. Otherwise returns false: open it now.
+    pub fn defer_open(&mut self, path: PathBuf) -> bool {
+        if !self.dialog_open() {
+            return false;
+        }
+        self.deferred_open = Some(path);
+        true
+    }
+
+    /// The deferred path, once no dialog is open.
+    pub fn take_deferred_open(&mut self) -> Option<PathBuf> {
+        if self.dialog_open() {
+            return None;
+        }
+        self.deferred_open.take()
     }
 
     pub fn show_toast(&mut self, toast: Toast) {
@@ -519,11 +556,13 @@ impl Overlay {
 
     fn finish(&mut self, result: PromptResult) -> Option<OverlayEvent> {
         let d = self.dialog.take()?;
+        let target = self.target.take()?;
         self.pressed = None;
         Some(OverlayEvent::Dialog {
             prompt: d.prompt,
             result,
             dont_ask: d.dont_ask,
+            target,
         })
     }
 }
@@ -548,7 +587,9 @@ pub fn scrim(p: &Palette, dark: bool) -> (Rgb, f32) {
 }
 
 /// Toast background, text and optional border: inverted ink (ink + paper) in light
-/// mode; surface2 + ink with a hairline in dark mode.
+/// mode; surface2 + ink with a hairline in dark mode. The dark pair deliberately departs
+/// from the brief's literal "inverted" wording (light ink background with dark text
+/// would glare on a dark window); it is contrast-tested at >= 4.5:1 (ruling R15).
 pub fn toast_colors(p: &Palette, dark: bool) -> (Rgb, Rgb, Option<Rgb>) {
     if dark {
         (p.surface2, p.ink, Some(p.hairline))
@@ -622,7 +663,7 @@ fn draw_toast(r: &mut Renderer, t: &mut Toast, v: &OverlayView) {
     if let Some(c) = border {
         r.stroke_round_rect(tuple(parts.bg), TOAST_RADIUS, c, 1.0);
     }
-    r.draw_runs(tuple(parts.text), &text, Align::Leading);
+    r.draw_runs_ellipsis(tuple(parts.text), &text, Align::Leading);
     if let (Some(pill), Some(label)) = (parts.pill, label) {
         r.fill_round_rect(tuple(pill), pill.h / 2.0, p.highlighter);
         r.draw_runs(tuple(pill), &label, Align::Center);
@@ -653,7 +694,7 @@ fn draw_dialog(r: &mut Renderer, d: &Dialog, v: &OverlayView) {
     );
     if let (Some(rect), Some(detail)) = (l.detail, d.prompt.detail()) {
         let run = [ui_run(detail, p.ink2, DETAIL_SIZE, false)];
-        r.draw_runs(tuple(rect), &run, Align::Leading);
+        r.draw_runs_ellipsis(tuple(rect), &run, Align::Leading);
     }
     for (i, (item, rect)) in d.prompt.items().iter().zip(&l.items).enumerate() {
         let focused = i == d.focused;
@@ -730,6 +771,7 @@ fn draw_checkbox(r: &mut Renderer, row: Rect, checked: bool, focused: bool, v: &
 mod tests {
     use super::*;
     use crate::theme::{contrast, DARK, LIGHT};
+    use std::path::PathBuf;
 
     const NONE: Mods = Mods {
         ctrl: false,
@@ -783,7 +825,9 @@ mod tests {
                 Item::Button(PromptResult::Cancel)
             ]
         );
-        assert_eq!(focused_item(&d), Item::Button(PromptResult::Confirm));
+        // Permanent delete: [취소] is the default (R13).
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::Cancel));
+        assert_eq!(d.prompt.default_result(), PromptResult::Cancel);
     }
 
     #[test]
@@ -818,10 +862,10 @@ mod tests {
         d.focused = 0; // checkbox: Enter does not toggle it
         assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Save));
         assert!(!d.dont_ask);
-        assert_eq!(
-            delete().on_key(VK_RETURN, NONE),
-            Some(PromptResult::Confirm)
-        );
+        let mut d = delete();
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Cancel));
+        d.focused = 0; // [삭제]: Enter still picks the default, [취소]
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Cancel));
     }
 
     #[test]
@@ -843,10 +887,12 @@ mod tests {
         assert_eq!(d.focused, 3);
         d.on_key(VK_LEFT, NONE);
         assert_eq!(d.focused, 2);
-        let mut d = delete();
+        let mut d = delete(); // focus 1 (Cancel)
         d.on_key(VK_LEFT, NONE);
-        assert_eq!(d.focused, 1);
+        assert_eq!(d.focused, 0);
         d.on_key(VK_RIGHT, NONE);
+        assert_eq!(d.focused, 1);
+        d.on_key(VK_TAB, NONE);
         assert_eq!(d.focused, 0);
     }
 
@@ -860,9 +906,11 @@ mod tests {
         assert!(!d.dont_ask);
         d.focused = 2;
         assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::Discard));
+        // Space on the delete dialog's initial focus cancels.
+        assert_eq!(delete().on_key(VK_SPACE, NONE), Some(PromptResult::Cancel));
         let mut d = delete();
-        d.focused = 1;
-        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::Cancel));
+        d.focused = 0;
+        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::Confirm));
     }
 
     #[test]
@@ -1021,7 +1069,7 @@ mod tests {
     fn overlay_keys_close_the_dialog_with_its_result() {
         let mut o = Overlay::default();
         assert_eq!(o.on_key(VK_RETURN, NONE), None); // no dialog
-        o.show_dialog(Prompt::SaveRotation);
+        o.show_dialog(Prompt::SaveRotation, target(7));
         assert!(o.dialog_open());
         assert_eq!(o.on_key(VK_TAB, SHIFT), None); // to the checkbox
         assert_eq!(o.on_key(VK_SPACE, NONE), None);
@@ -1030,7 +1078,8 @@ mod tests {
             Some(OverlayEvent::Dialog {
                 prompt: Prompt::SaveRotation,
                 result: PromptResult::Save,
-                dont_ask: true
+                dont_ask: true,
+                target: target(7),
             })
         );
         assert!(!o.dialog_open());
@@ -1039,7 +1088,7 @@ mod tests {
     #[test]
     fn dialog_takes_every_click_and_acts_on_release_over_the_pressed_item() {
         let mut o = Overlay::default();
-        o.show_dialog(Prompt::SaveRotation);
+        o.show_dialog(Prompt::SaveRotation, target(1));
         let l = dialog_layout(VIEW.0, VIEW.1, o.dialog.as_ref().unwrap());
         // Scrim clicks are taken but do nothing.
         assert!(o.press(5.0, 5.0, VIEW, 0));
@@ -1058,11 +1107,56 @@ mod tests {
                 Some(OverlayEvent::Dialog {
                     prompt: Prompt::SaveRotation,
                     result: PromptResult::Cancel,
-                    dont_ask: false
+                    dont_ask: false,
+                    target: target(1),
                 })
             )
         );
         assert!(!o.dialog_open());
+    }
+
+    fn target(generation: u64) -> DialogTarget {
+        DialogTarget {
+            path: PathBuf::from(format!(r"C:\photos\{generation}.jpg")),
+            generation,
+        }
+    }
+
+    #[test]
+    fn the_dialog_target_comes_back_with_the_answer() {
+        let mut o = Overlay::default();
+        let name = "b.jpg".to_owned();
+        o.show_dialog(Prompt::PermanentDelete { name: name.clone() }, target(42));
+        assert_eq!(
+            o.on_key(VK_ESCAPE, NONE),
+            Some(OverlayEvent::Dialog {
+                prompt: Prompt::PermanentDelete { name },
+                result: PromptResult::Cancel,
+                dont_ask: false,
+                target: target(42),
+            })
+        );
+        // A second dialog carries its own target, not the first one's.
+        o.show_dialog(Prompt::SaveRotation, target(43));
+        let Some(OverlayEvent::Dialog { target: t, .. }) = o.on_key(VK_RETURN, NONE) else {
+            panic!("dialog answer expected");
+        };
+        assert_eq!(t, target(43));
+    }
+
+    #[test]
+    fn forwarded_opens_wait_for_the_dialog() {
+        let mut o = Overlay::default();
+        // No dialog: open right away, nothing kept.
+        assert!(!o.defer_open(PathBuf::from("a.jpg")));
+        assert_eq!(o.take_deferred_open(), None);
+        o.show_dialog(Prompt::SaveRotation, target(1));
+        assert!(o.defer_open(PathBuf::from("b.jpg")));
+        assert!(o.defer_open(PathBuf::from("c.jpg"))); // the latest wins
+        assert_eq!(o.take_deferred_open(), None); // still open
+        o.on_key(VK_ESCAPE, NONE);
+        assert_eq!(o.take_deferred_open(), Some(PathBuf::from("c.jpg")));
+        assert_eq!(o.take_deferred_open(), None);
     }
 
     #[test]
