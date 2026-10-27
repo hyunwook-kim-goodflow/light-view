@@ -254,6 +254,7 @@ fn progressive_jpeg() -> Vec<u8> {
     };
     out.extend(table(0x00, [0, 3])); // DC: categories 0 and 3
     out.extend(table(0x10, [0x00, 0x02])); // AC: EOB and (run 0, size 2)
+
     // DC first: block 1 category 3 (01) + 101, block 2 difference 0 (00), pad with 1s.
     out.extend(segment(0xDA, &[1, 1, 0x00, 0, 0, 0]));
     out.push(0b0110_1001);
