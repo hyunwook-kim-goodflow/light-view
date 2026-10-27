@@ -15,6 +15,7 @@ pub mod jpeg_check;
 pub mod jpeg_extent;
 mod jpeg_markers;
 pub mod listing;
+pub mod portable;
 pub mod prefetch;
 pub mod profile;
 pub mod settings;

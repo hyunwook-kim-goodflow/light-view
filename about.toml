@@ -1,0 +1,24 @@
+# cargo-about configuration: collects the licenses of every crate compiled into the
+# shipped binaries (light-view.exe = lv-app, lv-worker.exe) for THIRD_PARTY_NOTICES.md.
+# `scripts/package.ps1` runs `cargo about generate --workspace about.hbs` and puts the
+# hand-written notices for the C libraries (notices/native.md) in front of the result.
+#
+# Same allow-list as deny.toml [licenses]; a crate under any other license fails the run.
+# In priority order: a crate offering a choice ("MIT OR Apache-2.0") is listed under the
+# first one it offers here.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+# light-view ships for 64-bit Windows only.
+targets = ["x86_64-pc-windows-msvc"]
+# Test-only and build-script-only crates are not in the binaries.
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+# The workspace's own crates (publish = false) are light-view itself, MIT OR Apache-2.0.
+private = { ignore = true }

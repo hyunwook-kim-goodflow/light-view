@@ -1,0 +1,23 @@
+## Rust 크레이트 (Rust crates)
+
+`light-view.exe`와 `lv-worker.exe`에 들어가는 모든 크레이트예요. 버전은 `Cargo.lock`에 고정돼 있고, 이 부분은 `cargo about generate`이 만들어요. 크레이트가 여러 라이선스 중 하나를 고르게 하면, 아래에 적은 라이선스를 따라요.
+(Every crate compiled into the shipped executables, collected by `cargo about`.)
+
+| 라이선스 (License) | 크레이트 수 (Crates) |
+|---|---|
+{{#each overview}}
+| {{{name}}} | {{count}} |
+{{/each}}
+
+{{#each licenses}}
+### {{{name}}}
+
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

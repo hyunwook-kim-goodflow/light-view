@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 use lv_core::decode::DecodeError;
 use lv_ipc::Request;
 
+pub use appcontainer::delete_profile;
 use appcontainer::Container;
 use process::{took_request, Event, Worker, WriteOutcome};
 use protocol::{request_data_cap, to_request, Expect};

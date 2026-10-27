@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
+use lv_core::portable::{self, DataDir};
 use lv_core::settings::load_settings;
 use windows::core::w;
 use windows::Win32::System::Diagnostics::Debug::{
@@ -47,6 +48,10 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 use crate::instance::{acquire_or_forward, Launch};
+
+/// `light-view.exe --uninstall-cleanup`: deletes the worker's AppContainer profile and
+/// exits with 0, whatever happened, without showing anything.
+const UNINSTALL_CLEANUP: &str = "--uninstall-cleanup";
 
 fn main() -> anyhow::Result<()> {
     let start = Instant::now();
@@ -61,6 +66,11 @@ fn main() -> anyhow::Result<()> {
         eprintln!("light-view: could not set the AppUserModelID: {e}");
     }
     let mut args = std::env::args_os().skip(1).peekable();
+    // The uninstaller runs this before it removes the files (installer/light-view.iss).
+    if args.peek().is_some_and(|a| a == UNINSTALL_CLEANUP) {
+        worker::delete_profile();
+        return Ok(());
+    }
     let mut bench = false;
     while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
         timing::enable(start);
@@ -69,10 +79,15 @@ fn main() -> anyhow::Result<()> {
     let initial = args.next().map(PathBuf::from);
     // `--bench` (lv-bench): default settings, nothing saved, no single-instance check,
     // so a measurement neither depends on nor changes the user's settings and windows.
-    let settings_path = if bench { None } else { window::settings_path() };
+    let data = data_dir();
+    let settings_path = if bench {
+        None
+    } else {
+        window::settings_path(&data)
+    };
     // Crash records (ruling R6); a measurement run leaves none.
     if !bench {
-        if let Some(dir) = window::crash_dir() {
+        if let Some(dir) = window::crash_dir(&data) {
             crash::install(&dir);
         }
     }
@@ -91,6 +106,15 @@ fn main() -> anyhow::Result<()> {
         }
     };
     window::run(initial, settings, settings_path)
+}
+
+/// Where this copy keeps settings and crash records: beside the exe when `portable.txt` is
+/// there (spec §9), else in the user profile.
+fn data_dir() -> DataDir {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(portable::data_dir(exe.parent()?)))
+        .unwrap_or(DataDir::Installed)
 }
 
 /// Turns off Windows' "System Error" boxes (a missing DLL, say) and the crash dialog for
