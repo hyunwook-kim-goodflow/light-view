@@ -18,6 +18,20 @@ pub struct ExifSummary {
     pub gps: Option<(f64, f64)>,
 }
 
+/// Everything the card shows about one photo's EXIF, read once with its decode.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExifData {
+    pub summary: ExifSummary,
+    pub entries: Vec<ExifEntry>,
+}
+
+impl ExifData {
+    /// `read_exif` as one value.
+    pub fn read(bytes: &[u8]) -> Option<ExifData> {
+        read_exif(bytes).map(|(summary, entries)| ExifData { summary, entries })
+    }
+}
+
 /// One tag of the full list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExifEntry {
@@ -247,8 +261,13 @@ fn camera(exif: &Exif) -> Option<String> {
     let model = text(exif, Tag::Model);
     let joined = match (make, model) {
         (Some(make), Some(model)) => {
-            // Many models already start with the make ("Canon EOS R5").
-            if model.to_lowercase().starts_with(&make.to_lowercase()) {
+            // Many models already start with the make ("Canon EOS R5"), or with the
+            // first word of a corporate make ("NIKON CORPORATION" + "NIKON D90").
+            let model_lc = model.to_lowercase();
+            let make_lc = make.to_lowercase();
+            let first_word = make_lc.split_whitespace().next().unwrap_or_default();
+            let shares_word = model_lc.split_whitespace().next() == Some(first_word);
+            if model_lc.starts_with(&make_lc) || shares_word {
                 model
             } else {
                 format!("{make} {model}")
@@ -281,12 +300,19 @@ fn exposure_time(num: u32, denom: u32) -> Option<String> {
         return None;
     }
     if num < denom {
-        let n = if num == 1 {
-            u64::from(denom)
-        } else {
-            (f64::from(denom) / f64::from(num)).round().max(1.0) as u64
-        };
-        return Some(format!("1/{n}s"));
+        if num == 1 {
+            return Some(format!("1/{denom}s"));
+        }
+        // Shown as 1/N when it is within 3% of one; otherwise as a decimal (8/10 is
+        // "0.8s", not "1/1s").
+        let q = f64::from(denom) / f64::from(num);
+        let n = q.round();
+        if n >= 2.0 && (q - n).abs() <= q * 0.03 {
+            return Some(format!("1/{}s", n as u64));
+        }
+        let v = f64::from(num) / f64::from(denom);
+        let decimals = if v >= 0.1 { 1 } else { 3 };
+        return Some(format!("{}s", plain_number(v, decimals)));
     }
     Some(format!(
         "{}s",
@@ -342,6 +368,12 @@ fn coordinate(exif: &Exif, value: Tag, reference: Tag, positive: u8, negative: u
 fn gps(exif: &Exif) -> Option<(f64, f64)> {
     let lat = coordinate(exif, Tag::GPSLatitude, Tag::GPSLatitudeRef, b'N', b'S')?;
     let lon = coordinate(exif, Tag::GPSLongitude, Tag::GPSLongitudeRef, b'E', b'W')?;
+    // Adding 0.0 turns -0.0 (a zero south or west) into 0.0.
+    let (lat, lon) = (lat + 0.0, lon + 0.0);
+    // (0, 0) is what many devices write without a fix.
+    if lat == 0.0 && lon == 0.0 {
+        return None;
+    }
     ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
 }
 
@@ -652,6 +684,56 @@ mod tests {
         assert_eq!(long.chars().count(), 512);
         assert!(long.ends_with('\u{2026}'));
         assert_eq!(clean(&"y".repeat(512)), "y".repeat(512));
+    }
+
+    #[test]
+    fn exposure_prints_decimals_unless_near_one_over_n() {
+        assert_eq!(exposure_time(1, 250).as_deref(), Some("1/250s"));
+        assert_eq!(exposure_time(10, 1250).as_deref(), Some("1/125s"));
+        assert_eq!(exposure_time(10, 30).as_deref(), Some("1/3s"));
+        assert_eq!(exposure_time(8, 10).as_deref(), Some("0.8s"));
+        assert_eq!(exposure_time(3, 10).as_deref(), Some("0.3s"));
+        assert_eq!(exposure_time(10, 11).as_deref(), Some("0.9s"));
+        assert_eq!(exposure_time(5, 2).as_deref(), Some("2.5s"));
+        assert_eq!(exposure_time(1, 1).as_deref(), Some("1s"));
+        assert_eq!(exposure_time(0, 1), None);
+    }
+
+    #[test]
+    fn camera_drops_a_corporate_make() {
+        let camera_of = |make: &str, model: &str| {
+            let bytes = app1_jpeg(&tiff(&[ascii(Tag::Make, make), ascii(Tag::Model, model)]));
+            read_exif(&bytes).unwrap().0.camera
+        };
+        assert_eq!(
+            camera_of("NIKON CORPORATION", "NIKON D90").as_deref(),
+            Some("NIKON D90")
+        );
+        assert_eq!(
+            camera_of("Canon", "Canon EOS R5").as_deref(),
+            Some("Canon EOS R5")
+        );
+        assert_eq!(
+            camera_of("SAMSUNG", "SM-G950").as_deref(),
+            Some("SAMSUNG SM-G950")
+        );
+        // A model that merely shares a prefix with the make's first word keeps the make.
+        assert_eq!(
+            camera_of("Leica Camera AG", "Leicaflex").as_deref(),
+            Some("Leica Camera AG Leicaflex")
+        );
+    }
+
+    #[test]
+    fn gps_zero_zero_is_absent_and_negative_zero_is_normalized() {
+        let zero: Dms = [(0, 1), (0, 1), (0, 1)];
+        let lat: Dms = [(37, 1), (30, 1), (0, 1)];
+        let gps_of = |bytes: Vec<u8>| read_exif(&bytes).and_then(|(s, _)| s.gps);
+        assert_eq!(gps_of(gps(("N", zero), ("E", zero))), None);
+        assert_eq!(gps_of(gps(("S", zero), ("W", zero))), None);
+        let (a, b) = gps_of(gps(("N", lat), ("W", zero))).unwrap();
+        assert_eq!(a, 37.5);
+        assert!(b == 0.0 && b.is_sign_positive(), "{b}");
     }
 
     #[test]
