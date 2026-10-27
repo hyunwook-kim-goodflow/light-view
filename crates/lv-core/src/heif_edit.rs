@@ -66,6 +66,33 @@ const ALPHA_URNS: [&[u8]; 2] = [
     b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
 ];
 const OVERFLOW: &str = "an iloc offset would overflow its field";
+const SELF_CHECK: &str = "HEIF rotation self-check failed: ";
+
+/// Parts of the errors that refuse a well-formed file by policy (a layout this module
+/// does not edit) rather than because it is corrupt or an edit failed its self-check.
+const REFUSALS: [&str; 10] = [
+    MIRRORED,
+    SEVERAL_IROT,
+    WITH_ALPHA,
+    OVERFLOW,
+    "already has its own rotation or mirror",
+    "not supported",
+    "unsupported iloc",
+    "cannot grow",
+    "a size change cannot follow",
+    "would have to change",
+];
+
+/// Whether `error`, from [`set_rotation`], [`read_rotation`] or
+/// [`normalize_exif_orientation`], refuses a file this module chooses not to edit (it is
+/// a policy refusal: the file may well be fine), rather than reporting a file it cannot
+/// parse or an edit that failed its self-check.
+pub fn is_refusal(error: &str) -> bool {
+    !error.starts_with(SELF_CHECK)
+        && (REFUSALS.iter().any(|r| error.contains(r))
+            || error == "EXIF Orientation is not one SHORT"
+            || error == "an item's data overlaps the edited boxes")
+}
 
 /// The `irot` angle (anti-clockwise quarters) after the user turns an image stored with
 /// `stored_ccw` by `user_cw` clockwise quarter turns: `(stored_ccw + 4 - user_cw) mod 4`.
@@ -124,8 +151,7 @@ pub fn set_rotation(heif: &[u8], quarters_ccw: u8) -> Result<Vec<u8>, String> {
             (add_irot(heif, &file, &targets, quarters_ccw)?, targets)
         }
     };
-    verify(heif, &file, &out, quarters_ccw, &added_to)
-        .map_err(|e| format!("HEIF rotation self-check failed: {e}"))?;
+    verify(heif, &file, &out, quarters_ccw, &added_to).map_err(|e| format!("{SELF_CHECK}{e}"))?;
     Ok(out)
 }
 
@@ -1366,6 +1392,27 @@ mod tests {
         // libheif would turn the colour planes but not the alpha plane.
         assert_eq!(set_rotation(&sample(ALPHA), 1).unwrap_err(), WITH_ALPHA);
         assert_eq!(set_rotation(&sample(ALPHA), 0).unwrap_err(), WITH_ALPHA);
+    }
+
+    #[test]
+    fn policy_refusals_are_told_from_corrupt_files() {
+        let refused = set_rotation(&sample(ALPHA), 1).unwrap_err();
+        assert!(is_refusal(&refused), "{refused}");
+        for policy in [
+            MIRRORED.to_string(),
+            SEVERAL_IROT.to_string(),
+            "HEIF with a top-level moov box cannot grow".to_string(),
+            "HEIF irot shared with a grid tile is not supported".to_string(),
+        ] {
+            assert!(is_refusal(&policy), "{policy}");
+        }
+        let truncated = sample(PLAIN)[..200].to_vec();
+        let corrupt = set_rotation(&truncated, 1).unwrap_err();
+        assert!(!is_refusal(&corrupt), "{corrupt}");
+        assert!(!is_refusal(&read_rotation(b"garbage").unwrap_err()));
+        // A self-check failure is never a refusal, whatever it quotes.
+        let self_check = format!("{SELF_CHECK}{MIRRORED}");
+        assert!(!is_refusal(&self_check));
     }
 
     #[test]
