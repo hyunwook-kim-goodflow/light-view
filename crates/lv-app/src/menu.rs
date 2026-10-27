@@ -74,23 +74,33 @@ pub const ITEMS: [MenuItem; 6] = [
 const GROUP: usize = 3;
 
 impl MenuItem {
-    pub fn label(self) -> &'static str {
-        t(match self {
+    /// The label's string key.
+    pub fn key(self) -> S {
+        match self {
             MenuItem::Open => S::MenuOpen,
             MenuItem::ShowInFolder => S::MenuShowInFolder,
             MenuItem::CopyPath => S::MenuCopyPath,
             MenuItem::DefaultApps => S::MenuDefaultApps,
             MenuItem::Settings => S::MenuSettings,
             MenuItem::About => S::MenuAbout,
-        })
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        t(self.key())
+    }
+
+    /// The shortcut's string key, for items that have one.
+    pub fn shortcut_key(self) -> Option<S> {
+        match self {
+            MenuItem::Open => Some(S::ShortcutOpen),
+            MenuItem::Settings => Some(S::ShortcutSettings),
+            _ => None,
+        }
     }
 
     pub fn shortcut(self) -> Option<&'static str> {
-        match self {
-            MenuItem::Open => Some(t(S::ShortcutOpen)),
-            MenuItem::Settings => Some(t(S::ShortcutSettings)),
-            _ => None,
-        }
+        self.shortcut_key().map(t)
     }
 
     /// Items about the shown photo, unavailable without one.
@@ -166,6 +176,11 @@ pub struct Menu {
     /// Index into `ITEMS`: the keyboard's (or the pointer's) item.
     pub selected: Option<usize>,
     pressed: Option<usize>,
+    /// The menu key or Shift+F10 just closed the menu: the keyboard WM_CONTEXTMENU
+    /// that DefWindowProc sends after the key must not open it again.
+    closed_by_key: bool,
+    /// A click outside just closed the menu: its double-click must not reach the photo.
+    closed_by_click: bool,
 }
 
 impl Menu {
@@ -174,6 +189,8 @@ impl Menu {
         self.anchor = Some(anchor);
         self.has_file = has_file;
         self.pressed = None;
+        self.closed_by_key = false;
+        self.closed_by_click = false;
         self.selected = None;
         if keyboard {
             self.selected = self.step(None, 1);
@@ -227,6 +244,7 @@ impl Menu {
             }
             _ if opens_menu(vk, mods) => {
                 self.close();
+                self.closed_by_key = true;
                 MenuAction::Redraw
             }
             VK_DOWN => moved(self, self.step(self.selected, 1)),
@@ -275,8 +293,28 @@ impl Menu {
             self.pressed = self.item_at(x, y, &l).filter(|&i| self.enabled(i));
         } else {
             self.close();
+            self.closed_by_click = true;
         }
         true
+    }
+
+    /// A keyboard WM_CONTEXTMENU (the menu key or Shift+F10): true if it should open
+    /// the menu. Not while it is open (the key handler opened it), and not right after
+    /// the key closed it.
+    pub fn keyboard_context(&mut self) -> bool {
+        let reopen = !self.is_open() && !self.closed_by_key;
+        self.closed_by_key = false;
+        reopen
+    }
+
+    /// Any other key or click while the menu is closed ends the "just closed" states.
+    /// `double_click`: true if this input is a double-click that the click which
+    /// closed the menu started (it is to be swallowed).
+    pub fn other_input(&mut self, double_click: bool) -> bool {
+        let swallow = double_click && self.closed_by_click;
+        self.closed_by_key = false;
+        self.closed_by_click = false;
+        swallow
     }
 
     /// Mouse up: `None` if the menu did not take the press. It acts only when released
@@ -406,7 +444,8 @@ fn current_path(app: &RefCell<App>) -> Option<std::path::PathBuf> {
 
 /// The menu's input, seen first while no dialog is open (`input::overlay`): the keys
 /// that open it, everything while it is open, and the right-click (WM_CONTEXTMENU).
-/// `None` passes the message on. No App borrow is held while an item runs.
+/// `None` passes the message on. No App borrow is held while an item runs. The
+/// toolbar's tooltips are off while the menu is open.
 pub fn route(
     app: &RefCell<App>,
     hwnd: HWND,
@@ -415,12 +454,31 @@ pub fn route(
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     let open = app.try_borrow().ok()?.menu.is_open();
+    let result = handle(app, hwnd, open, msg, wparam, lparam);
+    if app.try_borrow().is_ok_and(|a| a.menu.is_open() != open) {
+        input::sync_tooltips(app, hwnd);
+    }
+    result
+}
+
+fn handle(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    open: bool,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
     match msg {
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let (vk, mods) = (wparam.0 as u16, commands::mods());
             let repeat = lparam.0 & (1 << 30) != 0;
             if !open {
-                if repeat || !opens_menu(vk, mods) {
+                if repeat {
+                    return None;
+                }
+                if !opens_menu(vk, mods) {
+                    app.try_borrow_mut().ok()?.menu.other_input(false);
                     return None;
                 }
                 open_menu(app, hwnd, None);
@@ -435,8 +493,13 @@ pub fn route(
             menu_action(app, hwnd, action);
             Some(LRESULT(0))
         }
-        // After Shift+F10 opened the menu, F10's key-up would start keyboard menu mode.
-        WM_SYSKEYUP if open && wparam.0 as u16 == VK_F10 => Some(LRESULT(0)),
+        // After Shift+F10 opened (or closed) the menu, F10's key-up would start
+        // keyboard menu mode.
+        WM_SYSKEYUP
+            if wparam.0 as u16 == VK_F10 && (open || app.try_borrow().ok()?.menu.closed_by_key) =>
+        {
+            Some(LRESULT(0))
+        }
         WM_CONTEXTMENU => on_context_menu(app, hwnd, lparam),
         WM_KILLFOCUS if open => {
             app.try_borrow_mut().ok()?.menu.close();
@@ -452,6 +515,15 @@ pub fn route(
             }
             invalidate(hwnd);
             Some(LRESULT(0))
+        }
+        // The double-click of the click that closed the menu is swallowed.
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            let double = msg == WM_LBUTTONDBLCLK;
+            app.try_borrow_mut()
+                .ok()?
+                .menu
+                .other_input(double)
+                .then_some(LRESULT(0))
         }
         WM_LBUTTONUP => {
             let action = {
@@ -500,11 +572,11 @@ fn open_menu(app: &RefCell<App>, hwnd: HWND, at: Option<(f32, f32)>) {
 
 /// A right-click in the client area opens the menu there (again, if it is open). The
 /// menu key and Shift+F10 come with lparam -1 (from DefWindowProc, after the key
-/// handler opened it already): opened unless open. Right-clicks elsewhere (the title
+/// handler opened or closed it already): opened unless open or just closed. Right-clicks elsewhere (the title
 /// bar) go on to DefWindowProc.
 fn on_context_menu(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
     if lparam.0 as u32 == u32::MAX {
-        if !app.try_borrow().ok()?.menu.is_open() {
+        if app.try_borrow_mut().ok()?.menu.keyboard_context() {
             open_menu(app, hwnd, None);
         }
         return Some(LRESULT(0));
@@ -538,6 +610,7 @@ fn menu_action(app: &RefCell<App>, hwnd: HWND, action: MenuAction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strings::{text, Lang};
 
     const NONE: Mods = Mods {
         ctrl: false,
@@ -569,7 +642,7 @@ mod tests {
 
     #[test]
     fn items_in_spec_order_with_shortcuts() {
-        let labels: Vec<_> = ITEMS.iter().map(|i| i.label()).collect();
+        let labels: Vec<_> = ITEMS.iter().map(|i| text(Lang::Ko, i.key())).collect();
         assert_eq!(
             labels,
             [
@@ -581,9 +654,11 @@ mod tests {
                 "정보"
             ]
         );
-        assert_eq!(MenuItem::Open.shortcut(), Some("Ctrl+O"));
-        assert_eq!(MenuItem::Settings.shortcut(), Some("Ctrl+,"));
-        assert_eq!(MenuItem::About.shortcut(), None);
+        let keys = |i: MenuItem| i.shortcut_key().map(|k| text(Lang::Ko, k));
+        assert_eq!(keys(MenuItem::Open), Some("Ctrl+O"));
+        assert_eq!(keys(MenuItem::Settings), Some("Ctrl+,"));
+        assert_eq!(keys(MenuItem::About), None);
+        assert_eq!(MenuItem::Open.label(), t(S::MenuOpen));
     }
 
     #[test]
@@ -717,6 +792,49 @@ mod tests {
         assert_eq!(m.on_key(0x73, ALT), None);
         assert_eq!(m.on_key(VK_APPS, NONE), Some(MenuAction::Redraw));
         assert!(!m.is_open());
+    }
+
+    #[test]
+    fn the_menu_key_that_closed_it_does_not_reopen_it() {
+        // WM_KEYDOWN VK_APPS (opens), then DefWindowProc's keyboard WM_CONTEXTMENU.
+        let mut m = Menu::default();
+        m.open(KEYBOARD_ANCHOR, true, true);
+        assert!(!m.keyboard_context()); // already open: ignored
+        assert!(m.is_open());
+        // VK_APPS again closes it; the WM_CONTEXTMENU after its key-up is swallowed.
+        assert_eq!(m.on_key(VK_APPS, NONE), Some(MenuAction::Redraw));
+        assert!(!m.keyboard_context());
+        assert!(!m.is_open());
+        // A later keyboard WM_CONTEXTMENU (without the key handler) opens it.
+        assert!(m.keyboard_context());
+        // Shift+F10 closes it the same way; another key in between ends that state.
+        m.open(KEYBOARD_ANCHOR, true, true);
+        m.on_key(VK_F10, SHIFT);
+        assert!(m.closed_by_key);
+        m.other_input(false);
+        assert!(m.keyboard_context());
+        // Esc closing it is not the menu key: the next one opens it.
+        m.open(KEYBOARD_ANCHOR, true, true);
+        m.on_key(VK_ESCAPE, NONE);
+        assert!(m.keyboard_context());
+    }
+
+    #[test]
+    fn the_double_click_of_a_closing_click_is_swallowed() {
+        let mut m = Menu::default();
+        m.open((100.0, 100.0), true, false);
+        assert!(m.press(900.0, 600.0, VIEW)); // outside: closes
+        assert!(m.other_input(true)); // its WM_LBUTTONDBLCLK: swallowed
+        assert!(!m.other_input(true)); // only once
+                                       // A plain click in between ends it.
+        m.open((100.0, 100.0), true, false);
+        m.press(900.0, 600.0, VIEW);
+        assert!(!m.other_input(false));
+        assert!(!m.other_input(true));
+        // Closing with a key: a later double-click is the photo's.
+        m.open((100.0, 100.0), true, false);
+        m.on_key(VK_ESCAPE, NONE);
+        assert!(!m.other_input(true));
     }
 
     #[test]
