@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
+use crate::about;
 use crate::render::{Align, Renderer, TextRun};
 use crate::strings::{t, S};
 use crate::theme::{Palette, Rgb};
@@ -48,7 +49,11 @@ const HIT_MIN: f32 = 44.0;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
     SaveRotation,
-    PermanentDelete { name: String },
+    PermanentDelete {
+        name: String,
+    },
+    /// The About dialog (ruling R4).
+    About,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +62,10 @@ pub enum PromptResult {
     Discard,
     Cancel,
     Confirm,
+    /// About: [오픈소스 고지].
+    Notices,
+    /// About: [닫기].
+    Close,
 }
 
 /// A focusable part of a dialog.
@@ -71,6 +80,7 @@ impl Prompt {
         match self {
             Prompt::SaveRotation => t(S::PromptSaveRotation),
             Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
+            Prompt::About => t(S::AboutTitle),
         }
     }
 
@@ -87,6 +97,10 @@ impl Prompt {
                 Item::Button(PromptResult::Confirm),
                 Item::Button(PromptResult::Cancel),
             ],
+            Prompt::About => &[
+                Item::Button(PromptResult::Notices),
+                Item::Button(PromptResult::Close),
+            ],
         }
     }
 
@@ -96,22 +110,24 @@ impl Prompt {
         match self {
             Prompt::SaveRotation => PromptResult::Save,
             Prompt::PermanentDelete { .. } => PromptResult::Cancel,
+            Prompt::About => PromptResult::Close,
         }
     }
 
     /// Title lines at body size in the 372 DIP wide card: the delete question wraps.
     fn title_lines(&self) -> f32 {
         match self {
-            Prompt::SaveRotation => 1.0,
+            Prompt::SaveRotation | Prompt::About => 1.0,
             Prompt::PermanentDelete { .. } => 2.0,
         }
     }
 
-    /// A line under the title in ink2 (the file name).
-    fn detail(&self) -> Option<&str> {
+    /// Lines under the title in ink2: the file name, or About's version and license.
+    pub fn details(&self) -> Vec<String> {
         match self {
-            Prompt::SaveRotation => None,
-            Prompt::PermanentDelete { name } => Some(name),
+            Prompt::SaveRotation => Vec::new(),
+            Prompt::PermanentDelete { name } => vec![name.clone()],
+            Prompt::About => vec![about::version_line(), about::license_line().to_owned()],
         }
     }
 }
@@ -123,6 +139,8 @@ impl PromptResult {
             PromptResult::Discard => t(S::BtnDiscard),
             PromptResult::Cancel => t(S::BtnCancel),
             PromptResult::Confirm => t(S::BtnDelete),
+            PromptResult::Notices => t(S::BtnNotices),
+            PromptResult::Close => t(S::BtnClose),
         }
     }
 }
@@ -194,24 +212,25 @@ impl Dialog {
 pub struct DialogLayout {
     pub card: Rect,
     pub title: Rect,
-    pub detail: Option<Rect>,
+    /// One rect per `Prompt::details` line.
+    pub details: Vec<Rect>,
     pub items: Vec<Rect>,
 }
 
 /// The card is at most 420 DIP wide (16 DIP from the window edges when narrower) and
-/// centered in the client area. Inside its 24 DIP padding: the title, the detail line,
+/// centered in the client area. Inside its 24 DIP padding: the title, the detail lines,
 /// the checkbox row, then the buttons in one row of equal widths, all 44 DIP tall.
 pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout {
     let p = &dialog.prompt;
     let card_w = (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W);
     let inner_w = card_w - 2.0 * CARD_PAD;
     let title_h = p.title_lines() * TITLE_LINE_H;
-    let has_detail = p.detail().is_some();
+    let detail_count = p.details().len();
     let has_checkbox = p.items().contains(&Item::Checkbox);
     let card_h = CARD_PAD
         + title_h
-        + if has_detail {
-            DETAIL_GAP + DETAIL_H
+        + if detail_count > 0 {
+            DETAIL_GAP + detail_count as f32 * DETAIL_H
         } else {
             0.0
         }
@@ -238,16 +257,21 @@ pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout 
         h: title_h,
     };
     y += title_h;
-    let detail = has_detail.then(|| {
-        let r = Rect {
-            x,
-            y: y + DETAIL_GAP,
-            w: inner_w,
-            h: DETAIL_H,
-        };
-        y = r.y + r.h;
-        r
-    });
+    if detail_count > 0 {
+        y += DETAIL_GAP;
+    }
+    let details = (0..detail_count)
+        .map(|_| {
+            let r = Rect {
+                x,
+                y,
+                w: inner_w,
+                h: DETAIL_H,
+            };
+            y += DETAIL_H;
+            r
+        })
+        .collect();
     let checkbox = has_checkbox.then(|| {
         let r = Rect {
             x,
@@ -282,7 +306,7 @@ pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout 
     DialogLayout {
         card,
         title,
-        detail,
+        details,
         items,
     }
 }
@@ -685,9 +709,9 @@ fn draw_dialog(r: &mut Renderer, d: &Dialog, v: &OverlayView) {
         TITLE_SIZE,
         p.ink,
     );
-    if let (Some(rect), Some(detail)) = (l.detail, d.prompt.detail()) {
-        let run = [ui_run(detail, p.ink2, DETAIL_SIZE, false)];
-        r.draw_runs_ellipsis(tuple(rect), &run, Align::Leading);
+    for (rect, detail) in l.details.iter().zip(d.prompt.details()) {
+        let run = [ui_run(&detail, p.ink2, DETAIL_SIZE, false)];
+        r.draw_runs_ellipsis(tuple(*rect), &run, Align::Leading);
     }
     for (i, (item, rect)) in d.prompt.items().iter().zip(&l.items).enumerate() {
         let focused = i == d.focused;
@@ -939,7 +963,7 @@ mod tests {
 
     #[test]
     fn dialog_card_is_centered_420_wide_with_44_dip_targets() {
-        for d in [save(), delete()] {
+        for d in [save(), delete(), Dialog::new(Prompt::About)] {
             let l = dialog_layout(VIEW.0, VIEW.1, &d);
             assert_eq!(l.items.len(), d.prompt.items().len());
             assert_eq!(l.card.w, 420.0);
@@ -966,8 +990,8 @@ mod tests {
             }
         }
         let d = delete();
-        assert!(dialog_layout(VIEW.0, VIEW.1, &d).detail.is_some());
-        assert!(dialog_layout(VIEW.0, VIEW.1, &save()).detail.is_none());
+        assert_eq!(dialog_layout(VIEW.0, VIEW.1, &d).details.len(), 1);
+        assert!(dialog_layout(VIEW.0, VIEW.1, &save()).details.is_empty());
     }
 
     #[test]
@@ -978,6 +1002,38 @@ mod tests {
         for r in &l.items {
             assert!(r.h >= 44.0 && r.w >= 44.0);
         }
+    }
+
+    #[test]
+    fn about_shows_version_and_license_with_notices_and_close() {
+        let mut d = Dialog::new(Prompt::About);
+        assert_eq!(d.prompt.title(), "light-view");
+        assert_eq!(
+            d.prompt.details(),
+            [
+                format!("버전 {}", env!("CARGO_PKG_VERSION")),
+                "MIT 또는 Apache-2.0 라이선스로 배포해요".to_owned()
+            ]
+        );
+        assert_eq!(
+            d.prompt.items(),
+            [
+                Item::Button(PromptResult::Notices),
+                Item::Button(PromptResult::Close)
+            ]
+        );
+        assert_eq!(PromptResult::Notices.label(), "오픈소스 고지");
+        assert_eq!(PromptResult::Close.label(), "닫기");
+        // [닫기] is the default: Enter and Esc both close, Space on 고지 opens them.
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::Close));
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Close));
+        d.on_key(VK_LEFT, NONE);
+        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::Notices));
+        // Two detail lines, one under the other, above the buttons.
+        let l = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(l.details.len(), 2);
+        assert_eq!(l.details[1].y, l.details[0].y + l.details[0].h);
+        assert!(l.details[1].y + l.details[1].h <= l.items[0].y);
     }
 
     #[test]
