@@ -70,6 +70,10 @@ pub enum LeaveReason {
     Open(PathBuf),
     /// Close the window.
     Close,
+    /// Delete the photo on screen.
+    Delete,
+    /// Show the pending deleted photo again.
+    Undo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,8 +199,12 @@ impl Viewer {
 
     /// Opens `path` within its folder. Never decodes on this thread.
     pub fn open(&mut self, path: &Path) {
-        let list = FolderList::scan(path)
+        let mut list = FolderList::scan(path)
             .unwrap_or_else(|_| FolderList::from_paths(vec![path.to_path_buf()], path));
+        // A pending delete stays hidden in the new listing.
+        for hidden in self.list.hidden() {
+            list.hide(hidden);
+        }
         self.open_list(list);
     }
 
@@ -509,6 +517,73 @@ impl Viewer {
         let (size, dip) = (self.view_size, self.dip);
         self.set_view(size, dip);
         Redraw::Full
+    }
+
+    /// The photo a delete acts on: the current one, if it is the one on screen (also
+    /// right after a save, while it is decoded again), with its identity.
+    pub fn delete_target(&self) -> Option<(PathBuf, Option<FileIdentity>)> {
+        let s = self.shown.as_ref()?;
+        (self.list.current() == Some(s.path.as_path()))
+            .then(|| (s.path.clone(), s.identity.clone()))
+    }
+
+    /// Hides a deleted (pending) photo; the next one is shown, or the previous one at
+    /// the end of the folder, or nothing once the folder is empty.
+    pub fn hide(&mut self, path: &Path) -> Redraw {
+        let was_current = self.list.current() == Some(path);
+        if !self.list.hide(path) {
+            return Redraw::None;
+        }
+        if !was_current {
+            return Redraw::Full;
+        }
+        self.quarters = 0;
+        self.backward = false;
+        if self.list.current().is_none() {
+            self.shown = None;
+            self.generation += 1;
+            self.loading = false;
+            self.wanted.clear();
+            self.prefetcher.request(&[]);
+            return Redraw::Full;
+        }
+        self.after_move()
+    }
+
+    /// Like `hide`, for good (the photo was deleted permanently).
+    pub fn remove(&mut self, path: &Path) -> Redraw {
+        let redraw = self.hide(path);
+        self.list.forget(path);
+        redraw
+    }
+
+    /// A hidden photo is gone from disk: it is never listed again.
+    pub fn forget_hidden(&mut self, path: &Path) {
+        self.list.forget(path);
+    }
+
+    /// A hidden photo stays on disk after all: listed again, without moving to it.
+    pub fn unhide(&mut self, path: &Path) -> Redraw {
+        let empty = !self.has_file();
+        if !self.list.unhide(path) {
+            return Redraw::None;
+        }
+        if empty {
+            return self.after_move();
+        }
+        Redraw::Full
+    }
+
+    /// Undo: lists a hidden photo again and shows it; a photo from another folder is
+    /// opened there.
+    pub fn restore(&mut self, path: &Path) -> Redraw {
+        if !self.list.unhide(path) || !self.list.go_to(path) {
+            self.open(path);
+            return Redraw::Full;
+        }
+        self.quarters = 0;
+        self.backward = false;
+        self.after_move()
     }
 
     /// The current photo with its unsaved rotation, if it is on screen.
@@ -986,6 +1061,64 @@ mod tests {
         let outcome = save_rotation(&path, &id, 1, &NoWorker, &DecodeLimits::default());
         assert_eq!(outcome, SaveOutcome::Changed);
         assert_eq!(std::fs::read(&path).unwrap(), b"changed after the decode");
+    }
+
+    #[test]
+    fn deleting_hides_the_photo_and_undo_shows_it_again() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        let (path, _) = v.delete_target().expect("c is on screen");
+        assert_eq!(path, p("c.jpg"));
+        assert_eq!(v.hide(&path), Redraw::Full);
+        assert_eq!(v.title(), "d.jpg · 3 / 4");
+        // d is not on screen yet: nothing to delete until it is.
+        assert_eq!(v.delete_target(), None);
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.delete_target().unwrap().0, p("d.jpg"));
+
+        assert_eq!(v.restore(&p("c.jpg")), Redraw::Full);
+        assert_eq!(v.title(), "c.jpg · 3 / 5");
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.delete_target().unwrap().0, p("c.jpg"));
+    }
+
+    #[test]
+    fn opening_again_keeps_a_pending_delete_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in ["a.jpg", "b.jpg", "c.jpg"] {
+            std::fs::write(dir.path().join(n), b"").unwrap();
+        }
+        let (mut v, _rx) = viewer_at("a.jpg");
+        v.open(&dir.path().join("b.jpg"));
+        v.hide(&dir.path().join("b.jpg"));
+        v.open(&p("a.jpg"));
+        v.open(&dir.path().join("c.jpg"));
+        assert_eq!(v.position(), (2, 2));
+        v.restore(&dir.path().join("b.jpg"));
+        assert_eq!(v.position(), (2, 3));
+    }
+
+    #[test]
+    fn deleting_the_last_photos() {
+        let (mut v, rx) = viewer_at("e.jpg");
+        wait_shown(&mut v, &rx);
+        v.hide(&p("e.jpg"));
+        assert_eq!(v.title(), "d.jpg · 4 / 4");
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            v.remove(&p(name));
+        }
+        v.hide(&p("d.jpg"));
+        assert!(!v.has_file());
+        assert!(matches!(v.scene(), Scene::Empty));
+        assert_eq!(v.title(), "light-view");
+        // A failed recycle lists d again (and shows it: nothing else is left).
+        assert_eq!(v.unhide(&p("d.jpg")), Redraw::Full);
+        assert_eq!(v.title(), "d.jpg · 1 / 1");
+        // Removed photos never come back.
+        assert_eq!(v.unhide(&p("a.jpg")), Redraw::None);
+        wait_shown(&mut v, &rx);
+        v.forget_hidden(&p("d.jpg"));
+        assert_eq!(v.position(), (1, 1));
     }
 
     #[test]

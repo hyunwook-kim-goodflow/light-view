@@ -465,8 +465,9 @@ fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) 
     }
 }
 
-/// Debug builds only: Ctrl+Shift+1 to 7 show each dialog and toast, for smoke tests
-/// until Tasks 6 and 7 show them for real. The dialogs target the current photo.
+/// Debug builds only: Ctrl+Shift+1 and 3 to 7 show the save prompt and each toast, for
+/// smoke tests. The prompt targets the current photo. (2, the permanent-delete question,
+/// is gone: its [삭제] now deletes the photo for good.)
 #[cfg(debug_assertions)]
 fn debug_overlay(
     app: &RefCell<App>,
@@ -499,11 +500,6 @@ fn debug_overlay(
     ];
     match vk {
         0x31 => show_dialog(app, hwnd, Prompt::SaveRotation, target),
-        0x32 => {
-            let name =
-                "IMG_0001_a_very_long_file_name_from_the_camera_roll_backup_2026.jpg".to_owned();
-            show_dialog(app, hwnd, Prompt::PermanentDelete { name }, target);
-        }
         0x33 => show_toast(app, hwnd, Toast::recycled),
         0x34..=0x37 => {
             let text = texts[usize::from(vk - 0x34)];

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use lv_core::decode::DecodeLimits;
@@ -28,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::commands::{self, HwndCell, SaveDone, Saving};
+use crate::delete::{CommitReport, Deleter, ShellTrash};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
@@ -46,6 +48,8 @@ const SAVING: &str = "저장하는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
+/// How long the (already hidden) app waits at exit for the Recycle Bin.
+const EXIT_COMMIT_WAIT: Duration = Duration::from_secs(10);
 
 pub struct App {
     renderer: Option<Renderer>,
@@ -74,6 +78,10 @@ pub struct App {
     /// Save threads report here, then post `WM_APP_SAVE_DONE`.
     pub save_tx: Sender<SaveDone>,
     pub save_rx: Receiver<SaveDone>,
+    /// Deletes: one pending (undoable), earlier ones sent to the Recycle Bin.
+    pub deleter: Deleter,
+    /// Recycle results, announced with `WM_APP_DELETE_DONE`.
+    pub delete_rx: Receiver<CommitReport>,
 }
 
 pub fn run(
@@ -84,6 +92,12 @@ pub fn run(
     let hwnd_cell = HwndCell::default();
     let (viewer, pool, decode_limits) = commands::new_viewer(&settings, hwnd_cell.clone());
     let (save_tx, save_rx) = channel();
+    let (delete_tx, delete_rx) = channel();
+    let post = hwnd_cell.clone();
+    let trash = ShellTrash::new(Box::new(move |path, result| {
+        let _ = delete_tx.send((path, result));
+        post.post(commands::WM_APP_DELETE_DONE);
+    }));
     let app = RefCell::new(App {
         renderer: None,
         viewer,
@@ -103,6 +117,8 @@ pub fn run(
         saving: None,
         save_tx,
         save_rx,
+        deleter: Deleter::new(Box::new(trash)),
+        delete_rx,
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -192,6 +208,8 @@ pub fn run(
             DispatchMessageW(&msg);
         }
     }
+    // The window is gone: the pending delete goes to the Recycle Bin now.
+    app.borrow_mut().deleter.commit_all(EXIT_COMMIT_WAIT);
     Ok(())
 }
 

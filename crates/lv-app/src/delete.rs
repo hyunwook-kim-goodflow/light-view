@@ -7,6 +7,7 @@
 //! deletes for good. Every step acts only on a regular file (never a folder or a link)
 //! whose identity is unchanged since it was shown, re-checked right before acting.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -20,7 +21,7 @@ use std::time::Duration;
 
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use windows::core::{implement, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::E_ABORT;
+use windows::Win32::Foundation::{E_ABORT, HWND};
 use windows::Win32::Storage::FileSystem::{DeleteFileW, GetDriveTypeW, GetVolumePathNameW};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
@@ -32,6 +33,16 @@ use windows::Win32::UI::Shell::{
     FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
     SHQUERYRBINFO, TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
+
+use crate::commands;
+use crate::input;
+use crate::overlay::{
+    DialogTarget, Prompt, PromptResult, Toast, ToastAction, TOAST_DELETE_FAILED,
+    TOAST_FILE_CHANGED, TOAST_IN_USE, TOAST_NOT_A_FILE, TOAST_NO_PERMISSION, TOAST_READ_ONLY,
+    TOAST_RECYCLE_FAILED,
+};
+use crate::viewer::LeaveReason;
+use crate::window::App;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 /// `DELETE` access right.
@@ -225,7 +236,7 @@ fn delete_file(ext: &Path) -> Result<(), Refusal> {
 const MAX_PATH: usize = 260;
 const DRIVE_FIXED: u32 = 3;
 
-/// What the recycle thread reports for each pending file: done, or why it stays.
+/// Called on the recycle thread with each pending file's result.
 pub type Report = Box<dyn Fn(PathBuf, Result<(), CommitError>) + Send>;
 
 enum Job {
@@ -440,6 +451,191 @@ impl IFileOperationProgressSink_Impl for RecycleOnly_Impl {
     fn ResumeTimer(&self) -> ComResult {
         Ok(())
     }
+}
+
+// ---- The window's side ---------------------------------------------------------
+
+/// What a recycle thread reported: the file is in the Recycle Bin, or it stays.
+pub type CommitReport = (PathBuf, Result<(), CommitError>);
+
+/// The Delete key and the 🗑 button: deletes the photo on screen, after the save prompt
+/// if its rotation is unsaved. Nothing happens while a save runs (it may be saving this
+/// very file) or while the current photo is still loading.
+pub fn request(app: &RefCell<App>, hwnd: HWND) {
+    let ready = app
+        .try_borrow()
+        .is_ok_and(|a| a.saving.is_none() && a.viewer.delete_target().is_some());
+    if ready {
+        commands::leave(app, hwnd, LeaveReason::Delete);
+    }
+}
+
+/// Ctrl+Z and the toast's [실행 취소]: shows the pending deleted photo again, after the
+/// save prompt if the current one's rotation is unsaved. Once the photo went to the
+/// Recycle Bin there is nothing to undo.
+pub fn request_undo(app: &RefCell<App>, hwnd: HWND) {
+    if app
+        .try_borrow()
+        .is_ok_and(|a| a.deleter.pending_path().is_some())
+    {
+        commands::leave(app, hwnd, LeaveReason::Undo);
+    }
+}
+
+/// Deletes the photo on screen (the save prompt was answered, or not needed).
+pub fn delete_current(app: &RefCell<App>, hwnd: HWND) {
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return;
+    };
+    if a.saving.is_some() {
+        return;
+    }
+    let Some((path, id)) = a.viewer.delete_target() else {
+        return;
+    };
+    let Some(id) = id else {
+        drop(a);
+        input::show_toast(app, hwnd, |now| Toast::new(TOAST_FILE_CHANGED, now));
+        return;
+    };
+    match a.deleter.delete(&path, &id) {
+        DeleteStep::Pending { .. } => {
+            let redraw = a.viewer.hide(&path);
+            drop(a);
+            commands::after(app, hwnd, redraw);
+            input::show_toast(app, hwnd, Toast::recycled);
+        }
+        DeleteStep::NeedsConfirm => {
+            let target = DialogTarget {
+                path: path.clone(),
+                generation: a.viewer.generation(),
+            };
+            drop(a);
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into();
+            input::show_dialog(app, hwnd, Prompt::PermanentDelete { name }, target);
+        }
+        DeleteStep::Refused(r) => {
+            drop(a);
+            refused(app, hwnd, &r);
+        }
+    }
+}
+
+/// The permanent-delete question was answered. [삭제] deletes its target for good if
+/// it is still the photo on screen and unchanged; anything else does nothing.
+pub fn on_permanent_answer(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    result: PromptResult,
+    target: &DialogTarget,
+) {
+    if result != PromptResult::Confirm {
+        return;
+    }
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return;
+    };
+    let current = a.viewer.delete_target();
+    let same = a.saving.is_none()
+        && a.viewer.generation() == target.generation
+        && current.as_ref().is_some_and(|(p, _)| *p == target.path);
+    let Some(id) = current.and_then(|(_, id)| id).filter(|_| same) else {
+        drop(a);
+        input::show_toast(app, hwnd, |now| Toast::new(TOAST_FILE_CHANGED, now));
+        return;
+    };
+    match a.deleter.confirm_permanent(&target.path, &id) {
+        Ok(()) => {
+            let redraw = a.viewer.remove(&target.path);
+            drop(a);
+            commands::after(app, hwnd, redraw);
+        }
+        Err(r) => {
+            drop(a);
+            refused(app, hwnd, &r);
+        }
+    }
+}
+
+/// Shows the pending deleted photo again (the save prompt was answered, or not needed).
+pub fn undo(app: &RefCell<App>, hwnd: HWND) {
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return;
+    };
+    let Some(path) = a.deleter.undo() else {
+        return;
+    };
+    let redraw = a.viewer.restore(&path);
+    let undo_toast = a
+        .overlay
+        .toast
+        .as_ref()
+        .and_then(|t| t.action.as_ref())
+        .is_some_and(|(_, action)| *action == ToastAction::Undo);
+    if undo_toast {
+        a.overlay.toast = None;
+    }
+    drop(a);
+    commands::after(app, hwnd, redraw);
+}
+
+/// Opening the pending deleted photo itself cancels its delete.
+pub fn cancel_if_pending(a: &mut App, path: &Path) {
+    let same = |p: &Path| p.as_os_str().eq_ignore_ascii_case(path.as_os_str());
+    if a.deleter.pending_path().is_some_and(same) {
+        if let Some(p) = a.deleter.undo() {
+            a.viewer.forget_hidden(&p);
+        }
+    }
+}
+
+/// Recycle results: a recycled photo is forgotten; one that stays is listed again
+/// (and a failed recycle is reported).
+pub fn on_reports(app: &RefCell<App>, hwnd: HWND) {
+    loop {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        let Ok((path, result)) = a.delete_rx.try_recv() else {
+            return;
+        };
+        // Pending again (a new file under the same name): that delete decides.
+        if a.deleter.pending_path() == Some(path.as_path()) {
+            continue;
+        }
+        match result {
+            Ok(()) => a.viewer.forget_hidden(&path),
+            Err(e) => {
+                let redraw = a.viewer.unhide(&path);
+                drop(a);
+                commands::after(app, hwnd, redraw);
+                if matches!(e, CommitError::Failed(_)) {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let text = format!("{TOAST_RECYCLE_FAILED}{name}");
+                    input::show_toast(app, hwnd, |now| Toast::new(&text, now));
+                }
+            }
+        }
+    }
+}
+
+fn refused(app: &RefCell<App>, hwnd: HWND, r: &Refusal) {
+    if let Refusal::Failed(e) = r {
+        eprintln!("light-view: could not delete: {e}");
+    }
+    let text = match r {
+        Refusal::Changed => TOAST_FILE_CHANGED,
+        Refusal::ReadOnly => TOAST_READ_ONLY,
+        Refusal::NoPermission => TOAST_NO_PERMISSION,
+        Refusal::InUse => TOAST_IN_USE,
+        Refusal::NotAFile => TOAST_NOT_A_FILE,
+        Refusal::Failed(_) => TOAST_DELETE_FAILED,
+    };
+    input::show_toast(app, hwnd, |now| Toast::new(text, now));
 }
 
 #[cfg(test)]
@@ -766,9 +962,8 @@ mod tests {
 
     fn shell_trash() -> (ShellTrash, Receiver<Reported>) {
         let (tx, rx) = channel();
-        let tx = std::sync::Mutex::new(tx);
         let trash = ShellTrash::new(Box::new(move |path, r| {
-            let _ = tx.lock().unwrap().send((path, r));
+            let _ = tx.send((path, r));
         }));
         (trash, rx)
     }
