@@ -437,6 +437,9 @@ pub fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
             SetTimer(hwnd, LOADING_TIMER, LOADING_DELAY_MS, None);
         }
     }
+    // The file may have come or gone (e.g. opened from the start screen): a pinned
+    // toolbar shows at once, not only after the next mouse move.
+    input::refresh_toolbar_now(app, hwnd);
     input::sync_tooltips(app, hwnd);
     invalidate(hwnd);
     watch::follow_folder(app, hwnd);
