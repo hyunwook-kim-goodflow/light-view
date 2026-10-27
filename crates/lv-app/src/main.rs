@@ -105,6 +105,9 @@ fn main() -> anyhow::Result<()> {
             Launch::Primary(guard) => Some(guard),
         }
     };
+    // COM for the UI thread, once (the shell's calls and the Open dialog), held until
+    // the window is gone.
+    let _com = shell::ComApartment::init();
     window::run(initial, settings, settings_path)
 }
 
