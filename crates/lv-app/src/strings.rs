@@ -128,6 +128,22 @@ pub enum S {
     ToastNoPhotos,
     ToastPathCopied,
     ToastOpenFailed,
+    // Settings window. The window title is `MenuSettings`, the button is
+    // `MenuDefaultApps`; `SettingsMegabytes` follows a number ("256 MB").
+    SettingsLanguage,
+    SettingsAuto,
+    SettingsKorean,
+    SettingsEnglish,
+    SettingsPinMenu,
+    SettingsOpenOther,
+    SettingsSameWindow,
+    SettingsNewWindow,
+    SettingsRotated,
+    SettingsAskToSave,
+    SettingsSaveRightAway,
+    SettingsMemory,
+    SettingsMegabytes,
+    SettingsMemoryNote,
     // About dialog. `AboutVersion` is followed by the version number.
     AboutTitle,
     AboutVersion,
@@ -138,7 +154,7 @@ pub enum S {
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 66] = [
+const ALL: [S; 80] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -200,6 +216,20 @@ const ALL: [S; 66] = [
     S::ToastNoPhotos,
     S::ToastPathCopied,
     S::ToastOpenFailed,
+    S::SettingsLanguage,
+    S::SettingsAuto,
+    S::SettingsKorean,
+    S::SettingsEnglish,
+    S::SettingsPinMenu,
+    S::SettingsOpenOther,
+    S::SettingsSameWindow,
+    S::SettingsNewWindow,
+    S::SettingsRotated,
+    S::SettingsAskToSave,
+    S::SettingsSaveRightAway,
+    S::SettingsMemory,
+    S::SettingsMegabytes,
+    S::SettingsMemoryNote,
     S::AboutTitle,
     S::AboutVersion,
     S::AboutLicense,
@@ -307,6 +337,23 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::ToastNoPhotos => ("열 수 있는 사진이 없어요", "No photos to open"),
         S::ToastPathCopied => ("경로를 복사했어요", "Path copied"),
         S::ToastOpenFailed => ("열지 못했어요", "Couldn't open it"),
+        S::SettingsLanguage => ("언어", "Language"),
+        S::SettingsAuto => ("자동", "Auto"),
+        S::SettingsKorean => ("한국어", "한국어"),
+        S::SettingsEnglish => ("English", "English"),
+        S::SettingsPinMenu => ("메뉴 고정", "Pin menu"),
+        S::SettingsOpenOther => ("다른 사진을 열 때", "When opening another photo"),
+        S::SettingsSameWindow => ("같은 창", "Same window"),
+        S::SettingsNewWindow => ("새 창", "New window"),
+        S::SettingsRotated => ("회전한 사진을", "Rotated photos"),
+        S::SettingsAskToSave => ("저장할지 묻기", "Ask to save"),
+        S::SettingsSaveRightAway => ("바로 저장", "Save right away"),
+        S::SettingsMemory => ("메모리 한도", "Memory limit"),
+        S::SettingsMegabytes => (" MB", " MB"),
+        S::SettingsMemoryNote => (
+            "다음 실행부터 적용돼요",
+            "Applies the next time light-view starts",
+        ),
         S::AboutTitle => ("light-view", "light-view"),
         S::AboutVersion => ("버전 ", "Version "),
         S::AboutLicense => (
@@ -337,9 +384,9 @@ pub fn tf(key: S, args: &[&dyn Display]) -> String {
     s
 }
 
-/// "너무 커서 열 수 없어요 (30000×20000)": the text with the pixel size appended.
-pub fn too_large_with_size(width: u32, height: u32) -> String {
-    format!("{} ({width}×{height})", t(S::TooLarge))
+/// "너무 커서 열 수 없어요 (30000×20000)": the text in `lang` with the pixel size appended.
+pub fn too_large_text(lang: Lang, width: u32, height: u32) -> String {
+    format!("{} ({width}×{height})", text(lang, S::TooLarge))
 }
 
 const MONTHS: [&str; 12] = [
@@ -423,7 +470,7 @@ mod tests {
             "휴지통으로 옮기지 못했어요: a.jpg"
         );
         assert_eq!(
-            too_large_with_size(30000, 20000),
+            too_large_text(Lang::Ko, 30000, 20000),
             "너무 커서 열 수 없어요 (30000×20000)"
         );
     }
@@ -454,6 +501,30 @@ mod tests {
         assert_eq!(text(Lang::Ko, S::MenuShowInFolder), "폴더에서 보기");
         assert_eq!(text(Lang::Ko, S::MenuDefaultApps), "기본 앱 설정 열기");
         assert_eq!(text(Lang::En, S::MenuAbout), "About");
+    }
+
+    #[test]
+    fn settings_texts() {
+        let ko = [
+            (S::SettingsLanguage, "언어"),
+            (S::SettingsAuto, "자동"),
+            (S::SettingsKorean, "한국어"),
+            (S::SettingsEnglish, "English"),
+            (S::SettingsPinMenu, "메뉴 고정"),
+            (S::SettingsOpenOther, "다른 사진을 열 때"),
+            (S::SettingsSameWindow, "같은 창"),
+            (S::SettingsNewWindow, "새 창"),
+            (S::SettingsRotated, "회전한 사진을"),
+            (S::SettingsAskToSave, "저장할지 묻기"),
+            (S::SettingsSaveRightAway, "바로 저장"),
+            (S::SettingsMemory, "메모리 한도"),
+        ];
+        for (key, want) in ko {
+            assert_eq!(text(Lang::Ko, key), want, "{key:?}");
+        }
+        // Each language is named in itself, whatever the UI language.
+        assert_eq!(text(Lang::En, S::SettingsKorean), "한국어");
+        assert_eq!(text(Lang::Ko, S::SettingsEnglish), "English");
     }
 
     /// The Korean text the app shipped with through M3, byte for byte (the constants

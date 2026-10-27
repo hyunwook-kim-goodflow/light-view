@@ -38,6 +38,7 @@ use crate::menu::{self, Menu, MenuView};
 use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
+use crate::settings_win::{self, SettingsWindow};
 use crate::start::{self, StartScreen};
 use crate::strings::{t, S};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
@@ -93,6 +94,8 @@ pub struct App {
     pub delete_rx: Receiver<CommitReport>,
     /// The shown folder's change watch.
     pub watching: Watching,
+    /// The settings window, while it is open.
+    pub settings_win: Option<SettingsWindow>,
 }
 
 pub fn run(
@@ -134,6 +137,7 @@ pub fn run(
         deleter: Deleter::new(Box::new(trash)),
         delete_rx,
         watching: Watching::default(),
+        settings_win: None,
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -278,6 +282,15 @@ impl App {
         self.viewer.set_view(view, dip);
     }
 
+    pub fn dark(&self) -> bool {
+        self.dark
+    }
+
+    /// The icon font's family name (empty until the renderer exists).
+    pub fn icon_family(&self) -> &'static str {
+        self.icon_family
+    }
+
     /// Client area size in DIPs.
     pub fn client(&self) -> (f32, f32) {
         self.client_dips
@@ -378,7 +391,7 @@ impl App {
                 r.draw_image(rect, quarters);
                 drew_image = r.has_image();
             }
-            Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
+            Scene::Message(text) if !loading => r.draw_text_center(&text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
         }
         if let Some(l) = &start {
@@ -444,11 +457,15 @@ impl App {
         self.persist_settings();
     }
 
+    /// Saves the settings; an open settings window repaints to show them.
     pub fn persist_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = save_settings(path, &self.settings) {
                 eprintln!("light-view: could not save settings: {e}");
             }
+        }
+        if let Some(w) = &self.settings_win {
+            invalidate(w.hwnd);
         }
     }
 }
@@ -579,6 +596,7 @@ fn handle(
                 if let Some(tt) = tooltip {
                     tooltip::set_dark(tt, dark);
                 }
+                settings_win::on_theme(app, dark);
                 invalidate(hwnd);
             }
             None

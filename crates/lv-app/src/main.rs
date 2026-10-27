@@ -15,6 +15,7 @@ mod placement;
 mod render;
 mod routing;
 mod save;
+mod settings_win;
 mod shell;
 mod start;
 mod strings;

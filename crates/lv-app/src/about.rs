@@ -52,7 +52,7 @@ pub fn show(app: &RefCell<App>, hwnd: HWND) {
 pub fn open_notices(app: &RefCell<App>, hwnd: HWND) {
     let opened = notices_path().is_some_and(|p| p.is_file() && shell::open(hwnd, p.as_os_str()));
     if !opened {
-        input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastOpenFailed), now));
+        input::show_toast(app, hwnd, |now| Toast::new(S::ToastOpenFailed, now));
     }
 }
 

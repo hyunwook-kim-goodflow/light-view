@@ -40,7 +40,7 @@ use crate::overlay::{DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, To
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
 use crate::start;
-use crate::strings::{t, tf, S};
+use crate::strings::S;
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
 use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
 use crate::window::{self, invalidate, App};
@@ -259,7 +259,7 @@ fn start_save(app: &RefCell<App>, hwnd: HWND) {
         // The file could not be read when it was shown.
         a.viewer.on_save_failed();
         drop(a);
-        input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastFileChanged), now));
+        input::show_toast(app, hwnd, |now| Toast::new(S::ToastFileChanged, now));
         return;
     };
     if a.viewer.closing_after_save() {
@@ -313,17 +313,17 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
     }
     let toast = match &done.outcome {
         SaveOutcome::Saved => None,
-        SaveOutcome::SavedAsOrientationTag => Some(t(S::ToastSavedAsTag).to_owned()),
-        SaveOutcome::Unsupported => Some(t(S::ToastUnsupportedFormat).to_owned()),
-        SaveOutcome::Changed => Some(t(S::ToastFileChanged).to_owned()),
-        SaveOutcome::ReadOnly => Some(t(S::ToastReadOnly).to_owned()),
+        SaveOutcome::SavedAsOrientationTag => Some((S::ToastSavedAsTag, String::new())),
+        SaveOutcome::Unsupported => Some((S::ToastUnsupportedFormat, String::new())),
+        SaveOutcome::Changed => Some((S::ToastFileChanged, String::new())),
+        SaveOutcome::ReadOnly => Some((S::ToastReadOnly, String::new())),
         SaveOutcome::Failed(e) => {
             eprintln!("light-view: could not save {}: {e}", done.path.display());
-            Some(t(S::ToastSaveFailed).to_owned())
+            Some((S::ToastSaveFailed, String::new()))
         }
         SaveOutcome::KeptCopy(copy) => {
             let name = copy.file_name().unwrap_or_default().to_string_lossy();
-            Some(tf(S::ToastKeptCopy, &[&name]))
+            Some((S::ToastKeptCopy, name.into_owned()))
         }
     };
     let pending = {
@@ -345,8 +345,8 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
             None
         }
     };
-    if let Some(text) = toast {
-        input::show_toast(app, hwnd, |now| Toast::new(&text, now));
+    if let Some((key, name)) = toast {
+        input::show_toast(app, hwnd, |now| Toast::with_suffix(key, &name, now));
     }
     after(app, hwnd, Redraw::Full);
     let closing = pending == Some(LeaveReason::Close);
@@ -479,9 +479,10 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
     }
 }
 
-/// Ctrl+, and the menu's 설정. The settings window comes with its own task; until then
-/// this does nothing.
-pub fn open_settings(_app: &RefCell<App>, _hwnd: HWND) {}
+/// Ctrl+, and the menu's 설정: the settings window.
+pub fn open_settings(app: &RefCell<App>, hwnd: HWND) {
+    crate::settings_win::open(app, hwnd);
+}
 
 /// [저장] saves (and with the checkbox, from now on without asking), [저장 안 함] drops
 /// the rotation, and either then does what the user tried to do; [취소] stays. An answer
@@ -641,7 +642,7 @@ pub fn handle(
             let dropped = dropped_paths(HDROP(wparam.0 as *mut _));
             match start::pick_drop(&dropped) {
                 Some(path) => open(app, hwnd, &path),
-                None => input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastNoPhotos), now)),
+                None => input::show_toast(app, hwnd, |now| Toast::new(S::ToastNoPhotos, now)),
             }
             Some(LRESULT(0))
         }

@@ -13,7 +13,7 @@ pub struct WindowPlacement {
 }
 
 /// UI language choice. "auto" follows the Windows UI language; an unknown value in the
-/// file falls back to `Auto`.
+/// file, or one that is not a string, falls back to `Auto`.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LangSetting {
@@ -25,10 +25,10 @@ pub enum LangSetting {
 
 impl<'de> Deserialize<'de> for LangSetting {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        Ok(match s.as_str() {
-            "ko" => LangSetting::Ko,
-            "en" => LangSetting::En,
+        // Any value is accepted, so a wrong type never resets the whole file.
+        Ok(match toml::Value::deserialize(d)? {
+            toml::Value::String(s) if s == "ko" => LangSetting::Ko,
+            toml::Value::String(s) if s == "en" => LangSetting::En,
             _ => LangSetting::Auto,
         })
     }
@@ -163,6 +163,25 @@ mod tests {
         ] {
             std::fs::write(&path, text).unwrap();
             assert_eq!(load_settings(&path).language, want, "{text}");
+        }
+        // A value of another type falls back to Auto too, keeping the rest of the file.
+        for text in [
+            "toolbar_pinned = true
+language = 1
+",
+            "toolbar_pinned = true
+language = [\"ko\"]
+",
+            "toolbar_pinned = true
+[language]
+ko = true
+",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let s = load_settings(&path);
+            assert_eq!(s.language, LangSetting::Auto, "{text}");
+            assert!(s.toolbar_pinned, "{text}");
+            assert!(path.exists(), "{text}");
         }
         for want in [LangSetting::Auto, LangSetting::Ko, LangSetting::En] {
             let s = Settings {

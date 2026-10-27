@@ -410,7 +410,7 @@ pub fn run_item(app: &RefCell<App>, hwnd: HWND, item: MenuItem) {
                     "light-view: could not show {} in its folder: {e}",
                     path.display()
                 );
-                input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastOpenFailed), now));
+                input::show_toast(app, hwnd, |now| Toast::new(S::ToastOpenFailed, now));
             }
         }
         MenuItem::CopyPath => {
@@ -419,15 +419,13 @@ pub fn run_item(app: &RefCell<App>, hwnd: HWND, item: MenuItem) {
             };
             let text = shell::user_path(&path).to_string_lossy().into_owned();
             match clipboard::set_text(hwnd, &text) {
-                Ok(()) => {
-                    input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastPathCopied), now))
-                }
+                Ok(()) => input::show_toast(app, hwnd, |now| Toast::new(S::ToastPathCopied, now)),
                 Err(e) => eprintln!("light-view: could not copy to the clipboard: {e}"),
             }
         }
         MenuItem::DefaultApps => {
             if !shell::open(hwnd, "ms-settings:defaultapps".as_ref()) {
-                input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastOpenFailed), now));
+                input::show_toast(app, hwnd, |now| Toast::new(S::ToastOpenFailed, now));
             }
         }
         MenuItem::Settings => commands::open_settings(app, hwnd),

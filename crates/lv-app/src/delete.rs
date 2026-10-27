@@ -42,7 +42,7 @@ use windows::Win32::UI::Shell::{
 use crate::commands;
 use crate::input;
 use crate::overlay::{DialogTarget, Prompt, PromptResult, Toast, ToastAction};
-use crate::strings::{t, tf, S};
+use crate::strings::S;
 use crate::viewer::LeaveReason;
 use crate::window::App;
 
@@ -576,7 +576,7 @@ pub fn delete_current(app: &RefCell<App>, hwnd: HWND) {
     };
     let Some(id) = id else {
         drop(a);
-        input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastFileChanged), now));
+        input::show_toast(app, hwnd, |now| Toast::new(S::ToastFileChanged, now));
         return;
     };
     match a.deleter.delete(&path, &id) {
@@ -626,7 +626,7 @@ pub fn on_permanent_answer(
         && current.as_ref().is_some_and(|(p, _)| *p == target.path);
     let Some(id) = current.and_then(|(_, id)| id).filter(|_| same) else {
         drop(a);
-        input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastFileChanged), now));
+        input::show_toast(app, hwnd, |now| Toast::new(S::ToastFileChanged, now));
         return;
     };
     match a.deleter.confirm_permanent(&target.path, &id) {
@@ -702,8 +702,9 @@ pub fn on_reports(app: &RefCell<App>, hwnd: HWND) {
                 commands::after(app, hwnd, redraw);
                 if matches!(e, CommitError::Failed(_)) {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    let text = tf(S::ToastRecycleFailed, &[&name]);
-                    input::show_toast(app, hwnd, |now| Toast::new(&text, now));
+                    input::show_toast(app, hwnd, |now| {
+                        Toast::with_suffix(S::ToastRecycleFailed, &name, now)
+                    });
                 }
             }
         }
@@ -722,15 +723,15 @@ fn refused(app: &RefCell<App>, hwnd: HWND, r: &Refusal) {
     if let Refusal::Failed(e) = r {
         eprintln!("light-view: could not delete: {e}");
     }
-    let text = match r {
-        Refusal::Changed => t(S::ToastFileChanged),
-        Refusal::ReadOnly => t(S::ToastReadOnly),
-        Refusal::NoPermission => t(S::ToastNoPermission),
-        Refusal::InUse => t(S::ToastInUse),
-        Refusal::NotAFile => t(S::ToastNotAFile),
-        Refusal::Failed(_) => t(S::ToastDeleteFailed),
+    let key = match r {
+        Refusal::Changed => S::ToastFileChanged,
+        Refusal::ReadOnly => S::ToastReadOnly,
+        Refusal::NoPermission => S::ToastNoPermission,
+        Refusal::InUse => S::ToastInUse,
+        Refusal::NotAFile => S::ToastNotAFile,
+        Refusal::Failed(_) => S::ToastDeleteFailed,
     };
-    input::show_toast(app, hwnd, |now| Toast::new(text, now));
+    input::show_toast(app, hwnd, |now| Toast::new(key, now));
 }
 
 #[cfg(test)]

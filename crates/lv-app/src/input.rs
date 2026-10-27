@@ -25,7 +25,7 @@ use crate::exif_card::CardAction;
 use crate::menu;
 use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
 use crate::start;
-use crate::strings::{t, S};
+use crate::strings::S;
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
 use crate::viewer::Redraw;
@@ -562,7 +562,7 @@ fn card_action(app: &RefCell<App>, hwnd: HWND, action: CardAction) {
     match action {
         CardAction::Redraw => invalidate(hwnd),
         CardAction::Copy(text) => match clipboard::set_text(hwnd, &text) {
-            Ok(()) => show_toast(app, hwnd, |now| Toast::new(t(S::ToastCopied), now)),
+            Ok(()) => show_toast(app, hwnd, |now| Toast::new(S::ToastCopied, now)),
             Err(e) => {
                 eprintln!("light-view: could not copy to the clipboard: {e}");
                 invalidate(hwnd);
@@ -620,18 +620,18 @@ fn debug_overlay(
             generation: a.viewer.generation(),
         }
     };
-    let texts = [
-        t(S::ToastSavedAsTag),
-        t(S::ToastFileChanged),
-        t(S::ToastSaveFailed),
-        t(S::ToastUnsupportedFormat),
+    let keys = [
+        S::ToastSavedAsTag,
+        S::ToastFileChanged,
+        S::ToastSaveFailed,
+        S::ToastUnsupportedFormat,
     ];
     match vk {
         0x31 => show_dialog(app, hwnd, Prompt::SaveRotation, target),
         0x33 => show_toast(app, hwnd, Toast::recycled),
         0x34..=0x37 => {
-            let text = texts[usize::from(vk - 0x34)];
-            show_toast(app, hwnd, |now| Toast::new(text, now));
+            let key = keys[usize::from(vk - 0x34)];
+            show_toast(app, hwnd, |now| Toast::new(key, now));
         }
         _ => return None,
     }
