@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
@@ -41,6 +41,7 @@ use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
 use crate::start;
 use crate::strings::S;
+use crate::update;
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
 use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
 use crate::window::{self, invalidate, App};
@@ -283,7 +284,7 @@ fn start_save(app: &RefCell<App>, hwnd: HWND) {
             Some(pool) => save_rotation(&path, &id, request.quarters, &**pool, &limits),
             None => save_rotation(&path, &id, request.quarters, &NoWorker, &limits),
         };
-        let outcome = catch_unwind(AssertUnwindSafe(save))
+        let outcome = lv_core::unwind::catch(AssertUnwindSafe(save))
             .unwrap_or_else(|_| SaveOutcome::Failed("the save panicked".into()));
         let saved = matches!(
             outcome,
@@ -480,8 +481,20 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             }
             true
         }
+        OverlayEvent::Dialog {
+            prompt: Prompt::UpdateCheck,
+            result,
+            ..
+        } => {
+            update::on_answer(app, hwnd, result);
+            true
+        }
         OverlayEvent::Toast(ToastAction::Undo) => {
             delete::request_undo(app, hwnd);
+            true
+        }
+        OverlayEvent::Toast(ToastAction::ViewUpdate) => {
+            update::open_release(app, hwnd);
             true
         }
     }
@@ -535,7 +548,9 @@ fn on_save_prompt(
         PromptResult::Cancel
         | PromptResult::Confirm
         | PromptResult::Notices
-        | PromptResult::Close => {
+        | PromptResult::Close
+        | PromptResult::NotifyMe
+        | PromptResult::NoThanks => {
             a.viewer.cancel_leave();
             true
         }
@@ -582,6 +597,8 @@ pub fn handle(
         WM_APP_IMAGE_READY => {
             let redraw = app.try_borrow_mut().ok()?.viewer.check_current();
             after(app, hwnd, redraw);
+            // The first photo is up: time for the update question (once).
+            update::maybe_ask(app, hwnd);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == LOADING_TIMER => {

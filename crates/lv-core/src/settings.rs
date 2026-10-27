@@ -44,6 +44,11 @@ pub struct Settings {
     /// Save a view rotation without asking when leaving the photo.
     pub auto_save_rotation: bool,
     pub language: LangSetting,
+    /// Look for a new release once a day (spec §6.6). `None`: not asked yet, so no
+    /// check is made until the user answers.
+    pub update_check: Option<bool>,
+    /// When the last update check started, in seconds since the Unix epoch.
+    pub last_update_check: Option<u64>,
 }
 
 /// 설정을 읽는다. 파일이 없으면 기본값, 파싱에 실패하면 원본을 `.bak`으로 옮기고 기본값을 돌려준다.
@@ -90,12 +95,15 @@ pub fn update_settings(
 
 impl Settings {
     /// Takes the fields this process does not apply while it runs (the new-window
-    /// choice, the memory limit and the placement) from `written`. The language, the
-    /// pin and auto-save stay as this window applied them.
+    /// choice, the memory limit and the placement) from `written`, and the update
+    /// answer and last check time, which any window may have written last. The
+    /// language, the pin and auto-save stay as this window applied them.
     pub fn sync_from(&mut self, written: &Settings) {
         self.open_in_new_window = written.open_in_new_window;
         self.memory_budget_mb = written.memory_budget_mb;
         self.window = written.window.clone();
+        self.update_check = written.update_check;
+        self.last_update_check = written.last_update_check;
     }
 }
 
@@ -124,6 +132,8 @@ mod tests {
             memory_budget_mb: Some(512),
             auto_save_rotation: true,
             language: LangSetting::En,
+            update_check: Some(true),
+            last_update_check: Some(1_790_000_000),
         }
     }
 
@@ -204,6 +214,30 @@ mod tests {
         // Settings files from before M3 ask before saving a rotation.
         assert!(!s.auto_save_rotation);
         assert_eq!(s.language, LangSetting::Auto);
+        // Files from before M5 have not been asked about update checks yet.
+        assert_eq!(s.update_check, None);
+        assert_eq!(s.last_update_check, None);
+    }
+
+    /// The update answer is three-state: unanswered (no key), on, off. Another
+    /// window's answer and check time are taken over on the next field save.
+    #[test]
+    fn update_answer_round_trips_and_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        save_settings(&path, &Settings::default()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("update_check"), "{text}");
+        for answer in [Some(true), Some(false)] {
+            update_settings(&path, |s| s.update_check = answer).unwrap();
+            assert_eq!(load_settings(&path).update_check, answer);
+        }
+        let mut a = Settings::default();
+        update_settings(&path, |s| s.last_update_check = Some(42)).unwrap();
+        let written = update_settings(&path, |s| s.toolbar_pinned = true).unwrap();
+        a.sync_from(&written);
+        assert_eq!(a.update_check, Some(false));
+        assert_eq!(a.last_update_check, Some(42));
     }
 
     #[test]

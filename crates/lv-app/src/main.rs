@@ -4,6 +4,7 @@
 mod about;
 mod clipboard;
 mod commands;
+mod crash;
 mod delete;
 mod exif_card;
 mod fullscreen;
@@ -25,6 +26,7 @@ mod toolbar;
 mod tooltip;
 mod uia;
 mod uia_provider;
+mod update;
 mod viewer;
 mod watch;
 mod window;
@@ -68,6 +70,12 @@ fn main() -> anyhow::Result<()> {
     // `--bench` (lv-bench): default settings, nothing saved, no single-instance check,
     // so a measurement neither depends on nor changes the user's settings and windows.
     let settings_path = if bench { None } else { window::settings_path() };
+    // Crash records (ruling R6); a measurement run leaves none.
+    if !bench {
+        if let Some(dir) = window::crash_dir() {
+            crash::install(&dir);
+        }
+    }
     let settings = settings_path
         .as_deref()
         .map(load_settings)

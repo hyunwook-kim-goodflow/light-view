@@ -55,7 +55,7 @@ use crate::window::{invalidate, App};
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Settings");
 /// Client size in DIPs; the window cannot be resized.
-pub const SIZE_DIP: (f32, f32) = (420.0, 480.0);
+pub const SIZE_DIP: (f32, f32) = (420.0, 532.0);
 /// A caption and a close box: no sizing border, no minimize or maximize.
 const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0);
 
@@ -73,16 +73,19 @@ pub enum Control {
     OpenIn,
     Rotation,
     Memory,
+    /// "업데이트 확인" (spec §6.6): a checkbox, on only after a yes.
+    UpdateCheck,
     DefaultApps,
 }
 
 /// Top to bottom; also the Tab order.
-pub const CONTROLS: [Control; 6] = [
+pub const CONTROLS: [Control; 7] = [
     Control::Language,
     Control::PinMenu,
     Control::OpenIn,
     Control::Rotation,
     Control::Memory,
+    Control::UpdateCheck,
     Control::DefaultApps,
 ];
 
@@ -102,13 +105,14 @@ impl Control {
             Control::OpenIn => S::SettingsOpenOther,
             Control::Rotation => S::SettingsRotated,
             Control::Memory => S::SettingsMemory,
+            Control::UpdateCheck => S::SettingsUpdateCheck,
             Control::DefaultApps => S::MenuDefaultApps,
         }
     }
 
     fn kind(self) -> Kind {
         match self {
-            Control::PinMenu => Kind::Check,
+            Control::PinMenu | Control::UpdateCheck => Kind::Check,
             Control::DefaultApps => Kind::Button,
             _ => Kind::Choice,
         }
@@ -128,7 +132,7 @@ impl Control {
                     Some(mb) => format!("{mb}{}", text(lang, S::SettingsMegabytes)),
                 })
                 .collect(),
-            Control::PinMenu | Control::DefaultApps => Vec::new(),
+            Control::PinMenu | Control::UpdateCheck | Control::DefaultApps => Vec::new(),
         }
     }
 
@@ -137,7 +141,7 @@ impl Control {
             Control::Language => LANGUAGES.len(),
             Control::OpenIn | Control::Rotation => 2,
             Control::Memory => MEMORY_MB.len(),
-            Control::PinMenu | Control::DefaultApps => 0,
+            Control::PinMenu | Control::UpdateCheck | Control::DefaultApps => 0,
         }
     }
 
@@ -151,13 +155,26 @@ impl Control {
                 let mb = s.memory_budget_mb.filter(|&mb| mb > 0);
                 MEMORY_MB.iter().position(|m| *m == mb)
             }
-            Control::PinMenu | Control::DefaultApps => None,
+            Control::PinMenu | Control::UpdateCheck | Control::DefaultApps => None,
         }
     }
 
-    /// The checkbox's state.
+    /// A checkbox's state. Update checks show off until the user said yes.
     pub fn checked(self, s: &Settings) -> bool {
-        self == Control::PinMenu && s.toolbar_pinned
+        match self {
+            Control::PinMenu => s.toolbar_pinned,
+            Control::UpdateCheck => s.update_check == Some(true),
+            _ => false,
+        }
+    }
+
+    /// The change a checkbox makes when turned to `on`.
+    fn toggle(self, on: bool) -> Option<Change> {
+        match self {
+            Control::PinMenu => Some(Change::PinMenu(on)),
+            Control::UpdateCheck => Some(Change::UpdateCheck(on)),
+            _ => None,
+        }
     }
 
     /// The change that picks option `i` of a choice.
@@ -167,7 +184,7 @@ impl Control {
             Control::OpenIn => Change::NewWindow(i == 1),
             Control::Rotation => Change::AutoSave(i == 1),
             Control::Memory => Change::Memory(*MEMORY_MB.get(i)?),
-            Control::PinMenu | Control::DefaultApps => return None,
+            Control::PinMenu | Control::UpdateCheck | Control::DefaultApps => return None,
         })
     }
 }
@@ -180,6 +197,7 @@ pub enum Change {
     NewWindow(bool),
     AutoSave(bool),
     Memory(Option<u32>),
+    UpdateCheck(bool),
 }
 
 /// What the main window has to do after a change.
@@ -190,6 +208,8 @@ pub struct MainUpdate {
     /// The toolbar was pinned or unpinned: the image area changes size.
     pub relayout: bool,
     pub auto_save: Option<bool>,
+    /// Update checks were turned on: check now if one is due.
+    pub check_updates: bool,
 }
 
 /// Applies `c` to `s`; `None` when it changes nothing (nothing to save or redo). The
@@ -221,6 +241,12 @@ pub fn apply_change(s: &mut Settings, c: Change) -> Option<MainUpdate> {
             let mb = mb.filter(|&mb| mb > 0);
             (s.memory_budget_mb != mb).then_some(())?;
             s.memory_budget_mb = mb;
+        }
+        Change::UpdateCheck(on) => {
+            // Turning it off answers the first-run question too: it is not asked.
+            (s.update_check != Some(on)).then_some(())?;
+            s.update_check = Some(on);
+            update.check_updates = on;
         }
     }
     Some(update)
@@ -357,7 +383,9 @@ fn pick(control: Control, current: Option<usize>, i: usize) -> Action {
 /// Space or Enter (or a click) on the checkbox or the button.
 fn press_control(control: Control, s: &Settings) -> Action {
     match control.kind() {
-        Kind::Check => Action::Change(Change::PinMenu(!control.checked(s))),
+        Kind::Check => control
+            .toggle(!control.checked(s))
+            .map_or(Action::Nothing, Action::Change),
         Kind::Button => Action::OpenDefaultApps,
         Kind::Choice => Action::Nothing,
     }
@@ -1010,6 +1038,9 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
         }
         update
     };
+    if update.check_updates {
+        crate::update::check_if_due(app, owner);
+    }
     if update.retranslate {
         // The main window's title and tooltips, and a repaint.
         commands::after(app, owner, Redraw::Full);
@@ -1076,6 +1107,7 @@ mod tests {
                 "다른 사진을 열 때",
                 "회전한 사진을",
                 "메모리 한도",
+                "업데이트 확인",
                 "기본 앱 설정 열기"
             ]
         );
@@ -1088,6 +1120,7 @@ mod tests {
             ["자동", "256 MB", "512 MB", "1024 MB", "2048 MB"]
         );
         assert!(options(Control::PinMenu).is_empty());
+        assert!(options(Control::UpdateCheck).is_empty());
         assert!(options(Control::DefaultApps).is_empty());
         assert_eq!(
             Control::Language.option_labels(Lang::En),
@@ -1128,12 +1161,12 @@ mod tests {
         assert_eq!(m.focused, 0);
         assert_eq!(m.on_key(VK_TAB, NONE, false, &s), Some(Action::Redraw));
         assert_eq!(m.focused, 1);
-        for _ in 0..5 {
+        for _ in 0..6 {
             m.on_key(VK_TAB, NONE, false, &s);
         }
         assert_eq!(m.focused, 0);
         m.on_key(VK_TAB, SHIFT, false, &s);
-        assert_eq!(m.focused, 5);
+        assert_eq!(m.focused, 6);
     }
 
     #[test]
@@ -1241,7 +1274,11 @@ mod tests {
         assert_eq!(m.invoke(0, Some(0), &s), Action::Redraw);
         assert_eq!(m.focused, 0);
         assert_eq!(m.invoke(1, None, &s), Action::Change(Change::PinMenu(true)));
-        assert_eq!(m.invoke(5, None, &s), Action::OpenDefaultApps);
+        assert_eq!(
+            m.invoke(5, None, &s),
+            Action::Change(Change::UpdateCheck(true))
+        );
+        assert_eq!(m.invoke(6, None, &s), Action::OpenDefaultApps);
         // Mismatched or out-of-range parts do nothing.
         assert_eq!(m.invoke(0, None, &s), Action::Redraw);
         assert_eq!(m.invoke(1, Some(0), &s), Action::Redraw);
@@ -1278,10 +1315,10 @@ mod tests {
             m.release(px, py, &l, &s),
             Action::Change(Change::PinMenu(true))
         );
-        let (bx, by) = center(l.controls[5].options[0]);
+        let (bx, by) = center(l.controls[6].options[0]);
         m.press(bx, by, &l);
         assert_eq!(m.release(bx, by, &l, &s), Action::OpenDefaultApps);
-        assert_eq!(m.focused, 5);
+        assert_eq!(m.focused, 6);
         // Outside every control: not taken, nothing happens.
         assert!(!m.press(2.0, 2.0, &l));
         assert_eq!(m.release(2.0, 2.0, &l, &s), Action::Nothing);
@@ -1339,6 +1376,40 @@ mod tests {
             apply_change(&mut s, Change::Language(LangSetting::En)),
             None
         );
+    }
+
+    /// "업데이트 확인" is a checkbox: off while unanswered, toggled with Space or a
+    /// click, and turning it on asks for a check.
+    #[test]
+    fn update_check_toggles() {
+        let mut s = Settings::default();
+        assert!(!Control::UpdateCheck.checked(&s));
+        let mut m = Model::default();
+        focus(&mut m, Control::UpdateCheck);
+        let on = Action::Change(Change::UpdateCheck(true));
+        assert_eq!(m.on_key(VK_SPACE, NONE, false, &s), Some(on));
+        let update = apply_change(&mut s, Change::UpdateCheck(true)).unwrap();
+        assert!(update.check_updates);
+        assert_eq!(s.update_check, Some(true));
+        assert!(Control::UpdateCheck.checked(&s));
+        let off = Action::Change(Change::UpdateCheck(false));
+        assert_eq!(m.on_key(VK_RETURN, NONE, false, &s), Some(off));
+        let update = apply_change(&mut s, Change::UpdateCheck(false)).unwrap();
+        assert!(!update.check_updates);
+        assert_eq!(s.update_check, Some(false));
+        assert_eq!(apply_change(&mut s, Change::UpdateCheck(false)), None);
+        // Unanswered, then turned off here: that is an answer too.
+        let mut fresh = Settings::default();
+        assert!(apply_change(&mut fresh, Change::UpdateCheck(false)).is_some());
+        assert_eq!(fresh.update_check, Some(false));
+        let l = layout(SIZE_DIP);
+        let i = CONTROLS
+            .iter()
+            .position(|c| *c == Control::UpdateCheck)
+            .unwrap();
+        let (x, y) = center(l.controls[i].options[0]);
+        assert!(m.press(x, y, &l));
+        assert_eq!(m.release(x, y, &l, &fresh), on);
     }
 
     #[test]
@@ -1430,7 +1501,7 @@ mod tests {
             let mut rc = RECT::default();
             GetClientRect(settings, &mut rc).unwrap();
             assert_eq!(rc.right, (420.0 * dpi / 96.0).round() as i32);
-            assert_eq!(rc.bottom, (480.0 * dpi / 96.0).round() as i32);
+            assert_eq!(rc.bottom, (SIZE_DIP.1 * dpi / 96.0).round() as i32);
             // Destroying the main window takes the settings window with it.
             DestroyWindow(owner).unwrap();
             assert!(!IsWindow(settings).as_bool());

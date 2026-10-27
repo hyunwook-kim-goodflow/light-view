@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::io::{Cursor, Read};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -215,7 +215,7 @@ fn read_capped(
 }
 
 pub fn decode_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, DecodeError> {
-    catch_unwind(AssertUnwindSafe(|| decode_inner(bytes, limits)))
+    crate::unwind::catch(AssertUnwindSafe(|| decode_inner(bytes, limits)))
         .unwrap_or_else(|_| Err(DecodeError::Corrupt("decoder panicked".into())))
 }
 
