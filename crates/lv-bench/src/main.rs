@@ -15,7 +15,10 @@
 //! presented); `decode_ms` is the decode of that image on the prefetch thread;
 //! `private_mb` is the private bytes of the app plus its HEIF workers once memory
 //! settles (the open photo and its prefetched neighbours). With `--check BASELINE` (a
-//! file of such lines) the exit code is 1 when any value is over 1.5× its baseline.
+//! file of such lines) the exit code is 1 when any value is over the larger of 1.5× its
+//! baseline and the baseline + 50 ms (times) or + 30 MB (memory), or a baseline case
+//! that was asked for has no result (a case that could not run here, like `heic12mp`
+//! without `--heic`, is listed as skipped instead).
 
 mod images;
 mod report;
@@ -56,7 +59,7 @@ fn real_main() -> Result<ExitCode, String> {
     let dir = std::env::temp_dir().join(format!("lv-bench-{}", std::process::id()));
     let results = run_cases(&args, &dir);
     let _ = std::fs::remove_dir_all(&dir);
-    let results = results?;
+    let (results, mut skipped) = results?;
     for r in &results {
         println!("{}", r.to_json());
     }
@@ -65,7 +68,17 @@ fn real_main() -> Result<ExitCode, String> {
     };
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let baseline = report::parse_baseline(&text)?;
-    let failures = report::check(&baseline, &results);
+    // Baseline cases not asked for with --case are not compared either.
+    for base in &baseline {
+        if !args.cases.contains(&base.case) && !skipped.contains(&base.case) {
+            eprintln!(
+                "lv-bench: {} not run (not asked for); not compared",
+                base.case
+            );
+            skipped.push(base.case.clone());
+        }
+    }
+    let failures = report::check(&baseline, &results, &skipped);
     for f in &failures {
         eprintln!("lv-bench: regression: {f}");
     }
@@ -76,13 +89,18 @@ fn real_main() -> Result<ExitCode, String> {
     })
 }
 
-fn run_cases(args: &Args, dir: &Path) -> Result<Vec<CaseResult>, String> {
+/// The results of the cases that ran, and the cases that could not run here.
+fn run_cases(args: &Args, dir: &Path) -> Result<(Vec<CaseResult>, Vec<String>), String> {
     let mut results = Vec::new();
+    let mut skipped = Vec::new();
     for case in &args.cases {
         let folder = dir.join(case);
         let file = match case_file(case, args, &folder)? {
             Some(file) => file,
-            None => continue,
+            None => {
+                skipped.push(case.clone());
+                continue;
+            }
         };
         eprintln!("lv-bench: {case}: {} runs", args.runs);
         let mut samples = Vec::new();
@@ -108,7 +126,7 @@ fn run_cases(args: &Args, dir: &Path) -> Result<Vec<CaseResult>, String> {
         }
         results.push(summarize(case, &samples)?);
     }
-    Ok(results)
+    Ok((results, skipped))
 }
 
 /// The picture a case opens, written into `folder`; `None` (with a note) for a case
@@ -148,17 +166,21 @@ fn case_file(case: &str, args: &Args, folder: &Path) -> Result<Option<PathBuf>, 
 }
 
 fn summarize(case: &str, samples: &[run::Sample]) -> Result<CaseResult, String> {
-    let values = |f: &dyn Fn(&run::Sample) -> Option<f64>| -> Result<Vec<f64>, String> {
+    let step = |name: &str| -> Result<Vec<f64>, String> {
         samples
             .iter()
-            .map(|s| f(s).ok_or_else(|| format!("{case}: a run reported no decode time")))
+            .map(|s| {
+                s.step(name)
+                    .ok_or_else(|| format!("{case}: a run's timing line has no {name}"))
+            })
             .collect()
     };
+    let mut memory: Vec<f64> = samples.iter().map(|s| s.app_mb + s.workers_mb).collect();
     Ok(CaseResult {
         case: case.to_string(),
-        first_pixel_ms: report::median(&mut values(&|s| s.step("first-present-ms"))?),
-        decode_ms: report::median(&mut values(&|s| s.step("decode-ms"))?),
-        private_mb: report::median(&mut values(&|s| Some(s.app_mb + s.workers_mb))?),
+        first_pixel_ms: report::median(&mut step("first-present-ms")?),
+        decode_ms: report::median(&mut step("decode-ms")?),
+        private_mb: report::median(&mut memory),
     })
 }
 

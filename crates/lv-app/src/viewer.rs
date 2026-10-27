@@ -425,7 +425,9 @@ impl Viewer {
     /// Asks the prefetcher for the current photo and one neighbour each side, the one in
     /// the direction of the last move first (spec §5.2). A second photo ahead was
     /// dropped in M5: it cost a decoded 12 MP photo (~46 MB) and kept the app over the
-    /// 300 MB target, while one decode (~0.3 s) is quicker than normal paging.
+    /// 300 MB target. For a ~12 MP JPEG one decode (~0.25–0.3 s) is quicker than normal
+    /// paging; larger photos (24 MP and up, HEIC) may show "불러오는 중…" briefly on a
+    /// quick second press.
     fn request_wanted(&mut self) {
         let offsets: [isize; 3] = if self.backward {
             [0, -1, 1]

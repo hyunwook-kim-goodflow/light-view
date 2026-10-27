@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
 use lv_core::prefetch::DecodeResult;
-use lv_core::tiling::mip_dims;
+use lv_core::tiling::{mip_dims, mip_levels_for_fit};
 
 /// Rows halved between checks for cancellation.
 const CANCEL_CHECK_ROWS: u32 = 64;
@@ -90,6 +90,30 @@ fn build_each(
         Some(last) if levels > first => emit(levels - 1, last),
         _ => true,
     }
+}
+
+/// Client sides below this many pixels count as this many when choosing mip levels:
+/// a sliver of a window (or one being dragged very small) must not ask for a chain
+/// down to a handful of pixels.
+pub const MIN_VIEW_SIDE: u32 = 200;
+
+/// The mip build to start for an `image` shown in a `view`-pixel client, as (first
+/// level, level count): `have` levels are uploaded (counting level 0) and a build down
+/// to `planned` levels may be running. `None` when nothing deeper is needed, or the
+/// client is empty (minimized: nothing is shown, so nothing is built).
+pub fn mips_to_build(
+    image: (u32, u32),
+    view: (u32, u32),
+    have: u8,
+    planned: Option<u8>,
+) -> Option<(u8, u8)> {
+    if view.0 == 0 || view.1 == 0 {
+        return None;
+    }
+    let view = (view.0.max(MIN_VIEW_SIDE), view.1.max(MIN_VIEW_SIDE));
+    let levels = mip_levels_for_fit(image, view);
+    let covered = planned.unwrap_or(have).max(have);
+    (levels > covered).then_some((have, levels))
 }
 
 /// A mip build running on its own thread. Dropping it cancels the build.
@@ -255,6 +279,40 @@ mod tests {
             exif: None,
             scaled_from: None,
         }))
+    }
+
+    #[test]
+    fn mip_builds_follow_the_window_size() {
+        let image = (24000, 16000);
+        let fit = |view| lv_core::tiling::mip_levels_for_fit(image, view);
+        // Shown at 1920x1080 with nothing built: build the levels the fit needs.
+        let big = (1920, 1080);
+        assert_eq!(mips_to_build(image, big, 1, None), Some((1, fit(big))));
+        // Same size again, built or still building: nothing new.
+        assert_eq!(mips_to_build(image, big, fit(big), None), None);
+        assert_eq!(mips_to_build(image, big, 1, Some(fit(big))), None);
+        // Minimized (0x0): nothing, however deep the fit would be.
+        assert_eq!(mips_to_build(image, (0, 0), fit(big), None), None);
+        assert_eq!(mips_to_build(image, (0, 700), fit(big), None), None);
+        // Restored to the size it had: nothing.
+        assert_eq!(mips_to_build(image, big, fit(big), None), None);
+        // Shrunk: only the levels past those built or planned.
+        let small = (480, 270);
+        assert!(fit(small) > fit(big));
+        assert_eq!(
+            mips_to_build(image, small, fit(big), None),
+            Some((fit(big), fit(small)))
+        );
+        assert_eq!(
+            mips_to_build(image, small, 2, Some(fit(big))),
+            Some((2, fit(small)))
+        );
+        // Grown: the levels already built still cover it.
+        assert_eq!(mips_to_build(image, (3840, 2160), fit(small), None), None);
+        // A sliver counts as MIN_VIEW_SIDE a side.
+        let floor = fit((MIN_VIEW_SIDE, MIN_VIEW_SIDE));
+        assert_eq!(mips_to_build(image, (1, 1), 1, None), Some((1, floor)));
+        assert_eq!(mips_to_build(image, (3, 900), floor, None), None);
     }
 
     #[test]

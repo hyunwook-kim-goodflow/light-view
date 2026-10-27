@@ -1,7 +1,7 @@
 //! Direct2D drawing: an `ID2D1HwndRenderTarget` per window, coordinates in DIPs.
 
 use lv_core::prefetch::DecodeResult;
-use lv_core::tiling::{mip_level_for_scale, mip_levels_for_fit};
+use lv_core::tiling::mip_level_for_scale;
 use windows::core::{w, Interface, Result};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, RECT, WPARAM};
@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW, WM_APP};
 
-use self::mips::{MipJob, MipLevel};
+use self::mips::{mips_to_build, MipJob, MipLevel};
 use self::tiles::{Pixels, TiledBitmap};
 use crate::theme::Rgb;
 
@@ -150,7 +150,7 @@ impl Renderer {
             }
         }
         // A smaller window may need deeper mip levels to fit the image (a DPI change
-        // arrives here too, with the window's new size).
+        // arrives here too, with the window's new size); a minimized one (0×0) none.
         self.ensure_mips((w, h));
     }
 
@@ -201,22 +201,24 @@ impl Renderer {
     /// Starts building the mip levels fitting the tiled image in a `view`-pixel window
     /// needs, beyond those uploaded or already being built.
     fn ensure_mips(&mut self, view: (u32, u32)) {
+        if self.mip_source.is_none() {
+            return;
+        }
+        // Levels already finished are uploaded first, so a new build starts after them.
+        self.take_mips();
         let (Some(d), Some((source, frame))) = (&self.device, &self.mip_source) else {
             return;
         };
         let Some(full) = &d.image else { return };
-        let levels = mip_levels_for_fit((full.width, full.height), view);
         let have = u8::try_from(d.mips.len() + 1).unwrap_or(u8::MAX);
-        let planned = self.mip_job.as_ref().map_or(have, MipJob::levels).max(have);
-        if levels <= planned {
+        let planned = self.mip_job.as_ref().map(MipJob::levels);
+        let Some((first, levels)) = mips_to_build((full.width, full.height), view, have, planned)
+        else {
             return;
-        }
+        };
         let (source, frame) = (source.clone(), *frame);
         let hwnd = self.hwnd.0 as isize;
-        // Replaces (cancels) a shallower build; levels it already handed over stay.
-        self.take_mips();
-        let have = self.device.as_ref().map_or(1, |d| d.mips.len() + 1);
-        let first = u8::try_from(have).unwrap_or(u8::MAX);
+        // Replaces (cancels) a shallower build.
         self.mip_job = Some(MipJob::spawn(source, frame, (first, levels), move || {
             // SAFETY: plain call; posting to a destroyed window just fails.
             unsafe {
