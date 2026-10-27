@@ -10,6 +10,8 @@
 //! `0xFF00` bytes, `RSTn` markers and fill bytes) and the markers between scans, and finds
 //! the real EOI. It never panics and runs in time linear in the input.
 
+use crate::jpeg_markers::{Markers, APP2, EOI};
+
 /// Why a JPEG must not be rotated pixel by pixel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotSingleImage {
@@ -35,58 +37,16 @@ pub fn check_single_image(jpeg: &[u8]) -> Result<(), NotSingleImage> {
 
 /// The offset just past the EOI that ends the first image.
 fn end_of_image(data: &[u8]) -> Result<usize, NotSingleImage> {
-    use NotSingleImage::{MultiPicture, Unreadable};
-    if data.get(..2) != Some(&[0xFF, 0xD8][..]) {
-        return Err(Unreadable);
-    }
-    let mut i = 2;
-    loop {
-        if *data.get(i).ok_or(Unreadable)? != 0xFF {
-            return Err(Unreadable);
+    for marker in Markers::new(data) {
+        let marker = marker.map_err(|_| NotSingleImage::Unreadable)?;
+        if marker.code == APP2 && marker.payload.starts_with(b"MPF\0") {
+            return Err(NotSingleImage::MultiPicture);
         }
-        // Fill bytes before a marker code.
-        while *data.get(i + 1).ok_or(Unreadable)? == 0xFF {
-            i += 1;
-        }
-        let code = data[i + 1];
-        i += 2;
-        match code {
-            0xD9 => return Ok(i),
-            // Standalone markers: TEM, RST0..7.
-            0x01 | 0xD0..=0xD7 => continue,
-            // A stuffed zero or a second SOI is not a marker here.
-            0x00 | 0xD8 => return Err(Unreadable),
-            _ => {}
-        }
-        let len_bytes = data.get(i..i + 2).ok_or(Unreadable)?;
-        let len = usize::from(u16::from_be_bytes([len_bytes[0], len_bytes[1]]));
-        if len < 2 {
-            return Err(Unreadable);
-        }
-        let payload = data.get(i + 2..i + len).ok_or(Unreadable)?;
-        if code == 0xE2 && payload.starts_with(b"MPF\0") {
-            return Err(MultiPicture);
-        }
-        i += len;
-        if code == 0xDA {
-            i = skip_entropy_data(data, i).ok_or(Unreadable)?;
+        if marker.code == EOI {
+            return Ok(marker.end);
         }
     }
-}
-
-/// From the start of a scan's entropy-coded data, the offset of the next real marker (its
-/// `0xFF`), or `None` if the data ends first.
-fn skip_entropy_data(data: &[u8], mut i: usize) -> Option<usize> {
-    loop {
-        i += data.get(i..)?.iter().position(|&b| b == 0xFF)?;
-        match *data.get(i + 1)? {
-            // Stuffed 0xFF data byte, or a restart marker inside the scan.
-            0x00 | 0xD0..=0xD7 => i += 2,
-            // A fill byte: the marker starts at the next 0xFF.
-            0xFF => i += 1,
-            _ => return Some(i),
-        }
-    }
+    Err(NotSingleImage::Unreadable)
 }
 
 #[cfg(test)]
