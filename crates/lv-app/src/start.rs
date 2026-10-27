@@ -12,11 +12,13 @@ use lv_core::listing::first_supported_in;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FILEMUSTEXIST,
     FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH,
 };
+use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use crate::commands;
 use crate::render::{Align, Renderer, TextRun};
@@ -132,13 +134,18 @@ pub fn pick_drop(paths: &[PathBuf]) -> Option<PathBuf> {
 /// starting in the shown photo's folder. The picked file goes through the usual open
 /// (and so through the save prompt). No App borrow is held while the dialog runs.
 pub fn open_dialog(app: &RefCell<App>, hwnd: HWND) {
-    let folder = {
+    let (folder, settings) = {
         let Ok(a) = app.try_borrow() else {
             return;
         };
-        a.viewer.folder().map(Path::to_path_buf)
+        (
+            a.viewer.folder().map(Path::to_path_buf),
+            a.settings_win.as_ref().map(|w| w.hwnd),
+        )
     };
+    let held = HeldWhileOpen::new(settings);
     let picked = pick_file(hwnd, folder.as_deref());
+    drop(held);
     // A path forwarded by another launch while the dialog was up waited for it. The
     // user's pick, made after it, wins; without a pick the forwarded path opens.
     let forwarded = app
@@ -147,6 +154,37 @@ pub fn open_dialog(app: &RefCell<App>, hwnd: HWND) {
         .and_then(|mut a| a.overlay.take_deferred_open());
     if let Some(path) = picked.or(forwarded) {
         commands::open(app, hwnd, &path);
+    }
+}
+
+/// The settings window, disabled while the modal Open dialog is up (that dialog
+/// disables only the main window): a language change there would leave the dialog's
+/// file type names, fixed once it shows, in the old language. Enabled again when
+/// dropped.
+struct HeldWhileOpen(Option<HWND>);
+
+impl HeldWhileOpen {
+    fn new(settings: Option<HWND>) -> HeldWhileOpen {
+        if let Some(h) = settings {
+            // SAFETY: plain call; a stale handle just fails.
+            unsafe {
+                let _ = EnableWindow(h, false);
+            }
+        }
+        HeldWhileOpen(settings)
+    }
+}
+
+impl Drop for HeldWhileOpen {
+    fn drop(&mut self) {
+        if let Some(h) = self.0 {
+            // SAFETY: plain calls; a window closed meanwhile is skipped.
+            unsafe {
+                if IsWindow(h).as_bool() {
+                    let _ = EnableWindow(h, true);
+                }
+            }
+        }
     }
 }
 
@@ -254,6 +292,47 @@ mod tests {
         assert_eq!(spec.split(';').count(), EXTENSIONS.len());
         assert!(spec.split(';').any(|s| s == "*.heic"));
         assert!(!spec.ends_with(';'));
+    }
+
+    /// The settings window cannot change the language (or anything else) while the
+    /// modal Open dialog is up, whose file type names are fixed once it shows; it is
+    /// usable again once the dialog closes, and a window gone meanwhile is fine.
+    #[test]
+    fn the_settings_window_is_held_while_the_open_dialog_is_up() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+        };
+        // SAFETY: plain Win32 calls on windows this test creates and destroys.
+        unsafe {
+            let make = || {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!("settings"),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    100,
+                    100,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            };
+            let settings = make();
+            let held = HeldWhileOpen::new(Some(settings));
+            assert!(!IsWindowEnabled(settings).as_bool());
+            drop(held);
+            assert!(IsWindowEnabled(settings).as_bool());
+
+            let held = HeldWhileOpen::new(Some(settings));
+            DestroyWindow(settings).unwrap();
+            drop(held);
+            drop(HeldWhileOpen::new(None));
+        }
     }
 
     #[test]
