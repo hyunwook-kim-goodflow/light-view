@@ -44,7 +44,9 @@ use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
     FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE};
+use windows::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
+};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, RegisterDeviceNotificationW, UnregisterDeviceNotification, DBT_DEVICEQUERYREMOVE,
@@ -415,6 +417,7 @@ fn watch_loop(
         HANDLE(io_done.as_raw_handle()),
     ];
     let mut reading = true;
+    let mut wait_failed = false;
     let mut debounce = Debounce::default();
     loop {
         debounce.set_slow(Duration::from_millis(slow_ms.load(Ordering::Relaxed)));
@@ -450,6 +453,7 @@ fn watch_loop(
             }
         } else if woke != WAIT_TIMEOUT {
             eprintln!("light-view: folder watch wait failed");
+            wait_failed = true;
             break;
         }
         if debounce.fire(Instant::now()) {
@@ -464,6 +468,14 @@ fn watch_loop(
         }
         let _ = read.result(dir, true);
     }
+    if wait_failed {
+        // The handle stays open until the window lets go of its device registration and
+        // says stop (a registration must end before its handle closes).
+        // SAFETY: `stop` is an owned event alive for the whole call.
+        unsafe {
+            let _ = WaitForSingleObject(HANDLE(stop.as_raw_handle()), INFINITE);
+        }
+    }
 }
 
 /// The window's folder watch and its rescans: one due (waiting for a dialog or a save
@@ -476,6 +488,9 @@ pub struct Watching {
     /// The registration kept after a query-remove released the watch, until the removal
     /// completes or fails.
     released: Option<Registration>,
+    /// The drive of `dir` was removed: following `dir` again tries to watch it (ruling
+    /// R-T7b) until that works, quietly while the drive is still gone.
+    removed: bool,
     register: Register,
     rescan_pending: bool,
     /// The id of the rescan running for this folder.
@@ -492,6 +507,7 @@ impl Default for Watching {
             watch: None,
             dir: None,
             released: None,
+            removed: false,
             register: Box::new(register_device),
             rescan_pending: false,
             running: None,
@@ -513,9 +529,13 @@ impl Watching {
             _ => false,
         };
         if same {
+            if self.removed && self.watch.is_none() {
+                self.start(hwnd);
+            }
             return;
         }
         self.stop();
+        self.removed = false;
         self.running = None;
         self.dir = dir.map(Path::to_path_buf);
         self.start(hwnd);
@@ -525,6 +545,8 @@ impl Watching {
     fn start(&mut self, hwnd: HWND) {
         let Some(dir) = &self.dir else { return };
         match FolderWatch::start(dir, hwnd) {
+            // The drive is still gone: stay unwatched without a word.
+            Err(_) if self.removed => {}
             Ok(mut w) => {
                 match (self.register)(dir, w.dir_handle, hwnd) {
                     Ok(r) => w.registration = Some(r),
@@ -535,6 +557,7 @@ impl Watching {
                     ),
                 }
                 self.watch = Some(w);
+                self.removed = false;
             }
             Err(e) => eprintln!(
                 "light-view: changes in {} are not watched: {e}",
@@ -569,8 +592,11 @@ impl Watching {
                 self.released = None;
                 self.start(hwnd);
             }
-            // `dir` stays: following the same folder does not watch it again.
-            DeviceStep::Forget => self.stop(),
+            // Unwatched; following the same folder again tries to watch it.
+            DeviceStep::Forget => {
+                self.stop();
+                self.removed = true;
+            }
             DeviceStep::Ignore => {}
         }
     }
@@ -647,13 +673,14 @@ pub fn on_device_change(
     }
     // SAFETY: a DBT_DEVTYP_HANDLE header at least this large is a DEV_BROADCAST_HANDLE.
     let ev = unsafe { &*(lparam.0 as *const DEV_BROADCAST_HANDLE) };
-    if let Ok(mut a) = app.try_borrow_mut() {
-        a.watching.on_device(
+    match app.try_borrow_mut() {
+        Ok(mut a) => a.watching.on_device(
             event,
             ev.dbch_hdevnotify.0 as isize,
             ev.dbch_handle.0 as isize,
             hwnd,
-        );
+        ),
+        Err(_) => eprintln!("light-view: device event {event:#x} came while busy; not handled"),
     }
     Some(LRESULT(1))
 }
@@ -969,19 +996,30 @@ mod tests {
         w.on_device(DBT_DEVICEREMOVECOMPLETE, id, handle, none);
         assert!(w.watch.is_some());
 
-        // Removed: unregistered, and the same folder stays unwatched.
+        // Removed: unregistered and unwatched (ruling R-T7b).
         w.on_device(DBT_DEVICEQUERYREMOVE, id2, handle2, none);
         w.on_device(DBT_DEVICEREMOVECOMPLETE, id2, handle2, none);
         assert_eq!(log.borrow()[3..], [Reg::Off(id2, false)]);
         assert!(w.watch.is_none() && w.released.is_none());
-        w.follow(Some(dir.path()), none);
+        // Following the same folder again while it is gone: still unwatched, quietly,
+        // and it keeps trying.
+        let path = dir.path().to_path_buf();
+        dir.close().unwrap();
+        w.follow(Some(&path), none);
+        w.follow(Some(&path), none);
         assert!(w.watch.is_none());
         assert_eq!(log.borrow().len(), 4);
-        // Another folder is watched again.
-        let other = tempfile::tempdir().unwrap();
-        w.follow(Some(other.path()), none);
-        assert!(w.watch.is_some());
+        // The drive is back: following the same folder (an open, a drop, a forwarded
+        // launch) watches it again; once watched, following it changes nothing.
+        std::fs::create_dir(&path).unwrap();
+        w.follow(Some(&path), none);
+        let (id3, handle3) = live(&w);
+        assert_eq!(log.borrow()[4..], [Reg::On(id3, handle3)]);
+        w.follow(Some(&path), none);
         assert_eq!(log.borrow().len(), 5);
+        w.stop();
+        assert!(released_soon(&path));
+        std::fs::remove_dir(&path).unwrap();
     }
 
     #[test]
