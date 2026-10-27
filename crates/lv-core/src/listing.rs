@@ -63,7 +63,8 @@ pub fn natural_cmp(a: &OsStr, b: &OsStr) -> Ordering {
     (a.len() - i).cmp(&(b.len() - j))
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+/// Same path, compared component by component without regard to case.
+pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| -> Vec<String> {
         p.components()
             .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
