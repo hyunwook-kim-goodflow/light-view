@@ -37,7 +37,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use lv_core::portable::{self, DataDir};
-use lv_core::settings::load_settings;
+use lv_core::settings::{load_settings, sweep_stale_temps};
 use windows::core::w;
 use windows::Win32::System::Diagnostics::Debug::{
     SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
@@ -90,6 +90,10 @@ fn main() -> anyhow::Result<()> {
         if let Some(dir) = window::crash_dir(&data) {
             crash::install(&dir);
         }
+    }
+    // A crash between writing and renaming leaves a `settings.toml.<pid>.tmp` behind.
+    if let Some(path) = &settings_path {
+        sweep_stale_temps(path, std::time::SystemTime::now());
     }
     let settings = settings_path
         .as_deref()
