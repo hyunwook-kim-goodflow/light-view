@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use lv_core::decode::DecodeLimits;
+use lv_core::portable::DataDir;
 use lv_core::settings::{update_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -727,23 +728,16 @@ fn dip_per_px(hwnd: HWND) -> f32 {
     }
 }
 
-/// `%APPDATA%\light-view\settings.toml`, or `None` if the folder cannot be resolved.
-pub fn settings_path() -> Option<PathBuf> {
-    Some(
-        known_folder(&FOLDERID_RoamingAppData)?
-            .join("light-view")
-            .join("settings.toml"),
-    )
+/// The settings file: `%APPDATA%\light-view\settings.toml`, or `data\settings.toml` beside a
+/// portable exe; `None` if the folder cannot be resolved.
+pub fn settings_path(data: &DataDir) -> Option<PathBuf> {
+    data.settings_file(|| known_folder(&FOLDERID_RoamingAppData))
 }
 
-/// `%LOCALAPPDATA%\light-view\crashes` (ruling R6). Task 7 moves it next to the exe
-/// for the portable build.
-pub fn crash_dir() -> Option<PathBuf> {
-    Some(
-        known_folder(&FOLDERID_LocalAppData)?
-            .join("light-view")
-            .join("crashes"),
-    )
+/// The crash record folder (ruling R6): `%LOCALAPPDATA%\light-view\crashes`, or
+/// `data\crashes` beside a portable exe.
+pub fn crash_dir(data: &DataDir) -> Option<PathBuf> {
+    data.crash_dir(|| known_folder(&FOLDERID_LocalAppData))
 }
 
 fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {

@@ -1,0 +1,218 @@
+# Release build for a version tag (v1.2.3): build -> package (portable zip + installer
+# input, scripts/package.ps1) -> Inno Setup -> optional code signing -> SHA-256 checksums
+# -> a DRAFT GitHub release. Publishing the draft is done by a person.
+#
+# Code signing (ruling R5) runs only when the repository has the secret
+# SIGNPATH_API_TOKEN (with the variables SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG
+# and SIGNPATH_SIGNING_POLICY_SLUG); without it the files ship unsigned with checksums.
+#
+# Third-party actions are pinned to full commit SHAs (the tag is in the comment), as in
+# ci.yml.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
+  CARGO_ABOUT_VERSION: "0.9.3"
+  # Chocolatey checks the installer's checksum embedded in this package version.
+  INNO_SETUP_VERSION: "6.7.1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build, package and sign (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      # Secrets cannot appear in `if:`; this says whether signing is set up.
+      SIGNING_ENABLED: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # v1.2.3 -> 1.2.3; package.ps1 fails unless it is the version in Cargo.toml.
+      - name: Version from tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME is not v<major>.<minor>.<patch>"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .vcpkg/archives
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-x64-windows-
+
+      - name: Native dependencies (vcpkg)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
+
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
+
+      # The same build package.ps1 makes (C runtime linked statically), done here so the
+      # executables can be signed before they are packaged.
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked -p lv-app -p lv-worker
+
+      - name: Upload executables for signing
+        id: unsigned-exes
+        if: env.SIGNING_ENABLED == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-exes
+          path: |
+            target/release/lv-app.exe
+            target/release/lv-worker.exe
+          if-no-files-found: error
+
+      - name: Sign executables (SignPath)
+        if: env.SIGNING_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: executables
+          github-artifact-id: ${{ steps.unsigned-exes.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exes
+
+      - name: Use the signed executables
+        if: env.SIGNING_ENABLED == 'true'
+        run: cp -f signed-exes/lv-app.exe signed-exes/lv-worker.exe target/release/
+
+      # dist/light-view-<version>-portable.zip, dist/stage (installer input) and the
+      # notices; fails if the unpacked zip is over 30 MB.
+      - name: Package
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version "${{ steps.version.outputs.version }}" -SkipBuild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --version "$env:INNO_SETUP_VERSION" --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer/light-view.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload installer for signing
+        id: unsigned-setup
+        if: env.SIGNING_ENABLED == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-setup
+          path: dist/light-view-${{ steps.version.outputs.version }}-setup.exe
+          if-no-files-found: error
+
+      - name: Sign installer (SignPath)
+        if: env.SIGNING_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+
+      - name: Use the signed installer
+        if: env.SIGNING_ENABLED == 'true'
+        run: cp -f signed-setup/*-setup.exe dist/
+
+      - name: Not signed
+        if: env.SIGNING_ENABLED != 'true'
+        run: echo "::warning::SIGNPATH_API_TOKEN is not set; the release files are not code-signed (checksums only)."
+
+      # SHA256SUMS.txt over the final zip and installer.
+      - name: Checksums
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -ChecksumsOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: |
+            dist/light-view-${{ steps.version.outputs.version }}-portable.zip
+            dist/light-view-${{ steps.version.outputs.version }}-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only job that can write: it creates the draft release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release-files
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cd release-files
+          sha256sum --check SHA256SUMS.txt
+          notes="light-view $VERSION
+
+          - light-view-$VERSION-setup.exe: 설치판 (per-user install, no administrator rights)
+          - light-view-$VERSION-portable.zip: 포터블판 (settings stay next to the exe)
+          - SHA256SUMS.txt: SHA-256 checksums. Check with \`Get-FileHash <file>\` (README).
+
+          SHA256SUMS.txt:
+          \`\`\`
+          $(cat SHA256SUMS.txt)
+          \`\`\`"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "light-view $VERSION" --notes "$notes" \
+            "light-view-$VERSION-setup.exe" "light-view-$VERSION-portable.zip" SHA256SUMS.txt

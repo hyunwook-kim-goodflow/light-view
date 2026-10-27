@@ -21,7 +21,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows::Win32::Security::{
     CreateWellKnownSid, EqualSid, FreeSid, GetAce, WinBuiltinAnyPackageSid, ACCESS_ALLOWED_ACE,
@@ -173,6 +173,23 @@ fn create_or_derive(name: &str) -> windows::core::Result<OwnedSid> {
             Ok(OwnedSid(sid))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Deletes the worker's AppContainer profile and the folders Windows made for it
+/// (`light-view.exe --uninstall-cleanup`, run by the uninstaller). A profile that is not
+/// there is fine; a failure is only logged.
+pub fn delete_profile() {
+    delete_profile_named(PROFILE_NAME);
+}
+
+fn delete_profile_named(name: &str) {
+    let name_w = wide(name);
+    // SAFETY: NUL-terminated name that outlives the call.
+    if let Err(e) = unsafe { DeleteAppContainerProfile(PCWSTR(name_w.as_ptr())) } {
+        log(&format!(
+            "could not delete AppContainer profile {name:?}: {e}"
+        ));
     }
 }
 
@@ -522,6 +539,31 @@ mod tests {
             pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
             (32, 64),
         );
+    }
+
+    #[test]
+    fn uninstall_cleanup_deletes_profile() {
+        // Not PROFILE_NAME: other tests start workers in that one.
+        const NAME: &str = "goodflow.LightView.Worker.CleanupTest";
+        drop(profile_sid_named(NAME).expect("profile created"));
+        delete_profile_named(NAME);
+
+        // Gone: creating it again succeeds instead of answering ERROR_ALREADY_EXISTS.
+        let name_w = wide(NAME);
+        // SAFETY: NUL-terminated strings that outlive the call; the SID is freed below.
+        let created = unsafe {
+            CreateAppContainerProfile(
+                PCWSTR(name_w.as_ptr()),
+                PCWSTR(name_w.as_ptr()),
+                PCWSTR(name_w.as_ptr()),
+                None,
+            )
+        };
+        drop(OwnedSid(created.expect("the profile was deleted")));
+
+        delete_profile_named(NAME);
+        // Deleting a profile that is not there does not fail or panic.
+        delete_profile_named(NAME);
     }
 
     #[test]

@@ -1,10 +1,28 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Run `scripts/setup-deps.ps1` once, then `cargo build --release`. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). The DLLs and executables need the Microsoft Visual C++ 2015–2022 (x64) runtime. HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
 윈도우에서 HEIC(아이폰 사진)를 보려면 마이크로소프트의 유료 HEVC 확장이 필요하고, 기존 뷰어 중에도 HEIC를 유료 기능으로 묶어 둔 것이 있어요. light-view는 일상 사진을 무료로, 빠르게, 안전하게 여는 가벼운 윈도우 이미지 뷰어를 목표로 해요. 오픈소스로 공개하고 무료로 배포할 계획이에요. 설계 문서는 [`docs/superpowers/specs/2026-10-26-light-view-design.md`](docs/superpowers/specs/2026-10-26-light-view-design.md)에 있어요.
+
+## 설치와 포터블
+
+[GitHub Releases](https://github.com/goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
+
+- **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록은 지우고 설정은 남겨요.
+- **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 레지스트리와 `%APPDATA%`는 건드리지 않아요. 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(AppContainer는 설치 폴더에 권한을 주는 설치판에서만 써요).
+
+**SmartScreen 경고:** 코드 서명이 없는 릴리스는 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있어요. 아래처럼 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 누르면 돼요. zip에서 푼 파일에 경고가 뜨면 zip 파일의 속성에서 **차단 해제**를 체크하고 다시 풀어도 돼요.
+
+**SHA-256 확인:** 릴리스의 `SHA256SUMS.txt`와 받은 파일의 해시가 같은지 봐요. PowerShell에서:
+
+```
+Get-FileHash .\light-view-x.y.z-setup.exe -Algorithm SHA256
+Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
+```
+
+출력의 `Hash`가 `SHA256SUMS.txt`의 같은 이름 줄과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.
 
 ## 현재 상태 (M4)
 
@@ -51,7 +69,7 @@ cargo build --release
 - vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 다운로드·바이너리 캐시도 `.vcpkg\` 안에만 두고, 전역 설치는 하지 않아요.
 - `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이), libde265, libjpeg-turbo(와 그것이 쓰는 libspng·zlib)를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
 - x265, x264, aom, dav1d, kvazaar, openjpeg가 설치돼 있거나 libheif가 `jpeg` 기능으로 빌드됐으면 실패해요. 이 검사만 따로 돌릴 때는 `-CheckOnly`를 써요.
-- `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`(과 `jpeg62.dll`)을 `target\debug`, `target\release`에 복사해요.
+- `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`(과 쓰지 않는 `jpeg62.dll`)을 `target\debug`, `target\release`에 복사해요.
 
 `cargo clean` 뒤처럼 DLL만 다시 복사하면 될 때는 vcpkg 단계를 건너뛰는 `-CopyOnly`를 써요.
 
@@ -63,7 +81,24 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 
 `cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC·JPEG 회전 작업자), `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`이 함께 있어야 해요. 이 파일들을 한 폴더에 두면 그대로 실행돼요. 작업자는 이 DLL을 모두 정적으로 가져오므로 하나라도 없으면 HEIC도 열리지 않아요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
 
-이 실행 파일과 DLL은 모두 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, `heif.dll`과 `libde265.dll`은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio나 이 패키지가 설치된 컴퓨터에는 이미 있어요. 다른 컴퓨터로 옮겨 실행하려면 이 패키지를 먼저 설치해야 해요(설치 파일은 M5에서 만들어요).
+`cargo build`로 만든 실행 파일과 DLL은 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, `heif.dll`과 `libde265.dll`은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio가 설치된 컴퓨터에는 이미 있어요. 아래처럼 만든 배포 파일은 이 패키지 없이 실행돼요.
+
+### 배포 파일 만들기
+
+```
+cargo install --locked cargo-about --version 0.9.3 --features cli
+powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version 0.1.0
+```
+
+`-Version`은 `Cargo.toml`의 버전과 같아야 해요. 스크립트가 하는 일:
+
+- `light-view.exe`(= `lv-app`)와 `lv-worker.exe`를 C 런타임 정적 링크(`+crt-static`)로 릴리스 빌드해요. `light-view.exe`는 DLL을 System32에서만 찾으므로 Visual C++ 런타임 DLL에 기대지 않아야 해요.
+- `THIRD_PARTY_NOTICES.md`를 만들어요: `notices/native.md`(C 라이브러리 고지), `cargo about generate`(`about.toml`, `about.hbs`)이 모은 모든 크레이트의 라이선스, `notices/`의 라이선스 전문(LGPL-3.0, GPL-3.0, libjpeg-turbo, IJG, libspng, libpng, zlib). 저장소의 `THIRD_PARTY_NOTICES.md`는 `-NoticesOnly`로 다시 만들어요.
+- `dist\stage`(설치 파일 입력)에 실행 파일, vcpkg DLL, 그 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`; Visual Studio의 재배포 폴더에서 복사), 고지, 라이선스 두 개, `README.txt`를 넣어요.
+- `dist\light-view-x.y.z-portable.zip`(stage + `portable.txt`)을 만들고, 다시 풀어서 30 MB를 넘으면 실패해요. 지금은 약 7.6 MB(zip 3.1 MB)예요.
+- `dist\SHA256SUMS.txt`를 써요.
+
+설치 파일은 `installer/light-view.iss`(Inno Setup 6 사용자별 모드)를 릴리스 워크플로(`.github/workflows/release.yml`)가 컴파일해요. 로컬에서는 컴파일하지 않고, `cargo test -p lv-app --test installer_script`가 필요한 지시문이 있는지만 확인해요. 워크플로는 `v*` 태그에서 빌드 → 패키징 → Inno Setup → (`SIGNPATH_API_TOKEN` 시크릿이 있으면) SignPath 서명 → 체크섬 → **초안** 릴리스까지 하고, 게시는 사람이 해요.
 
 ## 사용법
 
@@ -171,7 +206,7 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 - (M4) **영어 화면:** 설정에서 언어를 English로 바꾸고(또는 윈도우 표시 언어를 영어로 두고 "자동"), 시작 화면, 메뉴, 정보, 저장 확인·영구 삭제 대화상자, 알림, EXIF 카드와 목록, 설정 창, 버튼 줄 도움말의 글자가 잘리거나 넘치지 않나요. 특히 영구 삭제 확인의 긴 영어 제목이 카드 안에 들어가나요
 - (M4) 메뉴의 **폴더에서 보기**가 탐색기를 열고 그 사진을 선택해 주나요(네트워크 드라이브와 긴 경로 사진도)
 - (M4) 메뉴와 설정 창의 **기본 앱 설정 열기**가 윈도우 설정의 기본 앱 페이지를 여나요
-- (M4) **오픈소스 고지:** `THIRD_PARTY_NOTICES.md`를 `lv-app.exe` 옆에 두고 정보 → [오픈소스 고지]를 누르면 기본 프로그램으로 열리나요(파일이 없으면 "열지 못했어요")
+- (M4) **오픈소스 고지:** `THIRD_PARTY_NOTICES.md`를 `lv-app.exe`(배포판은 `light-view.exe`) 옆에 두고 정보 → [오픈소스 고지]를 누르면 기본 프로그램으로 열리나요(파일이 없으면 "열지 못했어요")
 - (M4) 탐색기에서 사진, 폴더, 지원하지 않는 파일을 실제로 **끌어다 놓기**: 시작 화면과 사진을 보는 중 모두에서 사진은 열리고, 폴더는 첫 사진이 열리고, 지원하지 않는 파일만 놓으면 "열 수 있는 사진이 없어요"가 나오나요
 - (M4) 설정의 **다른 사진을 열 때: 새 창**으로 바꾼 뒤 탐색기에서 다른 사진을 더블클릭하면 새 창이 뜨고, **같은 창**으로 되돌리면 그다음부터 한 창에서 열리나요("새 창"일 때 띄운 창은 단일 창 확인을 하지 않으므로, 그 창들을 닫고 새로 연 창부터 한 창에서 열려요)
 - (M4) **창 두 개에서 설정:** "새 창"으로 창을 두 개 띄우고 각각 다른 설정(예: 한쪽은 언어, 다른 쪽은 메모리 한도)을 바꾼 뒤 둘 다 닫아도, `settings.toml`에 두 변경이 모두 남아 있나요
@@ -182,7 +217,7 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 
 light-view의 코드는 [MIT](LICENSE-MIT) 또는 [Apache-2.0](LICENSE-APACHE) 중 원하는 쪽으로 쓸 수 있어요(MIT OR Apache-2.0).
 
-서드파티 구성 요소의 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)에 있어요. libheif·libde265(LGPL-3.0-or-later)는 `lv-worker.exe`만 DLL로 동적 링크하고, 같은 이름의 DLL로 바꿔 쓸 수 있어요. 모든 의존 크레이트의 전체 목록은 배포 단계(M5)에서 자동으로 모을 예정이에요.
+서드파티 구성 요소의 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)에 있어요. libheif·libde265(LGPL-3.0-or-later)는 `lv-worker.exe`만 DLL로 동적 링크하고, 같은 이름의 DLL로 바꿔 쓸 수 있어요. 실행 파일에 들어가는 모든 크레이트의 라이선스(`cargo about`으로 모아요)와 라이선스 전문도 이 파일에 있고, 설치판과 포터블판에 함께 들어가요.
 
 **HEVC 특허:** HEIC 사진은 HEVC로 압축돼 있고, HEVC에는 특허 풀이 있어요. 비상업 무료 배포에서 문제가 된 사례는 드물지만 위험이 0은 아니에요. light-view는 HEVC 디코더(libde265)만 넣고 인코더는 넣지 않아요. (법률 자문 아님)
 
