@@ -13,6 +13,7 @@ use std::fs;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -22,8 +23,11 @@ use std::time::Duration;
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use lv_core::listing::same_path;
 use windows::core::{implement, HRESULT, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{E_ABORT, HWND};
-use windows::Win32::Storage::FileSystem::{DeleteFileW, GetDriveTypeW, GetVolumePathNameW};
+use windows::Win32::Foundation::{E_ABORT, HANDLE, HWND};
+use windows::Win32::Storage::FileSystem::{
+    DeleteFileW, FileAttributeTagInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetVolumePathNameW, FILE_ATTRIBUTE_TAG_INFO,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -50,6 +54,8 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const DELETE: u32 = 0x0001_0000;
 const FILE_SHARE_ALL: u32 = 0x7;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
@@ -200,10 +206,18 @@ fn check(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
         .map_err(|e| io_refusal(&e))
 }
 
-/// A regular file (no folder, link or junction) with the identity `id`.
+/// A regular file (no folder, link or junction) with the identity `id`. A reparse point
+/// passes only with a tag that keeps it a plain file ([`file_like_reparse_tag`]), such as a
+/// OneDrive placeholder.
 fn check_file(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
-    let meta = fs::symlink_metadata(to_extended_path(path)).map_err(|_| Refusal::Changed)?;
-    if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    let ext = to_extended_path(path);
+    let meta = fs::symlink_metadata(&ext).map_err(|_| Refusal::Changed)?;
+    if !meta.is_file() {
+        return Err(Refusal::NotAFile);
+    }
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && !reparse_tag(&ext).is_ok_and(file_like_reparse_tag)
+    {
         return Err(Refusal::NotAFile);
     }
     // `Missing` may be a transient error: never delete then either.
@@ -211,6 +225,49 @@ fn check_file(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
         return Err(Refusal::Changed);
     }
     Ok(())
+}
+
+const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
+/// The cloud tags `IO_REPARSE_TAG_CLOUD_1` to `_F` differ from it only in these bits.
+const CLOUD_VARIANT_BITS: u32 = 0x0000_F000;
+const IO_REPARSE_TAG_DEDUP: u32 = 0x8000_0013;
+const IO_REPARSE_TAG_WOF: u32 = 0x8000_0017;
+/// The name-surrogate bit (`IsReparseTagNameSurrogate`): the reparse point stands for
+/// another named entity (a symbolic link, a junction and the like).
+const NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// Whether a reparse point with `tag` is still the file itself: cloud placeholders
+/// (OneDrive, every `IO_REPARSE_TAG_CLOUD*` variant), deduplicated and WOF-compressed
+/// files. Name surrogates (links, junctions) and unknown tags are not.
+fn file_like_reparse_tag(tag: u32) -> bool {
+    if tag & NAME_SURROGATE != 0 {
+        return false;
+    }
+    tag & !CLOUD_VARIANT_BITS == IO_REPARSE_TAG_CLOUD
+        || tag == IO_REPARSE_TAG_DEDUP
+        || tag == IO_REPARSE_TAG_WOF
+}
+
+/// The reparse tag of the entry at `ext` itself (never what it points to), read through a
+/// handle that has no data access (opening it recalls no cloud file).
+fn reparse_tag(ext: &Path) -> io::Result<u32> {
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_ALL)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(ext)?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: the handle is open for the whole call and `info` is a writable buffer of
+    // exactly the size passed.
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            FileAttributeTagInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }?;
+    Ok(info.ReparseTag)
 }
 
 fn io_refusal(e: &io::Error) -> Refusal {
@@ -908,6 +965,36 @@ mod tests {
         assert!(trash.binned().is_empty());
         assert_eq!(d.undo(), None);
         assert!(f.exists("b.jpg"));
+    }
+
+    #[test]
+    fn only_file_like_reparse_tags_pass() {
+        // OneDrive placeholders: IO_REPARSE_TAG_CLOUD and CLOUD_1 to CLOUD_F.
+        assert!(file_like_reparse_tag(0x9000_001A));
+        for n in 1..=0xF_u32 {
+            let tag = 0x9000_001A | (n << 12);
+            assert!(file_like_reparse_tag(tag), "{tag:#x}");
+        }
+        assert!(file_like_reparse_tag(0x8000_0013), "dedup");
+        assert!(file_like_reparse_tag(0x8000_0017), "WOF");
+        for tag in [
+            0xA000_000C, // symbolic link
+            0xA000_0003, // junction (mount point)
+            0x8000_001B, // AppExecLink
+            0x8000_0014, // NFS
+            0x9000_101B, // not a cloud tag, though close to one
+            0x9000_001B,
+            0xB000_001A, // a cloud tag with the name-surrogate bit
+            0,
+        ] {
+            assert!(!file_like_reparse_tag(tag), "{tag:#x}");
+        }
+        // A real symbolic link reads as one (creating one may need Developer Mode).
+        let f = Folder::new(&["a.jpg"]);
+        let link = f.path("link.jpg");
+        if std::os::windows::fs::symlink_file(f.path("a.jpg"), &link).is_ok() {
+            assert_eq!(reparse_tag(&to_extended_path(&link)).unwrap(), 0xA000_000C);
+        }
     }
 
     #[test]
