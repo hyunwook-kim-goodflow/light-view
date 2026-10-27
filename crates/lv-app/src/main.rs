@@ -1,8 +1,10 @@
 // Release builds are GUI-subsystem (no console window); debug builds keep stderr.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clipboard;
 mod commands;
 mod delete;
+mod exif_card;
 mod fullscreen;
 mod input;
 mod instance;

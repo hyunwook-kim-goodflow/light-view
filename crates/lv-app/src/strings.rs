@@ -102,11 +102,20 @@ pub enum S {
     TipInfo,
     TipDelete,
     TipPin,
+    // EXIF card. `ExifLocation` and `ExifModified` label a line ("위치 37.5, 127.0").
+    ExifNone,
+    ExifShowAll,
+    ExifCopy,
+    ExifLocation,
+    ExifModified,
+    ToastCopied,
+    TimeAm,
+    TimePm,
 }
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 38] = [
+const ALL: [S; 46] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -145,6 +154,14 @@ const ALL: [S; 38] = [
     S::TipInfo,
     S::TipDelete,
     S::TipPin,
+    S::ExifNone,
+    S::ExifShowAll,
+    S::ExifCopy,
+    S::ExifLocation,
+    S::ExifModified,
+    S::ToastCopied,
+    S::TimeAm,
+    S::TimePm,
 ];
 
 /// The text for `key` in `lang`.
@@ -221,6 +238,14 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::TipInfo => ("정보 (I)", "Info (I)"),
         S::TipDelete => ("삭제 (Delete)", "Delete (Del)"),
         S::TipPin => ("메뉴 고정", "Pin menu"),
+        S::ExifNone => ("EXIF 정보가 없어요", "No EXIF information"),
+        S::ExifShowAll => ("전체 보기", "Show all"),
+        S::ExifCopy => ("복사", "Copy"),
+        S::ExifLocation => ("위치", "Location"),
+        S::ExifModified => ("수정", "Modified"),
+        S::ToastCopied => ("복사했어요", "Copied"),
+        S::TimeAm => ("오전", "AM"),
+        S::TimePm => ("오후", "PM"),
     };
     match lang {
         Lang::Ko => ko,
@@ -248,6 +273,35 @@ pub fn too_large_with_size(width: u32, height: u32) -> String {
     format!("{} ({width}×{height})", t(S::TooLarge))
 }
 
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// A calendar date: "2026. 10. 3" in Korean, "Oct 3, 2026" in English. `month` is 1..=12.
+pub fn date_text(lang: Lang, year: u16, month: u8, day: u8) -> String {
+    match lang {
+        Lang::Ko => format!("{year}. {month}. {day}"),
+        Lang::En => {
+            let name = MONTHS[usize::from(month.clamp(1, 12)) - 1];
+            format!("{name} {day}, {year}")
+        }
+    }
+}
+
+/// A 12-hour clock time: "오후 5:42" in Korean, "5:42 PM" in English. `hour` is 0..=23.
+pub fn time_text(lang: Lang, hour: u8, minute: u8) -> String {
+    let half = if hour < 12 { S::TimeAm } else { S::TimePm };
+    let h12 = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    let half = text(lang, half);
+    match lang {
+        Lang::Ko => format!("{half} {h12}:{minute:02}"),
+        Lang::En => format!("{h12}:{minute:02} {half}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +319,7 @@ mod tests {
     fn all_lists_every_key_once() {
         // The last variant is the sentinel: a key added to `S` after it must be
         // added to `ALL` too, or the tests above would skip it.
-        assert_eq!(ALL.last(), Some(&S::TipPin));
+        assert_eq!(ALL.last(), Some(&S::TimePm));
         for (i, a) in ALL.iter().enumerate() {
             assert!(!ALL[i + 1..].contains(a), "{a:?} listed twice");
         }
@@ -303,6 +357,22 @@ mod tests {
             too_large_with_size(30000, 20000),
             "너무 커서 열 수 없어요 (30000×20000)"
         );
+    }
+
+    #[test]
+    fn dates_and_times_per_language() {
+        assert_eq!(date_text(Lang::Ko, 2026, 10, 3), "2026. 10. 3");
+        assert_eq!(date_text(Lang::En, 2026, 10, 3), "Oct 3, 2026");
+        assert_eq!(date_text(Lang::En, 2026, 1, 31), "Jan 31, 2026");
+        assert_eq!(time_text(Lang::Ko, 17, 42), "오후 5:42");
+        assert_eq!(time_text(Lang::En, 17, 42), "5:42 PM");
+        assert_eq!(time_text(Lang::Ko, 0, 5), "오전 12:05");
+        assert_eq!(time_text(Lang::En, 12, 0), "12:00 PM");
+        assert_eq!(time_text(Lang::En, 9, 7), "9:07 AM");
+        assert_eq!(text(Lang::Ko, S::ExifNone), "EXIF 정보가 없어요");
+        assert_eq!(text(Lang::Ko, S::ExifShowAll), "전체 보기");
+        assert_eq!(text(Lang::Ko, S::ExifCopy), "복사");
+        assert_eq!(text(Lang::Ko, S::ToastCopied), "복사했어요");
     }
 
     /// The Korean text the app shipped with through M3, byte for byte (the constants

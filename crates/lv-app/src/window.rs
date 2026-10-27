@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::commands::{self, HwndCell, SaveDone, Saving};
 use crate::delete::{CommitReport, Deleter, ShellTrash};
+use crate::exif_card::{self, CardInfo, CardView, ExifCard};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
@@ -69,6 +70,8 @@ pub struct App {
     icon_family: &'static str,
     pub pointer: Pointer,
     pub overlay: Overlay,
+    /// The EXIF card (spec §4.6), drawn under the overlay.
+    pub exif_card: ExifCard,
     /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
     pub pool: Option<Arc<WorkerPool>>,
     /// The prefetcher's decode limits; a save checks its result within them.
@@ -114,6 +117,7 @@ pub fn run(
         icon_family: "",
         pointer: Pointer::default(),
         overlay: Overlay::default(),
+        exif_card: ExifCard::default(),
         pool,
         decode_limits,
         saving: None,
@@ -295,6 +299,33 @@ impl App {
         })
     }
 
+    /// The open EXIF card's state for the shown photo, or `None` when it is closed (or
+    /// no file is open). Moves its selection back to the top when the photo changed.
+    pub fn card_model(&mut self) -> Option<exif_card::Model> {
+        if self.exif_card.is_open() {
+            self.exif_card.sync(self.viewer.generation());
+        }
+        self.card_layout()
+    }
+
+    /// Like `card_model`, without touching the card's state (for hit tests).
+    pub fn card_layout(&self) -> Option<exif_card::Model> {
+        if !self.exif_card.is_open() || !self.viewer.has_file() {
+            return None;
+        }
+        let info = CardInfo {
+            exif: self.viewer.exif().cloned(),
+            file: self.viewer.info(),
+            modified: self.viewer.modified().and_then(exif_card::local_time),
+        };
+        let pinned = self.toolbar_input().is_some_and(|i| i.pinned);
+        let bottom = exif_card::card_bottom(self.client_dips, pinned);
+        Some(
+            self.exif_card
+                .model(info, self.client_dips, bottom, crate::strings::current()),
+        )
+    }
+
     /// Pins or unpins the toolbar, saves the choice and resizes the image area.
     pub fn toggle_pin(&mut self, hwnd: HWND) {
         self.settings.toolbar_pinned = !self.settings.toolbar_pinned;
@@ -318,6 +349,7 @@ impl App {
         let (view_w, view_h) = self.view_dips();
         let now_ms = self.pointer.now_ms();
         let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
+        let card = self.card_model();
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -348,6 +380,14 @@ impl App {
                 info: (&info, &zoom),
             };
             toolbar::draw(r, &view);
+        }
+        if let Some(m) = &card {
+            let view = CardView {
+                palette: p,
+                dark: self.dark,
+                icon_family: self.icon_family,
+            };
+            exif_card::draw(r, &self.exif_card, m, &view);
         }
         let view = OverlayView {
             client: self.client_dips,
