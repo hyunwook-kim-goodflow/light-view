@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+jpeg-decoder = { version = "0.3", default-features = false }
 kamadak-exif = "0.6"
 qcms = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }

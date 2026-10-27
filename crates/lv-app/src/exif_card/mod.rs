@@ -603,6 +603,7 @@ mod tests {
             exif: Some(data(n)),
             file: Some((4032, 3024, 2_500_000)),
             modified: None,
+            scaled_from: None,
         }
     }
 
@@ -664,6 +665,7 @@ mod tests {
             exif: None,
             file: Some((10, 20, 300)),
             modified: Some((2026, 10, 3, 9, 5)),
+            scaled_from: None,
         };
         let text = card_text(&none, Lang::Ko);
         assert_eq!(text.heading, "EXIF 정보가 없어요");
@@ -690,6 +692,33 @@ mod tests {
         assert_eq!(
             text.lines,
             [Line::Exposure("1/250s \u{b7} f/1.8 \u{b7} ISO 64".into())]
+        );
+    }
+
+    #[test]
+    fn photo_opened_at_reduced_size_says_so_beside_its_full_size() {
+        let scaled = CardInfo {
+            file: Some((2000, 1500, 9_000_000)),
+            scaled_from: Some((8000, 6000)),
+            ..info(4)
+        };
+        let size = |lang| card_text(&scaled, lang).lines[2].clone();
+        assert_eq!(
+            size(Lang::Ko),
+            Line::Plain("8000×6000 \u{b7} 8.6 MB \u{b7} 축소해서 열었어요".into())
+        );
+        assert_eq!(
+            size(Lang::En),
+            Line::Plain("8000×6000 \u{b7} 8.6 MB \u{b7} Opened at reduced size".into())
+        );
+        // Without EXIF too.
+        let bare = CardInfo {
+            exif: None,
+            ..scaled
+        };
+        assert_eq!(
+            card_text(&bare, Lang::Ko).lines[0],
+            Line::Plain("8000×6000 \u{b7} 8.6 MB \u{b7} 축소해서 열었어요".into())
         );
     }
 

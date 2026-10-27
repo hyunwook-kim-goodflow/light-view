@@ -16,6 +16,8 @@ use crate::color::{premultiply_to_bgra, ColorSource, SrgbConverter};
 use crate::exif_info::ExifData;
 use crate::format::{sniff_format, ImageFormat, SNIFF_LEN};
 
+pub mod scaled_jpeg;
+
 /// One sRGB, premultiplied BGRA8 frame.
 pub struct Frame {
     pub bgra: Vec<u8>,
@@ -38,6 +40,9 @@ pub struct DecodedImage {
     /// The file's EXIF, parsed from the same bytes on the decoding thread (ruling R5),
     /// so the UI never reads the file for it. `None` without readable EXIF.
     pub exif: Option<Arc<ExifData>>,
+    /// The full size (oriented, like `width` and `height`) when a JPEG over the pixel
+    /// limit was opened at reduced size (ruling R1); `None` otherwise.
+    pub scaled_from: Option<(u32, u32)>,
 }
 
 impl fmt::Debug for DecodedImage {
@@ -246,14 +251,15 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     let (width, height) = ImageReader::with_format(Cursor::new(bytes), img_format)
         .into_dimensions()
         .map_err(corrupt)?;
-    if u64::from(width) * u64::from(height) > limits.max_pixels {
+    let over_limit = u64::from(width) * u64::from(height) > limits.max_pixels;
+    if over_limit && format != ImageFormat::Jpeg {
         return Err(DecodeError::TooLarge { width, height });
     }
 
     let byte_len = bytes.len() as u64;
     let exif = ExifData::read(bytes).map(Arc::new);
-    let finish = |frames: Vec<RgbaFrame>, icc: Option<Vec<u8>>, orientation: u16| {
-        let (frames, width, height) = to_output(frames, width, height, icc.as_deref(), orientation);
+    let output = |frames: Vec<RgbaFrame>, (w, h), icc: Option<Vec<u8>>, orientation: u16| {
+        let (frames, width, height) = to_output(frames, w, h, icc.as_deref(), orientation);
         DecodedImage {
             width,
             height,
@@ -261,8 +267,30 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
             format,
             byte_len,
             exif: exif.clone(),
+            scaled_from: None,
         }
     };
+    let finish = |frames, icc, orientation| output(frames, (width, height), icc, orientation);
+
+    if over_limit {
+        // A JPEG over the limit opens at reduced size (ruling R1), oriented and color
+        // converted like the full one.
+        let scaled = scaled_jpeg::decode(bytes, width, height, limits)?;
+        let orientation = exif_orientation(bytes);
+        let mut image = output(
+            vec![scaled.frame],
+            (scaled.width, scaled.height),
+            scaled.icc,
+            orientation,
+        );
+        let swap = (5..=8).contains(&orientation);
+        image.scaled_from = Some(if swap {
+            (height, width)
+        } else {
+            (width, height)
+        });
+        return Ok(image);
+    }
 
     match format {
         ImageFormat::Gif => {

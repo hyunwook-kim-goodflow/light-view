@@ -37,6 +37,8 @@ pub struct CardInfo {
     pub exif: Option<Arc<ExifData>>,
     pub file: Option<(u32, u32, u64)>,
     pub modified: Option<DateTime>,
+    /// The full size, when the photo was opened at reduced size (ruling R1).
+    pub scaled_from: Option<(u32, u32)>,
 }
 
 /// `YYYY:MM:DD HH:MM[:SS]` as stored in EXIF; `None` when it is not a real date.
@@ -65,9 +67,15 @@ pub fn taken_lines(raw: &str, lang: Lang) -> (String, Option<String>) {
 }
 
 pub fn card_text(info: &CardInfo, lang: Lang) -> CardText {
-    let file = info
-        .file
-        .map(|(w, h, bytes)| Line::Plain(info_text(w, h, bytes)));
+    // A photo opened at reduced size shows its full size, and says so beside it.
+    let file = info.file.map(|(w, h, bytes)| match info.scaled_from {
+        Some((w, h)) => Line::Plain(format!(
+            "{} \u{b7} {}",
+            info_text(w, h, bytes),
+            text(lang, S::ScaledOpen)
+        )),
+        None => Line::Plain(info_text(w, h, bytes)),
+    });
     let Some(exif) = &info.exif else {
         let modified = info.modified.map(|(y, m, d, h, min)| {
             Line::Plain(format!(

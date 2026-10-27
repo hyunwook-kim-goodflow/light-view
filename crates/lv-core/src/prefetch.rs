@@ -327,6 +327,7 @@ mod tests {
             format: ImageFormat::Png,
             byte_len: 0,
             exif: None,
+            scaled_from: None,
         }
     }
 

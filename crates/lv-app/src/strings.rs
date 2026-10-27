@@ -108,6 +108,8 @@ pub enum S {
     ExifCopy,
     ExifLocation,
     ExifModified,
+    /// Beside the full size of a JPEG opened at reduced size (ruling R1).
+    ScaledOpen,
     ToastCopied,
     TimeAm,
     TimePm,
@@ -161,7 +163,7 @@ pub enum S {
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 86] = [
+const ALL: [S; 87] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -205,6 +207,7 @@ const ALL: [S; 86] = [
     S::ExifCopy,
     S::ExifLocation,
     S::ExifModified,
+    S::ScaledOpen,
     S::ToastCopied,
     S::TimeAm,
     S::TimePm,
@@ -329,6 +332,7 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::ExifCopy => ("복사", "Copy"),
         S::ExifLocation => ("위치", "Location"),
         S::ExifModified => ("수정", "Modified"),
+        S::ScaledOpen => ("축소해서 열었어요", "Opened at reduced size"),
         S::ToastCopied => ("복사했어요", "Copied"),
         S::TimeAm => ("오전", "AM"),
         S::TimePm => ("오후", "PM"),
@@ -510,6 +514,8 @@ mod tests {
         assert_eq!(text(Lang::Ko, S::ExifNone), "EXIF 정보가 없어요");
         assert_eq!(text(Lang::Ko, S::ExifShowAll), "전체 보기");
         assert_eq!(text(Lang::Ko, S::ExifCopy), "복사");
+        assert_eq!(text(Lang::Ko, S::ScaledOpen), "축소해서 열었어요");
+        assert_eq!(text(Lang::En, S::ScaledOpen), "Opened at reduced size");
         assert_eq!(text(Lang::Ko, S::ToastCopied), "복사했어요");
     }
 

@@ -921,6 +921,11 @@ impl Viewer {
         self.image().map(|i| (i.width, i.height, i.byte_len))
     }
 
+    /// The full size of a JPEG opened at reduced size (ruling R1); `None` otherwise.
+    pub fn scaled_from(&self) -> Option<(u32, u32)> {
+        self.image()?.scaled_from
+    }
+
     /// The shown image's EXIF, read with its decode (ruling R5).
     pub fn exif(&self) -> Option<&Arc<ExifData>> {
         self.image()?.exif.as_ref()
@@ -1026,6 +1031,7 @@ mod tests {
                 format: ImageFormat::Png,
                 byte_len: 0,
                 exif: None,
+                scaled_from: None,
             })
         }
     }
