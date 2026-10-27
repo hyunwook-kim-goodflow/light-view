@@ -138,7 +138,14 @@ pub fn open_dialog(app: &RefCell<App>, hwnd: HWND) {
         };
         a.viewer.folder().map(Path::to_path_buf)
     };
-    if let Some(path) = pick_file(hwnd, folder.as_deref()) {
+    let picked = pick_file(hwnd, folder.as_deref());
+    // A path forwarded by another launch while the dialog was up waited for it. The
+    // user's pick, made after it, wins; without a pick the forwarded path opens.
+    let forwarded = app
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut a| a.overlay.take_deferred_open());
+    if let Some(path) = picked.or(forwarded) {
         commands::open(app, hwnd, &path);
     }
 }

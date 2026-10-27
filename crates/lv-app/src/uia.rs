@@ -9,6 +9,7 @@ use std::cell::RefCell;
 
 use lv_core::settings::Settings;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 
 use crate::exif_card::{self, Line, Row};
 use crate::input;
@@ -628,8 +629,13 @@ pub fn main_tree_of(app: &App) -> Tree {
 
 /// Carries out an element's invocation (`WM_APP_UIA`) in the main window, as the same
 /// click would. Elements outside an open dialog or menu are not exposed, but a stale
-/// invocation could still arrive: then nothing happens.
+/// invocation could still arrive: then nothing happens. Nothing happens either while
+/// the window is disabled by the modal Open dialog, as for a click.
 pub fn run_main(app: &RefCell<App>, hwnd: HWND, act: Act) {
+    // SAFETY: plain query on our own window handle.
+    if !unsafe { IsWindowEnabled(hwnd) }.as_bool() {
+        return;
+    }
     let Ok(a) = app.try_borrow() else {
         return;
     };
