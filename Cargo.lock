@@ -251,6 +251,7 @@ name = "lv-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "lv-core",
  "lv-ipc",
  "tempfile",

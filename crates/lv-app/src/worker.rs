@@ -50,7 +50,7 @@ use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
-const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
+pub(crate) const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
 /// Longest worker stderr line copied into the log, in bytes.
 const MAX_LOG_LINE: usize = 4096;
 /// How long a failed first request waits for the writer thread to report its write.

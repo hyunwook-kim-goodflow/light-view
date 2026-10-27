@@ -11,6 +11,9 @@ mod overlay;
 mod placement;
 mod render;
 mod routing;
+// Wired into the window in the next commit.
+#[cfg_attr(not(test), allow(dead_code))]
+mod save;
 mod theme;
 mod timing;
 mod toolbar;
