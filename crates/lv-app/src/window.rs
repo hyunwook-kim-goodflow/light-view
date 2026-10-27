@@ -16,7 +16,8 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    DragAcceptFiles, FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath,
+    KF_FLAG_DEFAULT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
@@ -46,6 +47,7 @@ use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::uia;
 use crate::uia_provider;
+use crate::update::{self, UpdateState};
 use crate::viewer::{Redraw, Scene, Viewer};
 use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
@@ -98,6 +100,8 @@ pub struct App {
     pub watching: Watching,
     /// The settings window, while it is open.
     pub settings_win: Option<SettingsWindow>,
+    /// The update question and the release found (spec §6.6).
+    pub update: UpdateState,
 }
 
 pub fn run(
@@ -150,6 +154,7 @@ pub fn run(
         delete_rx,
         watching: Watching::default(),
         settings_win: None,
+        update: UpdateState::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -236,6 +241,10 @@ pub fn run(
         input::sync_tooltips(&app, hwnd);
         let _ = InvalidateRect(hwnd, None, false);
         crate::timing::mark("shown-at");
+        // The update question, if the first photo is already up; and the daily check
+        // (on its own thread) if the user said yes before.
+        update::maybe_ask(&app, hwnd);
+        update::check_if_due(&app, hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -300,6 +309,11 @@ impl App {
 
     pub fn dark(&self) -> bool {
         self.dark
+    }
+
+    /// Where settings are saved; `None` for a measurement run (`--bench`).
+    pub fn settings_file(&self) -> Option<&std::path::Path> {
+        self.settings_path.as_deref()
     }
 
     /// The icon font's family name (empty until the renderer exists).
@@ -588,6 +602,10 @@ fn handle(
             invalidate(hwnd);
             Some(LRESULT(0))
         }
+        update::WM_APP_UPDATE => {
+            update::on_result(app, hwnd);
+            Some(LRESULT(0))
+        }
         uia_provider::WM_APP_UIA => {
             if let Some(act) = uia_provider::action(hwnd, wparam) {
                 uia::run_main(app, hwnd, act);
@@ -705,13 +723,31 @@ fn dip_per_px(hwnd: HWND) -> f32 {
 
 /// `%APPDATA%\light-view\settings.toml`, or `None` if the folder cannot be resolved.
 pub fn settings_path() -> Option<PathBuf> {
+    Some(
+        known_folder(&FOLDERID_RoamingAppData)?
+            .join("light-view")
+            .join("settings.toml"),
+    )
+}
+
+/// `%LOCALAPPDATA%\light-view\crashes` (ruling R6). Task 7 moves it next to the exe
+/// for the portable build.
+pub fn crash_dir() -> Option<PathBuf> {
+    Some(
+        known_folder(&FOLDERID_LocalAppData)?
+            .join("light-view")
+            .join("crashes"),
+    )
+}
+
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     // SAFETY: on success the returned PWSTR is a NUL-terminated string we own and free
     // with CoTaskMemFree after copying it.
     let dir = unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None).ok()?;
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
         let s = p.to_string();
         CoTaskMemFree(Some(p.0 as *const _));
         s.ok()?
     };
-    Some(PathBuf::from(dir).join("light-view").join("settings.toml"))
+    Some(PathBuf::from(dir))
 }

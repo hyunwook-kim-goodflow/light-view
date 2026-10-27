@@ -526,7 +526,7 @@ pub fn settings_tree(focused: usize, s: &Settings, lang: Lang, dip: f32) -> Tree
         let has_focus = focused == c;
         let options = control.option_labels(lang);
         if options.is_empty() {
-            let role = if *control == Control::PinMenu {
+            let role = if matches!(control, Control::PinMenu | Control::UpdateCheck) {
                 Role::CheckBox
             } else {
                 Role::Button
@@ -999,7 +999,12 @@ mod tests {
         assert_eq!(tree.nodes.iter().filter(|n| n.focused).count(), 1);
         let button = named(&tree, text(Lang::Ko, S::MenuDefaultApps));
         assert_eq!(button.role, Role::Button);
-        assert_eq!(button.act, Some(Act::Press(5)));
+        assert_eq!(button.act, Some(Act::Press(6)));
+        // Update checks: a checkbox too, off until the user said yes.
+        let update = named(&tree, text(Lang::Ko, S::SettingsUpdateCheck));
+        assert_eq!(update.role, Role::CheckBox);
+        assert_eq!(update.toggle, Some(false));
+        assert_eq!(update.act, Some(Act::Press(5)));
         // Focus on the language choice: its chosen option has it.
         let tree = settings_tree(0, &s, Lang::Ko, 1.0);
         assert_eq!(tree.nodes[tree.focused().unwrap()].name, "자동");

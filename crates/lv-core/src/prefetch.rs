@@ -1,7 +1,7 @@
 //! Background prefetching of decoded images with cancellation and a memory budget.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -277,7 +277,7 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
         let identity = capture_identity(&path);
         // A panicking decoder must not kill the worker or leave `path` in flight forever.
         let result: DecodeResult = Arc::new(
-            catch_unwind(AssertUnwindSafe(|| decoder.decode(&path)))
+            crate::unwind::catch(AssertUnwindSafe(|| decoder.decode(&path)))
                 .unwrap_or_else(|_| Err(DecodeError::Corrupt("decoder panicked".into()))),
         );
 

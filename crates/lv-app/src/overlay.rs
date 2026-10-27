@@ -54,6 +54,8 @@ pub enum Prompt {
     },
     /// The About dialog (ruling R4).
     About,
+    /// "새 버전이 나오면 알려 드릴까요?", once, after the first photo (spec §6.6).
+    UpdateCheck,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +68,10 @@ pub enum PromptResult {
     Notices,
     /// About: [닫기].
     Close,
+    /// Update question: [알려 주세요].
+    NotifyMe,
+    /// Update question: [괜찮아요].
+    NoThanks,
 }
 
 /// A focusable part of a dialog.
@@ -81,6 +87,7 @@ impl Prompt {
             Prompt::SaveRotation => t(S::PromptSaveRotation),
             Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
             Prompt::About => t(S::AboutTitle),
+            Prompt::UpdateCheck => t(S::PromptUpdateCheck),
         }
     }
 
@@ -101,16 +108,23 @@ impl Prompt {
                 Item::Button(PromptResult::Notices),
                 Item::Button(PromptResult::Close),
             ],
+            Prompt::UpdateCheck => &[
+                Item::Button(PromptResult::NotifyMe),
+                Item::Button(PromptResult::NoThanks),
+            ],
         }
     }
 
     /// The Enter button, focused first and drawn in highlighter. Permanent delete has
-    /// no undo, so its default is [취소] (ruling R13).
+    /// no undo, so its default is [취소] (ruling R13). The update question turns
+    /// network use on only when [알려 주세요] itself is chosen (spec §6.6: no default
+    /// opt-in), so Enter says [괜찮아요].
     pub fn default_result(&self) -> PromptResult {
         match self {
             Prompt::SaveRotation => PromptResult::Save,
             Prompt::PermanentDelete { .. } => PromptResult::Cancel,
             Prompt::About => PromptResult::Close,
+            Prompt::UpdateCheck => PromptResult::NoThanks,
         }
     }
 
@@ -118,7 +132,7 @@ impl Prompt {
     /// question wraps.
     fn estimated_title_lines(&self) -> u32 {
         match self {
-            Prompt::SaveRotation | Prompt::About => 1,
+            Prompt::SaveRotation | Prompt::About | Prompt::UpdateCheck => 1,
             Prompt::PermanentDelete { .. } => 2,
         }
     }
@@ -126,7 +140,7 @@ impl Prompt {
     /// Lines under the title in ink2: the file name, or About's version and license.
     pub fn details(&self) -> Vec<String> {
         match self {
-            Prompt::SaveRotation => Vec::new(),
+            Prompt::SaveRotation | Prompt::UpdateCheck => Vec::new(),
             Prompt::PermanentDelete { name } => vec![name.clone()],
             Prompt::About => vec![about::version_line(), about::license_line().to_owned()],
         }
@@ -142,6 +156,8 @@ impl PromptResult {
             PromptResult::Confirm => t(S::BtnDelete),
             PromptResult::Notices => t(S::BtnNotices),
             PromptResult::Close => t(S::BtnClose),
+            PromptResult::NotifyMe => t(S::BtnNotifyMe),
+            PromptResult::NoThanks => t(S::BtnNoThanks),
         }
     }
 }
@@ -332,14 +348,16 @@ pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastAction {
     Undo,
+    /// [보기]: opens the new release's page.
+    ViewUpdate,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     pub text: String,
-    /// What `text` is made of (a string key and a file name after it), so a language
-    /// change can rebuild it.
-    source: (S, String),
+    /// What `text` is made of (a string key, a file name or version after it, and
+    /// maybe a closing key), so a language change can rebuild it.
+    source: (S, String, Option<S>),
     /// The highlighter pill's label and what it does.
     pub action: Option<(String, ToastAction)>,
     pub shown_at_ms: u64,
@@ -357,7 +375,7 @@ impl Toast {
     pub fn with_suffix(key: S, suffix: &str, now_ms: u64) -> Toast {
         Toast {
             text: tf(key, &[&suffix]),
-            source: (key, suffix.to_owned()),
+            source: (key, suffix.to_owned(), None),
             action: None,
             shown_at_ms: now_ms,
             duration_ms: TOAST_MS,
@@ -373,13 +391,26 @@ impl Toast {
         }
     }
 
+    /// "새 버전 0.2.0가 나왔어요 [보기]".
+    pub fn update_available(version: &str, now_ms: u64) -> Toast {
+        let (head, tail) = (S::ToastUpdateAvailable, S::ToastUpdateAvailableEnd);
+        Toast {
+            text: format!("{}{version}{}", t(head), t(tail)),
+            source: (head, version.to_owned(), Some(tail)),
+            action: Some((t(S::BtnView).to_owned(), ToastAction::ViewUpdate)),
+            ..Toast::new(head, now_ms)
+        }
+    }
+
     /// Rebuilds the text and the action's label in `lang`.
     pub fn retranslate(&mut self, lang: Lang) {
-        let (key, suffix) = &self.source;
-        self.text = format!("{}{suffix}", text(lang, *key));
+        let (key, suffix, tail) = &self.source;
+        let tail = tail.map_or("", |k| text(lang, k));
+        self.text = format!("{}{suffix}{tail}", text(lang, *key));
         if let Some((label, action)) = &mut self.action {
             *label = match action {
                 ToastAction::Undo => text(lang, S::ToastUndo).to_owned(),
+                ToastAction::ViewUpdate => text(lang, S::BtnView).to_owned(),
             };
         }
     }
@@ -1160,6 +1191,35 @@ mod tests {
         assert_eq!(toast.text, text(Lang::Ko, S::ToastRecycled));
         assert_eq!(toast.action.as_ref().unwrap().0, "실행 취소");
         assert_eq!(Toast::new(S::ToastCopied, 0).text, t(S::ToastCopied));
+        // The update toast keeps its version between the two parts.
+        o.show_toast(Toast::update_available("0.2.0", 0));
+        assert_eq!(o.toast.as_ref().unwrap().text, "새 버전 0.2.0가 나왔어요");
+        o.retranslate(Lang::En);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "Version 0.2.0 is out");
+        assert_eq!(
+            toast.action.as_ref().unwrap(),
+            &("View".to_owned(), ToastAction::ViewUpdate)
+        );
+    }
+
+    /// The update question (spec §6.6): two buttons, keyboard operable, and only
+    /// [알려 주세요] itself turns checks on: Enter and Esc never do.
+    #[test]
+    fn update_question_needs_an_explicit_yes() {
+        let mut d = Dialog::new(Prompt::UpdateCheck);
+        assert_eq!(d.prompt.title(), "새 버전이 나오면 알려 드릴까요?");
+        assert_eq!(PromptResult::NotifyMe.label(), "알려 주세요");
+        assert_eq!(PromptResult::NoThanks.label(), "괜찮아요");
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::NoThanks));
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::NoThanks));
+        assert_eq!(d.on_key(VK_ESCAPE, NONE), Some(PromptResult::Cancel));
+        d.on_key(VK_LEFT, NONE);
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::NotifyMe));
+        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::NotifyMe));
+        let l = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(l.items.len(), 2);
+        assert!(l.details.is_empty());
     }
 
     #[test]

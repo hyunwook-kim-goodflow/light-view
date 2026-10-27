@@ -159,11 +159,20 @@ pub enum S {
     AboutLicense,
     BtnNotices,
     BtnClose,
+    // Update check (spec §6.6). `ToastUpdateAvailable` is followed by the version and
+    // then `ToastUpdateAvailableEnd`; [보기] opens the release page.
+    PromptUpdateCheck,
+    BtnNotifyMe,
+    BtnNoThanks,
+    ToastUpdateAvailable,
+    ToastUpdateAvailableEnd,
+    BtnView,
+    SettingsUpdateCheck,
 }
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 87] = [
+const ALL: [S; 94] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -251,6 +260,13 @@ const ALL: [S; 87] = [
     S::AboutLicense,
     S::BtnNotices,
     S::BtnClose,
+    S::PromptUpdateCheck,
+    S::BtnNotifyMe,
+    S::BtnNoThanks,
+    S::ToastUpdateAvailable,
+    S::ToastUpdateAvailableEnd,
+    S::BtnView,
+    S::SettingsUpdateCheck,
 ];
 
 /// The text for `key` in `lang`.
@@ -388,6 +404,16 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         ),
         S::BtnNotices => ("오픈소스 고지", "Open source notices"),
         S::BtnClose => ("닫기", "Close"),
+        S::PromptUpdateCheck => (
+            "새 버전이 나오면 알려 드릴까요?",
+            "Let you know when a new version is out?",
+        ),
+        S::BtnNotifyMe => ("알려 주세요", "Let me know"),
+        S::BtnNoThanks => ("괜찮아요", "No thanks"),
+        S::ToastUpdateAvailable => ("새 버전 ", "Version "),
+        S::ToastUpdateAvailableEnd => ("가 나왔어요", " is out"),
+        S::BtnView => ("보기", "View"),
+        S::SettingsUpdateCheck => ("업데이트 확인", "Check for updates"),
     };
     match lang {
         Lang::Ko => ko,
@@ -461,7 +487,7 @@ mod tests {
     fn all_lists_every_key_once() {
         // The last variant is the sentinel: a key added to `S` after it must be
         // added to `ALL` too, or the tests above would skip it.
-        assert_eq!(ALL.last(), Some(&S::BtnClose));
+        assert_eq!(ALL.last(), Some(&S::SettingsUpdateCheck));
         for (i, a) in ALL.iter().enumerate() {
             assert!(!ALL[i + 1..].contains(a), "{a:?} listed twice");
         }
@@ -554,6 +580,26 @@ mod tests {
         // Each language is named in itself, whatever the UI language.
         assert_eq!(text(Lang::En, S::SettingsKorean), "한국어");
         assert_eq!(text(Lang::Ko, S::SettingsEnglish), "English");
+    }
+
+    #[test]
+    fn update_texts() {
+        let ko = [
+            (S::PromptUpdateCheck, "새 버전이 나오면 알려 드릴까요?"),
+            (S::BtnNotifyMe, "알려 주세요"),
+            (S::BtnNoThanks, "괜찮아요"),
+            (S::BtnView, "보기"),
+            (S::SettingsUpdateCheck, "업데이트 확인"),
+        ];
+        for (key, want) in ko {
+            assert_eq!(text(Lang::Ko, key), want, "{key:?}");
+        }
+        let toast = |lang| {
+            let (head, tail) = (S::ToastUpdateAvailable, S::ToastUpdateAvailableEnd);
+            format!("{}0.2.0{}", text(lang, head), text(lang, tail))
+        };
+        assert_eq!(toast(Lang::Ko), "새 버전 0.2.0가 나왔어요");
+        assert_eq!(toast(Lang::En), "Version 0.2.0 is out");
     }
 
     #[test]

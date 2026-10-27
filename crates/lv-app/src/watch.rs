@@ -26,7 +26,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -177,7 +177,7 @@ impl FolderWatch {
                     }
                 };
                 let _ = started_tx.send(Ok(file.as_raw_handle() as isize));
-                let run = catch_unwind(AssertUnwindSafe(|| {
+                let run = lv_core::unwind::catch(AssertUnwindSafe(|| {
                     watch_loop(
                         &file,
                         &io_done,
@@ -721,7 +721,7 @@ pub fn rescan_if_due(app: &RefCell<App>, hwnd: HWND) {
         .name("rescan".into())
         .spawn(move || {
             let nothing = job.nothing();
-            let found = catch_unwind(AssertUnwindSafe(|| job.run())).unwrap_or(nothing);
+            let found = lv_core::unwind::catch(AssertUnwindSafe(|| job.run())).unwrap_or(nothing);
             let _ = tx.send((id, found));
             post(target, WM_APP_RESCAN_DONE);
         });
