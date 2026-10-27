@@ -505,8 +505,7 @@ fn on_save_prompt(
     match result {
         PromptResult::Save => {
             if dont_ask {
-                a.settings.auto_save_rotation = true;
-                a.persist_settings();
+                a.persist(|s| s.auto_save_rotation = true);
                 a.viewer.set_auto_save(true);
             }
             let closing = a.viewer.closing_after_save();

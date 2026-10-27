@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use lv_core::decode::DecodeLimits;
-use lv_core::settings::{save_settings, Settings};
+use lv_core::settings::{update_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
@@ -355,8 +355,8 @@ impl App {
 
     /// Pins or unpins the toolbar, saves the choice and resizes the image area.
     pub fn toggle_pin(&mut self, hwnd: HWND) {
-        self.settings.toolbar_pinned = !self.settings.toolbar_pinned;
-        self.persist_settings();
+        let pinned = !self.settings.toolbar_pinned;
+        self.persist(|s| s.toolbar_pinned = pinned);
         self.on_size(hwnd);
     }
 
@@ -453,15 +453,20 @@ impl App {
         let Some(wp) = wp else {
             return;
         };
-        self.settings.window = Some(wp);
-        self.persist_settings();
+        self.persist(|s| s.window = Some(wp.clone()));
     }
 
-    /// Saves the settings; an open settings window repaints to show them.
-    pub fn persist_settings(&self) {
+    /// Applies `change` to the settings and saves just that: the file is read again
+    /// and only `change` is applied to it, so a change another window (another
+    /// process, with "새 창") saved meanwhile is kept. The fields this window does not
+    /// apply live are then taken from what was written. An open settings window
+    /// repaints to show them.
+    pub fn persist(&mut self, change: impl Fn(&mut Settings)) {
+        change(&mut self.settings);
         if let Some(path) = &self.settings_path {
-            if let Err(e) = save_settings(path, &self.settings) {
-                eprintln!("light-view: could not save settings: {e}");
+            match update_settings(path, &change) {
+                Ok(written) => self.settings.sync_from(&written),
+                Err(e) => eprintln!("light-view: could not save settings: {e}"),
             }
         }
         if let Some(w) = &self.settings_win {

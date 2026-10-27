@@ -144,6 +144,7 @@ pub enum S {
     SettingsMemory,
     SettingsMegabytes,
     SettingsMemoryNote,
+    SettingsOpenOtherNote,
     // About dialog. `AboutVersion` is followed by the version number.
     AboutTitle,
     AboutVersion,
@@ -154,7 +155,7 @@ pub enum S {
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 80] = [
+const ALL: [S; 81] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -230,6 +231,7 @@ const ALL: [S; 80] = [
     S::SettingsMemory,
     S::SettingsMegabytes,
     S::SettingsMemoryNote,
+    S::SettingsOpenOtherNote,
     S::AboutTitle,
     S::AboutVersion,
     S::AboutLicense,
@@ -350,6 +352,10 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::SettingsSaveRightAway => ("바로 저장", "Save right away"),
         S::SettingsMemory => ("메모리 한도", "Memory limit"),
         S::SettingsMegabytes => (" MB", " MB"),
+        S::SettingsOpenOtherNote => (
+            "다음에 사진을 열 때부터 적용돼요",
+            "Applies the next time you open a photo",
+        ),
         S::SettingsMemoryNote => (
             "다음 실행부터 적용돼요",
             "Applies the next time light-view starts",
@@ -518,6 +524,7 @@ mod tests {
             (S::SettingsAskToSave, "저장할지 묻기"),
             (S::SettingsSaveRightAway, "바로 저장"),
             (S::SettingsMemory, "메모리 한도"),
+            (S::SettingsOpenOtherNote, "다음에 사진을 열 때부터 적용돼요"),
         ];
         for (key, want) in ko {
             assert_eq!(text(Lang::Ko, key), want, "{key:?}");
