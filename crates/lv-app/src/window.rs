@@ -303,7 +303,8 @@ impl App {
     /// no file is open). Moves its selection back to the top when the photo changed.
     pub fn card_model(&mut self) -> Option<exif_card::Model> {
         if self.exif_card.is_open() {
-            self.exif_card.sync(self.viewer.generation());
+            let file = self.viewer.has_file();
+            self.exif_card.sync(file.then(|| self.viewer.generation()));
         }
         self.card_layout()
     }
