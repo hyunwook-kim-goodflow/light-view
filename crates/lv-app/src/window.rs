@@ -498,18 +498,24 @@ impl App {
     /// and only `change` is applied to it, so a change another window (another
     /// process, with "새 창") saved meanwhile is kept. The fields this window does not
     /// apply live are then taken from what was written. An open settings window
-    /// repaints to show them.
-    pub fn persist(&mut self, change: impl Fn(&mut Settings)) {
+    /// repaints to show them. Returns false when the file could not be written (the
+    /// change still holds for this run).
+    pub fn persist(&mut self, change: impl Fn(&mut Settings)) -> bool {
         change(&mut self.settings);
+        let mut saved = true;
         if let Some(path) = &self.settings_path {
             match update_settings(path, &change) {
                 Ok(written) => self.settings.sync_from(&written),
-                Err(e) => eprintln!("light-view: could not save settings: {e}"),
+                Err(e) => {
+                    eprintln!("light-view: could not save settings: {e}");
+                    saved = false;
+                }
             }
         }
         if let Some(w) = &self.settings_win {
             invalidate(w.hwnd);
         }
+        saved
     }
 }
 

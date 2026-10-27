@@ -391,7 +391,7 @@ impl Toast {
         }
     }
 
-    /// "새 버전 0.2.0가 나왔어요 [보기]".
+    /// "새 버전(0.2.0)이 나왔어요 [보기]" (ruling R14).
     pub fn update_available(version: &str, now_ms: u64) -> Toast {
         let (head, tail) = (S::ToastUpdateAvailable, S::ToastUpdateAvailableEnd);
         Toast {
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(Toast::new(S::ToastCopied, 0).text, t(S::ToastCopied));
         // The update toast keeps its version between the two parts.
         o.show_toast(Toast::update_available("0.2.0", 0));
-        assert_eq!(o.toast.as_ref().unwrap().text, "새 버전 0.2.0가 나왔어요");
+        assert_eq!(o.toast.as_ref().unwrap().text, "새 버전(0.2.0)이 나왔어요");
         o.retranslate(Lang::En);
         let toast = o.toast.as_ref().unwrap();
         assert_eq!(toast.text, "Version 0.2.0 is out");
