@@ -13,6 +13,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, IsIconic, PeekMessageW,
     SendMessageTimeoutW, SetForegroundWindow, ShowWindow, MSG, PM_NOREMOVE, SMTO_ABORTIFHUNG,
@@ -173,11 +174,15 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
         return LRESULT(1);
     }
     // While a dialog is open the path waits for it to close (ruling R14), so the answer
-    // still applies to the photo it asked about. Otherwise it opens now; an unsaved
-    // rotation is discarded (M1). Neither holds a borrow across the calls below.
+    // still applies to the photo it asked about. The modal Open dialog (the window is
+    // disabled) holds it the same way; it opens once that dialog closes without a pick.
+    // Otherwise it opens now; an unsaved rotation is discarded (M1). Neither holds a
+    // borrow across the calls below.
+    // SAFETY: plain query on our own window handle.
+    let blocked = !unsafe { IsWindowEnabled(hwnd) }.as_bool();
     let deferred = app
         .try_borrow_mut()
-        .is_ok_and(|mut a| a.overlay.defer_open(path.clone()));
+        .is_ok_and(|mut a| a.overlay.defer_open(path.clone(), blocked));
     if !deferred {
         commands::open(app, hwnd, &path);
     }

@@ -31,17 +31,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ENDSESSION, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
+use crate::about;
 use crate::delete;
 use crate::fullscreen;
 use crate::input;
 use crate::instance;
-use crate::overlay::{
-    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction, TOAST_FILE_CHANGED,
-    TOAST_KEPT_COPY, TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED,
-    TOAST_UNSUPPORTED_FORMAT,
-};
+use crate::overlay::{DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction};
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
+use crate::start;
+use crate::strings::S;
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
 use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
 use crate::window::{self, invalidate, App};
@@ -260,7 +259,7 @@ fn start_save(app: &RefCell<App>, hwnd: HWND) {
         // The file could not be read when it was shown.
         a.viewer.on_save_failed();
         drop(a);
-        input::show_toast(app, hwnd, |now| Toast::new(TOAST_FILE_CHANGED, now));
+        input::show_toast(app, hwnd, |now| Toast::new(S::ToastFileChanged, now));
         return;
     };
     if a.viewer.closing_after_save() {
@@ -314,17 +313,17 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
     }
     let toast = match &done.outcome {
         SaveOutcome::Saved => None,
-        SaveOutcome::SavedAsOrientationTag => Some(TOAST_SAVED_AS_TAG.to_owned()),
-        SaveOutcome::Unsupported => Some(TOAST_UNSUPPORTED_FORMAT.to_owned()),
-        SaveOutcome::Changed => Some(TOAST_FILE_CHANGED.to_owned()),
-        SaveOutcome::ReadOnly => Some(TOAST_READ_ONLY.to_owned()),
+        SaveOutcome::SavedAsOrientationTag => Some((S::ToastSavedAsTag, String::new())),
+        SaveOutcome::Unsupported => Some((S::ToastUnsupportedFormat, String::new())),
+        SaveOutcome::Changed => Some((S::ToastFileChanged, String::new())),
+        SaveOutcome::ReadOnly => Some((S::ToastReadOnly, String::new())),
         SaveOutcome::Failed(e) => {
             eprintln!("light-view: could not save {}: {e}", done.path.display());
-            Some(TOAST_SAVE_FAILED.to_owned())
+            Some((S::ToastSaveFailed, String::new()))
         }
         SaveOutcome::KeptCopy(copy) => {
             let name = copy.file_name().unwrap_or_default().to_string_lossy();
-            Some(format!("{TOAST_KEPT_COPY}{name}"))
+            Some((S::ToastKeptCopy, name.into_owned()))
         }
     };
     let pending = {
@@ -346,8 +345,8 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
             None
         }
     };
-    if let Some(text) = toast {
-        input::show_toast(app, hwnd, |now| Toast::new(&text, now));
+    if let Some((key, name)) = toast {
+        input::show_toast(app, hwnd, |now| Toast::with_suffix(key, &name, now));
     }
     after(app, hwnd, Redraw::Full);
     let closing = pending == Some(LeaveReason::Close);
@@ -372,6 +371,18 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
         Command::RotateLeft | Command::RotateRight
             if app.try_borrow().map_or(true, |a| a.saving.is_some()) => {}
         Command::ToggleFullscreen => fullscreen::toggle(app, hwnd),
+        Command::Open => start::open_dialog(app, hwnd),
+        Command::Settings => open_settings(app, hwnd),
+        Command::ToggleExif => {
+            let Ok(mut a) = app.try_borrow_mut() else {
+                return;
+            };
+            if a.viewer.has_file() || a.exif_card.is_open() {
+                a.exif_card.toggle();
+                drop(a);
+                invalidate(hwnd);
+            }
+        }
         Command::Escape => {
             let Ok(full) = app.try_borrow().map(|a| a.fullscreen.is_some()) else {
                 return;
@@ -426,6 +437,9 @@ pub fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
             SetTimer(hwnd, LOADING_TIMER, LOADING_DELAY_MS, None);
         }
     }
+    // The file may have come or gone (e.g. opened from the start screen): a pinned
+    // toolbar shows at once, not only after the next mouse move.
+    input::refresh_toolbar_now(app, hwnd);
     input::sync_tooltips(app, hwnd);
     invalidate(hwnd);
     watch::follow_folder(app, hwnd);
@@ -451,11 +465,26 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             delete::on_permanent_answer(app, hwnd, result, &target);
             true
         }
+        OverlayEvent::Dialog {
+            prompt: Prompt::About,
+            result,
+            ..
+        } => {
+            if result == PromptResult::Notices {
+                about::open_notices(app, hwnd);
+            }
+            true
+        }
         OverlayEvent::Toast(ToastAction::Undo) => {
             delete::request_undo(app, hwnd);
             true
         }
     }
+}
+
+/// Ctrl+, and the menu's 설정: the settings window.
+pub fn open_settings(app: &RefCell<App>, hwnd: HWND) {
+    crate::settings_win::open(app, hwnd);
 }
 
 /// [저장] saves (and with the checkbox, from now on without asking), [저장 안 함] drops
@@ -479,8 +508,7 @@ fn on_save_prompt(
     match result {
         PromptResult::Save => {
             if dont_ask {
-                a.settings.auto_save_rotation = true;
-                a.persist_settings();
+                a.persist(|s| s.auto_save_rotation = true);
                 a.viewer.set_auto_save(true);
             }
             let closing = a.viewer.closing_after_save();
@@ -499,7 +527,10 @@ fn on_save_prompt(
             }
             !closing
         }
-        PromptResult::Cancel | PromptResult::Confirm => {
+        PromptResult::Cancel
+        | PromptResult::Confirm
+        | PromptResult::Notices
+        | PromptResult::Close => {
             a.viewer.cancel_leave();
             true
         }
@@ -610,8 +641,10 @@ pub fn handle(
             Some(LRESULT(0))
         }
         WM_DROPFILES => {
-            if let Some(path) = first_dropped(HDROP(wparam.0 as *mut _)) {
-                open(app, hwnd, &path);
+            let dropped = dropped_paths(HDROP(wparam.0 as *mut _));
+            match start::pick_drop(&dropped) {
+                Some(path) => open(app, hwnd, &path),
+                None => input::show_toast(app, hwnd, |now| Toast::new(S::ToastNoPhotos, now)),
             }
             Some(LRESULT(0))
         }
@@ -632,16 +665,23 @@ pub fn mods() -> Mods {
     }
 }
 
-/// The first dropped path; releases the drop handle.
-fn first_dropped(drop: HDROP) -> Option<PathBuf> {
+/// The dropped paths, in order; releases the drop handle.
+fn dropped_paths(drop: HDROP) -> Vec<PathBuf> {
     // SAFETY: `drop` is the HDROP from WM_DROPFILES, released exactly once below;
     // `buf` is a live buffer whose length is passed with it.
     unsafe {
-        let len = DragQueryFileW(drop, 0, None);
-        let mut buf = vec![0u16; len as usize + 1];
-        let got = DragQueryFileW(drop, 0, Some(&mut buf));
+        let count = DragQueryFileW(drop, u32::MAX, None);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(drop, i, None);
+            let mut buf = vec![0u16; len as usize + 1];
+            let got = DragQueryFileW(drop, i, Some(&mut buf));
+            if got > 0 {
+                paths.push(PathBuf::from(OsString::from_wide(&buf[..got as usize])));
+            }
+        }
         DragFinish(drop);
-        (got > 0).then(|| PathBuf::from(OsString::from_wide(&buf[..got as usize])))
+        paths
     }
 }
 

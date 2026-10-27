@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
+use crate::about;
 use crate::render::{Align, Renderer, TextRun};
+use crate::strings::{t, text, tf, Lang, S};
 use crate::theme::{Palette, Rgb};
 use crate::toolbar::{pinned_bar_height, Rect};
 
@@ -18,27 +20,6 @@ const VK_TAB: u16 = 0x09;
 const VK_SPACE: u16 = 0x20;
 
 pub const TOAST_MS: u64 = 6000;
-
-pub const CHECKBOX_LABEL: &str = "다음부터 묻지 않고 바로 저장";
-pub const TOAST_RECYCLED: &str = "휴지통으로 옮겼어요";
-pub const TOAST_UNDO: &str = "실행 취소";
-pub const TOAST_SAVED_AS_TAG: &str = "이 사진은 회전 정보로 저장했어요";
-pub const TOAST_FILE_CHANGED: &str = "파일이 바뀌었어요, 다시 열어 주세요";
-pub const TOAST_SAVE_FAILED: &str = "저장하지 못했어요";
-pub const TOAST_UNSUPPORTED_FORMAT: &str = "이 형식은 아직 회전 저장을 지원하지 않아요";
-pub const TOAST_READ_ONLY: &str = "읽기 전용 파일이에요";
-/// Followed by the kept copy's file name.
-pub const TOAST_KEPT_COPY: &str = "저장 중 문제가 생겨 사본을 남겼어요: ";
-pub const TOAST_NO_PERMISSION: &str = "삭제할 권한이 없어요";
-pub const TOAST_IN_USE: &str = "다른 프로그램이 쓰고 있어 삭제할 수 없어요";
-pub const TOAST_NOT_A_FILE: &str = "이 항목은 삭제할 수 없어요";
-pub const TOAST_DELETE_FAILED: &str = "삭제하지 못했어요";
-/// Followed by the file name.
-pub const TOAST_RECYCLE_FAILED: &str = "휴지통으로 옮기지 못했어요: ";
-/// The photo on screen left its folder (its unsaved rotation is gone with it).
-pub const TOAST_PHOTO_VANISHED: &str = "보던 사진이 폴더에서 사라졌어요";
-/// The photo on screen was changed by another program (its unsaved rotation dropped).
-pub const TOAST_PHOTO_RELOADED: &str = "사진이 바깥에서 바뀌어 다시 불러왔어요";
 
 // Dialog layout (DIPs).
 const CARD_MAX_W: f32 = 420.0;
@@ -68,7 +49,11 @@ const HIT_MIN: f32 = 44.0;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Prompt {
     SaveRotation,
-    PermanentDelete { name: String },
+    PermanentDelete {
+        name: String,
+    },
+    /// The About dialog (ruling R4).
+    About,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +62,10 @@ pub enum PromptResult {
     Discard,
     Cancel,
     Confirm,
+    /// About: [오픈소스 고지].
+    Notices,
+    /// About: [닫기].
+    Close,
 }
 
 /// A focusable part of a dialog.
@@ -89,8 +78,9 @@ pub enum Item {
 impl Prompt {
     pub fn title(&self) -> &'static str {
         match self {
-            Prompt::SaveRotation => "회전한 내용을 저장할까요?",
-            Prompt::PermanentDelete { .. } => "이 위치는 휴지통이 없어 영구 삭제돼요. 삭제할까요?",
+            Prompt::SaveRotation => t(S::PromptSaveRotation),
+            Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
+            Prompt::About => t(S::AboutTitle),
         }
     }
 
@@ -107,6 +97,10 @@ impl Prompt {
                 Item::Button(PromptResult::Confirm),
                 Item::Button(PromptResult::Cancel),
             ],
+            Prompt::About => &[
+                Item::Button(PromptResult::Notices),
+                Item::Button(PromptResult::Close),
+            ],
         }
     }
 
@@ -116,22 +110,25 @@ impl Prompt {
         match self {
             Prompt::SaveRotation => PromptResult::Save,
             Prompt::PermanentDelete { .. } => PromptResult::Cancel,
+            Prompt::About => PromptResult::Close,
         }
     }
 
-    /// Title lines at body size in the 372 DIP wide card: the delete question wraps.
-    fn title_lines(&self) -> f32 {
+    /// Title lines until the title is measured (`Dialog::title_lines`): the delete
+    /// question wraps.
+    fn estimated_title_lines(&self) -> u32 {
         match self {
-            Prompt::SaveRotation => 1.0,
-            Prompt::PermanentDelete { .. } => 2.0,
+            Prompt::SaveRotation | Prompt::About => 1,
+            Prompt::PermanentDelete { .. } => 2,
         }
     }
 
-    /// A line under the title in ink2 (the file name).
-    fn detail(&self) -> Option<&str> {
+    /// Lines under the title in ink2: the file name, or About's version and license.
+    pub fn details(&self) -> Vec<String> {
         match self {
-            Prompt::SaveRotation => None,
-            Prompt::PermanentDelete { name } => Some(name),
+            Prompt::SaveRotation => Vec::new(),
+            Prompt::PermanentDelete { name } => vec![name.clone()],
+            Prompt::About => vec![about::version_line(), about::license_line().to_owned()],
         }
     }
 }
@@ -139,10 +136,12 @@ impl Prompt {
 impl PromptResult {
     pub fn label(self) -> &'static str {
         match self {
-            PromptResult::Save => "저장",
-            PromptResult::Discard => "저장 안 함",
-            PromptResult::Cancel => "취소",
-            PromptResult::Confirm => "삭제",
+            PromptResult::Save => t(S::BtnSave),
+            PromptResult::Discard => t(S::BtnDiscard),
+            PromptResult::Cancel => t(S::BtnCancel),
+            PromptResult::Confirm => t(S::BtnDelete),
+            PromptResult::Notices => t(S::BtnNotices),
+            PromptResult::Close => t(S::BtnClose),
         }
     }
 }
@@ -153,6 +152,9 @@ pub struct Dialog {
     /// Index into `prompt.items()`.
     pub focused: usize,
     pub dont_ask: bool,
+    /// The title's line count as last drawn (it depends on the language and the card
+    /// width); `None` until then.
+    pub title_lines: Option<u32>,
 }
 
 impl Dialog {
@@ -168,6 +170,7 @@ impl Dialog {
             prompt,
             focused,
             dont_ask: false,
+            title_lines: None,
         }
     }
 
@@ -214,24 +217,38 @@ impl Dialog {
 pub struct DialogLayout {
     pub card: Rect,
     pub title: Rect,
-    pub detail: Option<Rect>,
+    /// One rect per `Prompt::details` line.
+    pub details: Vec<Rect>,
     pub items: Vec<Rect>,
 }
 
+fn dialog_card_width(view_w: f32) -> f32 {
+    (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W)
+}
+
+/// The width the title wraps in.
+pub fn dialog_inner_width(view_w: f32) -> f32 {
+    (dialog_card_width(view_w) - 2.0 * CARD_PAD).max(0.0)
+}
+
 /// The card is at most 420 DIP wide (16 DIP from the window edges when narrower) and
-/// centered in the client area. Inside its 24 DIP padding: the title, the detail line,
+/// centered in the client area. Inside its 24 DIP padding: the title, the detail lines,
 /// the checkbox row, then the buttons in one row of equal widths, all 44 DIP tall.
 pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout {
     let p = &dialog.prompt;
-    let card_w = (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W);
-    let inner_w = card_w - 2.0 * CARD_PAD;
-    let title_h = p.title_lines() * TITLE_LINE_H;
-    let has_detail = p.detail().is_some();
+    let card_w = dialog_card_width(view_w);
+    let inner_w = dialog_inner_width(view_w);
+    let lines = dialog
+        .title_lines
+        .unwrap_or_else(|| p.estimated_title_lines())
+        .max(1);
+    let title_h = lines as f32 * TITLE_LINE_H;
+    let detail_count = p.details().len();
     let has_checkbox = p.items().contains(&Item::Checkbox);
     let card_h = CARD_PAD
         + title_h
-        + if has_detail {
-            DETAIL_GAP + DETAIL_H
+        + if detail_count > 0 {
+            DETAIL_GAP + detail_count as f32 * DETAIL_H
         } else {
             0.0
         }
@@ -258,16 +275,21 @@ pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout 
         h: title_h,
     };
     y += title_h;
-    let detail = has_detail.then(|| {
-        let r = Rect {
-            x,
-            y: y + DETAIL_GAP,
-            w: inner_w,
-            h: DETAIL_H,
-        };
-        y = r.y + r.h;
-        r
-    });
+    if detail_count > 0 {
+        y += DETAIL_GAP;
+    }
+    let details = (0..detail_count)
+        .map(|_| {
+            let r = Rect {
+                x,
+                y,
+                w: inner_w,
+                h: DETAIL_H,
+            };
+            y += DETAIL_H;
+            r
+        })
+        .collect();
     let checkbox = has_checkbox.then(|| {
         let r = Rect {
             x,
@@ -302,7 +324,7 @@ pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout 
     DialogLayout {
         card,
         title,
-        detail,
+        details,
         items,
     }
 }
@@ -315,6 +337,9 @@ pub enum ToastAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     pub text: String,
+    /// What `text` is made of (a string key and a file name after it), so a language
+    /// change can rebuild it.
+    source: (S, String),
     /// The highlighter pill's label and what it does.
     pub action: Option<(String, ToastAction)>,
     pub shown_at_ms: u64,
@@ -324,9 +349,15 @@ pub struct Toast {
 }
 
 impl Toast {
-    pub fn new(text: &str, now_ms: u64) -> Toast {
+    pub fn new(key: S, now_ms: u64) -> Toast {
+        Toast::with_suffix(key, "", now_ms)
+    }
+
+    /// `key`'s text followed by `suffix` (a file name).
+    pub fn with_suffix(key: S, suffix: &str, now_ms: u64) -> Toast {
         Toast {
-            text: text.to_owned(),
+            text: tf(key, &[&suffix]),
+            source: (key, suffix.to_owned()),
             action: None,
             shown_at_ms: now_ms,
             duration_ms: TOAST_MS,
@@ -337,8 +368,19 @@ impl Toast {
     /// "휴지통으로 옮겼어요 [실행 취소]".
     pub fn recycled(now_ms: u64) -> Toast {
         Toast {
-            action: Some((TOAST_UNDO.to_owned(), ToastAction::Undo)),
-            ..Toast::new(TOAST_RECYCLED, now_ms)
+            action: Some((t(S::ToastUndo).to_owned(), ToastAction::Undo)),
+            ..Toast::new(S::ToastRecycled, now_ms)
+        }
+    }
+
+    /// Rebuilds the text and the action's label in `lang`.
+    pub fn retranslate(&mut self, lang: Lang) {
+        let (key, suffix) = &self.source;
+        self.text = format!("{}{suffix}", text(lang, *key));
+        if let Some((label, action)) = &mut self.action {
+            *label = match action {
+                ToastAction::Undo => text(lang, S::ToastUndo).to_owned(),
+            };
         }
     }
 
@@ -355,6 +397,11 @@ impl Toast {
 
     fn contains(&self, x: f32, y: f32) -> bool {
         self.parts.as_ref().is_some_and(|p| p.bg.contains(x, y))
+    }
+
+    /// Where the toast was last drawn.
+    pub fn parts(&self) -> Option<ToastParts> {
+        self.parts
     }
 
     pub fn place(&mut self, parts: ToastParts) {
@@ -462,7 +509,8 @@ pub struct Overlay {
     target: Option<DialogTarget>,
     pub toast: Option<Toast>,
     pressed: Option<Target>,
-    /// The latest path forwarded by another launch while a dialog was open.
+    /// The latest path forwarded by another launch while a dialog (in the window, or
+    /// the modal Open dialog) was open.
     deferred_open: Option<PathBuf>,
 }
 
@@ -473,10 +521,11 @@ impl Overlay {
         self.pressed = None;
     }
 
-    /// While a dialog is open, keeps `path` (replacing any kept before) to open once
-    /// the dialog closes, and returns true. Otherwise returns false: open it now.
-    pub fn defer_open(&mut self, path: PathBuf) -> bool {
-        if !self.dialog_open() {
+    /// While a dialog is open, or the window is `blocked` by the modal Open dialog,
+    /// keeps `path` (replacing any kept before) to open once that closes, and returns
+    /// true. Otherwise returns false: open it now.
+    pub fn defer_open(&mut self, path: PathBuf, blocked: bool) -> bool {
+        if !self.dialog_open() && !blocked {
             return false;
         }
         self.deferred_open = Some(path);
@@ -500,6 +549,14 @@ impl Overlay {
         self.dialog.is_some()
     }
 
+    /// After a language change: the toast's text in `lang` (a dialog's text is looked
+    /// up as it is drawn).
+    pub fn retranslate(&mut self, lang: Lang) {
+        if let Some(toast) = &mut self.toast {
+            toast.retranslate(lang);
+        }
+    }
+
     /// Drops the toast once its time is up; true if one was dropped.
     pub fn expire(&mut self, now_ms: u64) -> bool {
         let expired = self.toast.as_ref().is_some_and(|t| !t.visible(now_ms));
@@ -513,6 +570,26 @@ impl Overlay {
     pub fn on_key(&mut self, vk: u16, mods: Mods) -> Option<OverlayEvent> {
         let result = self.dialog.as_mut()?.on_key(vk, mods)?;
         self.finish(result)
+    }
+
+    /// Activates the open dialog's item `i` as a click on it would (UI Automation):
+    /// the item takes the focus; `Some` once the dialog closes.
+    pub fn activate(&mut self, i: usize) -> Option<OverlayEvent> {
+        let d = self.dialog.as_mut()?;
+        if i >= d.prompt.items().len() {
+            return None;
+        }
+        d.focused = i;
+        let result = d.activate(i)?;
+        self.finish(result)
+    }
+
+    /// Uses the toast's action (UI Automation's invoke on [실행 취소]): the toast goes.
+    pub fn take_toast_action(&mut self) -> Option<OverlayEvent> {
+        let action = self.toast.as_ref()?.action.as_ref()?.1;
+        self.toast = None;
+        self.pressed = None;
+        Some(OverlayEvent::Toast(action))
     }
 
     /// Mouse down at (x, y) in a `view`-sized client area; true if the overlay takes
@@ -650,7 +727,12 @@ pub fn draw(r: &mut Renderer, o: &mut Overlay, v: &OverlayView) {
     if let Some(t) = o.toast.as_mut().filter(|t| t.visible(v.now_ms)) {
         draw_toast(r, t, v);
     }
-    if let Some(d) = &o.dialog {
+    if let Some(d) = &mut o.dialog {
+        // Measured first: the layout (and later hit tests) use the line count.
+        let width = dialog_inner_width(v.client.0);
+        if let Some(n) = r.wrapped_line_count(d.prompt.title(), UI_FAMILY, TITLE_SIZE, width) {
+            d.title_lines = Some(n);
+        }
         draw_dialog(r, d, v);
     }
 }
@@ -705,9 +787,9 @@ fn draw_dialog(r: &mut Renderer, d: &Dialog, v: &OverlayView) {
         TITLE_SIZE,
         p.ink,
     );
-    if let (Some(rect), Some(detail)) = (l.detail, d.prompt.detail()) {
-        let run = [ui_run(detail, p.ink2, DETAIL_SIZE, false)];
-        r.draw_runs_ellipsis(tuple(rect), &run, Align::Leading);
+    for (rect, detail) in l.details.iter().zip(d.prompt.details()) {
+        let run = [ui_run(&detail, p.ink2, DETAIL_SIZE, false)];
+        r.draw_runs_ellipsis(tuple(*rect), &run, Align::Leading);
     }
     for (i, (item, rect)) in d.prompt.items().iter().zip(&l.items).enumerate() {
         let focused = i == d.focused;
@@ -771,7 +853,7 @@ fn draw_checkbox(r: &mut Renderer, row: Rect, checked: bool, focused: bool, v: &
     let label = (label_x, row.y, row.x + row.w - label_x, row.h);
     r.draw_runs(
         label,
-        &[ui_run(CHECKBOX_LABEL, p.ink, TEXT_SIZE, false)],
+        &[ui_run(t(S::CheckboxAutoSave), p.ink, TEXT_SIZE, false)],
         Align::Leading,
     );
     if focused {
@@ -854,14 +936,17 @@ mod tests {
         assert_eq!(PromptResult::Discard.label(), "저장 안 함");
         assert_eq!(PromptResult::Cancel.label(), "취소");
         assert_eq!(PromptResult::Confirm.label(), "삭제");
-        assert_eq!(CHECKBOX_LABEL, "다음부터 묻지 않고 바로 저장");
-        assert_eq!(TOAST_RECYCLED, "휴지통으로 옮겼어요");
-        assert_eq!(TOAST_UNDO, "실행 취소");
-        assert_eq!(TOAST_SAVED_AS_TAG, "이 사진은 회전 정보로 저장했어요");
-        assert_eq!(TOAST_FILE_CHANGED, "파일이 바뀌었어요, 다시 열어 주세요");
-        assert_eq!(TOAST_SAVE_FAILED, "저장하지 못했어요");
+        assert_eq!(t(S::CheckboxAutoSave), "다음부터 묻지 않고 바로 저장");
+        assert_eq!(t(S::ToastRecycled), "휴지통으로 옮겼어요");
+        assert_eq!(t(S::ToastUndo), "실행 취소");
+        assert_eq!(t(S::ToastSavedAsTag), "이 사진은 회전 정보로 저장했어요");
         assert_eq!(
-            TOAST_UNSUPPORTED_FORMAT,
+            t(S::ToastFileChanged),
+            "파일이 바뀌었어요, 다시 열어 주세요"
+        );
+        assert_eq!(t(S::ToastSaveFailed), "저장하지 못했어요");
+        assert_eq!(
+            t(S::ToastUnsupportedFormat),
             "이 형식은 아직 회전 저장을 지원하지 않아요"
         );
     }
@@ -956,7 +1041,7 @@ mod tests {
 
     #[test]
     fn dialog_card_is_centered_420_wide_with_44_dip_targets() {
-        for d in [save(), delete()] {
+        for d in [save(), delete(), Dialog::new(Prompt::About)] {
             let l = dialog_layout(VIEW.0, VIEW.1, &d);
             assert_eq!(l.items.len(), d.prompt.items().len());
             assert_eq!(l.card.w, 420.0);
@@ -983,8 +1068,29 @@ mod tests {
             }
         }
         let d = delete();
-        assert!(dialog_layout(VIEW.0, VIEW.1, &d).detail.is_some());
-        assert!(dialog_layout(VIEW.0, VIEW.1, &save()).detail.is_none());
+        assert_eq!(dialog_layout(VIEW.0, VIEW.1, &d).details.len(), 1);
+        assert!(dialog_layout(VIEW.0, VIEW.1, &save()).details.is_empty());
+    }
+
+    #[test]
+    fn measured_title_lines_grow_the_card() {
+        // The English delete question can take three lines: the card grows and the
+        // buttons stay inside it, under the title.
+        let mut d = delete();
+        assert_eq!(d.title_lines, None);
+        let two = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(two.title.h, 2.0 * 22.0);
+        d.title_lines = Some(3);
+        let three = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(three.title.h, 3.0 * 22.0);
+        assert_eq!(three.card.h, two.card.h + 22.0);
+        for r in &three.items {
+            assert!(r.y >= three.title.y + three.title.h);
+            assert!(r.y + r.h <= three.card.y + three.card.h - 24.0 + 0.01);
+        }
+        // The title is measured in the card's inner width.
+        assert_eq!(dialog_inner_width(VIEW.0), 420.0 - 48.0);
+        assert_eq!(dialog_inner_width(300.0), 300.0 - 32.0 - 48.0);
     }
 
     #[test]
@@ -998,14 +1104,73 @@ mod tests {
     }
 
     #[test]
-    fn toast_lasts_six_seconds() {
-        let t = Toast::new(TOAST_SAVE_FAILED, 1_000);
-        assert_eq!(t.duration_ms, 6000);
-        assert!(t.visible(1_000));
-        assert!(t.visible(6_999));
-        assert!(!t.visible(7_000));
+    fn about_shows_version_and_license_with_notices_and_close() {
+        use crate::strings::{text, Lang};
+        let mut d = Dialog::new(Prompt::About);
+        assert_eq!(d.prompt.title(), t(S::AboutTitle));
+        assert_eq!(
+            d.prompt.details(),
+            [
+                format!("{}{}", t(S::AboutVersion), env!("CARGO_PKG_VERSION")),
+                t(S::AboutLicense).to_owned()
+            ]
+        );
+        assert_eq!(text(Lang::Ko, S::AboutTitle), "light-view");
+        assert_eq!(text(Lang::Ko, S::AboutVersion), "버전 ");
+        assert_eq!(text(Lang::Ko, S::BtnNotices), "오픈소스 고지");
+        assert_eq!(text(Lang::Ko, S::BtnClose), "닫기");
+        assert_eq!(
+            d.prompt.items(),
+            [
+                Item::Button(PromptResult::Notices),
+                Item::Button(PromptResult::Close)
+            ]
+        );
+        assert_eq!(PromptResult::Notices.label(), t(S::BtnNotices));
+        assert_eq!(PromptResult::Close.label(), t(S::BtnClose));
+        // [닫기] is the default: Enter and Esc both close, Space on 고지 opens them.
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::Close));
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Close));
+        d.on_key(VK_LEFT, NONE);
+        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::Notices));
+        // Two detail lines, one under the other, above the buttons.
+        let l = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(l.details.len(), 2);
+        assert_eq!(l.details[1].y, l.details[0].y + l.details[0].h);
+        assert!(l.details[1].y + l.details[1].h <= l.items[0].y);
+    }
+
+    #[test]
+    fn toast_text_follows_the_language() {
+        use crate::strings::{text, Lang};
         let mut o = Overlay::default();
-        o.show_toast(t);
+        o.show_toast(Toast::with_suffix(S::ToastRecycleFailed, "a.jpg", 0));
+        o.retranslate(Lang::En);
+        assert_eq!(
+            o.toast.as_ref().unwrap().text,
+            "Couldn't move to Recycle Bin: a.jpg"
+        );
+        o.show_toast(Toast::recycled(0));
+        o.retranslate(Lang::En);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "Moved to Recycle Bin");
+        assert_eq!(toast.action.as_ref().unwrap().0, "Undo");
+        o.retranslate(Lang::Ko);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, text(Lang::Ko, S::ToastRecycled));
+        assert_eq!(toast.action.as_ref().unwrap().0, "실행 취소");
+        assert_eq!(Toast::new(S::ToastCopied, 0).text, t(S::ToastCopied));
+    }
+
+    #[test]
+    fn toast_lasts_six_seconds() {
+        let toast = Toast::new(S::ToastSaveFailed, 1_000);
+        assert_eq!(toast.duration_ms, 6000);
+        assert!(toast.visible(1_000));
+        assert!(toast.visible(6_999));
+        assert!(!toast.visible(7_000));
+        let mut o = Overlay::default();
+        o.show_toast(toast);
         assert!(!o.expire(6_999));
         assert!(o.toast.is_some());
         assert!(o.expire(7_000));
@@ -1017,10 +1182,10 @@ mod tests {
     fn a_new_toast_replaces_the_old_one() {
         let mut o = Overlay::default();
         o.show_toast(Toast::recycled(0));
-        o.show_toast(Toast::new(TOAST_FILE_CHANGED, 5_000));
-        let t = o.toast.as_ref().unwrap();
-        assert_eq!(t.text, TOAST_FILE_CHANGED);
-        assert_eq!(t.action, None);
+        o.show_toast(Toast::new(S::ToastFileChanged, 5_000));
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, t(S::ToastFileChanged));
+        assert_eq!(toast.action, None);
         // The new toast's own six seconds count.
         assert!(!o.expire(10_999));
         assert!(o.expire(11_000));
@@ -1064,15 +1229,15 @@ mod tests {
 
     #[test]
     fn toast_action_hit() {
-        let mut t = Toast::recycled(0);
-        assert_eq!(t.hit_action(10.0, 10.0), None); // not placed yet
+        let mut undo = Toast::recycled(0);
+        assert_eq!(undo.hit_action(10.0, 10.0), None); // not placed yet
         let parts = toast_parts(toast_layout(1000.0, 700.0, false), 120.0, Some(56.0));
-        t.place(parts);
+        undo.place(parts);
         let (x, y) = center(parts.action.unwrap());
-        assert_eq!(t.hit_action(x, y), Some(ToastAction::Undo));
+        assert_eq!(undo.hit_action(x, y), Some(ToastAction::Undo));
         let (x, y) = center(parts.text);
-        assert_eq!(t.hit_action(x, y), None);
-        let mut plain = Toast::new(TOAST_SAVE_FAILED, 0);
+        assert_eq!(undo.hit_action(x, y), None);
+        let mut plain = Toast::new(S::ToastSaveFailed, 0);
         plain.place(parts);
         let (x, y) = center(parts.action.unwrap());
         assert_eq!(plain.hit_action(x, y), None);
@@ -1161,15 +1326,65 @@ mod tests {
     fn forwarded_opens_wait_for_the_dialog() {
         let mut o = Overlay::default();
         // No dialog: open right away, nothing kept.
-        assert!(!o.defer_open(PathBuf::from("a.jpg")));
+        assert!(!o.defer_open(PathBuf::from("a.jpg"), false));
         assert_eq!(o.take_deferred_open(), None);
         o.show_dialog(Prompt::SaveRotation, target(1));
-        assert!(o.defer_open(PathBuf::from("b.jpg")));
-        assert!(o.defer_open(PathBuf::from("c.jpg"))); // the latest wins
+        assert!(o.defer_open(PathBuf::from("b.jpg"), false));
+        assert!(o.defer_open(PathBuf::from("c.jpg"), false)); // the latest wins
         assert_eq!(o.take_deferred_open(), None); // still open
         o.on_key(VK_ESCAPE, NONE);
         assert_eq!(o.take_deferred_open(), Some(PathBuf::from("c.jpg")));
         assert_eq!(o.take_deferred_open(), None);
+    }
+
+    #[test]
+    fn forwarded_opens_wait_for_the_open_dialog() {
+        let mut o = Overlay::default();
+        // The modal Open dialog has the window disabled: keep the path.
+        assert!(o.defer_open(PathBuf::from("a.jpg"), true));
+        // The latest wins.
+        assert!(o.defer_open(PathBuf::from("b.jpg"), true));
+        // It closed (no in-window dialog is open): the path is handed out once.
+        assert_eq!(o.take_deferred_open(), Some(PathBuf::from("b.jpg")));
+        assert_eq!(o.take_deferred_open(), None);
+    }
+
+    #[test]
+    fn activation_answers_the_dialog_and_uses_the_toast_action() {
+        let target = DialogTarget {
+            path: PathBuf::from("a.jpg"),
+            generation: 1,
+        };
+        let mut o = Overlay::default();
+        o.show_dialog(Prompt::SaveRotation, target.clone());
+        // The checkbox toggles and takes the focus; the dialog stays.
+        assert_eq!(o.activate(0), None);
+        let d = o.dialog.as_ref().unwrap();
+        assert!(d.dont_ask);
+        assert_eq!(d.focused, 0);
+        assert_eq!(o.activate(9), None, "out of range");
+        // A button answers with the checkbox's state.
+        assert_eq!(
+            o.activate(2),
+            Some(OverlayEvent::Dialog {
+                prompt: Prompt::SaveRotation,
+                result: PromptResult::Discard,
+                dont_ask: true,
+                target,
+            })
+        );
+        assert!(!o.dialog_open());
+        assert_eq!(o.activate(0), None, "no dialog");
+        // A toast without an action stays; [실행 취소] is used once.
+        o.show_toast(Toast::new(S::ToastCopied, 0));
+        assert_eq!(o.take_toast_action(), None);
+        assert!(o.toast.is_some());
+        o.show_toast(Toast::recycled(0));
+        assert_eq!(
+            o.take_toast_action(),
+            Some(OverlayEvent::Toast(ToastAction::Undo))
+        );
+        assert!(o.toast.is_none());
     }
 
     #[test]

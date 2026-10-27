@@ -1,22 +1,36 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo; the EXIF card is not implemented yet. Run `scripts/setup-deps.ps1` once, then `cargo build --release`. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). The DLLs and executables need the Microsoft Visual C++ 2015–2022 (x64) runtime. HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Run `scripts/setup-deps.ps1` once, then `cargo build --release`. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). The DLLs and executables need the Microsoft Visual C++ 2015–2022 (x64) runtime. HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
 윈도우에서 HEIC(아이폰 사진)를 보려면 마이크로소프트의 유료 HEVC 확장이 필요하고, 기존 뷰어 중에도 HEIC를 유료 기능으로 묶어 둔 것이 있어요. light-view는 일상 사진을 무료로, 빠르게, 안전하게 여는 가벼운 윈도우 이미지 뷰어를 목표로 해요. 오픈소스로 공개하고 무료로 배포할 계획이에요. 설계 문서는 [`docs/superpowers/specs/2026-10-26-light-view-design.md`](docs/superpowers/specs/2026-10-26-light-view-design.md)에 있어요.
 
-## 현재 상태 (M3)
+## 현재 상태 (M4)
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
 - HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. 다만 악성 파일이 작업자를 장악하면 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 아직 막지 못해요. 이 부분은 M5에서 AppContainer로 막을 예정이에요. 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
 - HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 무시). AVIF는 아직 열 수 없어요.
 - `lv-worker.exe`가 앱 옆에 없으면 HEIC만 "이 사진은 열 수 없어요"로 나오고 다른 형식은 그대로 열려요.
 - 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전, 다크 모드를 지원해요.
-- **무손실 회전 저장(Ctrl+S):** JPEG은 가로·세로가 MCU 배수이고 뒤에 붙은 데이터나 MPF가 없으면 픽셀을 다시 압축하지 않고 돌려요(libjpeg-turbo, 회전마다 새로 띄우고 끝나면 닫는 작업자 프로세스). 이때 허프만 표를 다시 최적화하므로 파일 크기와 바이트는 달라질 수 있지만 픽셀은 그대로예요. 네 번 돌려 저장하면 원본과 똑같은 픽셀로 돌아와요. 그렇지 않으면 픽셀은 그대로 두고 EXIF 방향 태그만 바꾸고 "이 사진은 회전 정보로 저장했어요"라고 알려 줘요. HEIC/HEIF는 주 이미지의 `irot`만 바꿔요. 알파가 있거나 좌우 반전(`imir`)된 HEIF, 그리고 PNG·BMP·GIF·WebP는 회전 저장을 지원하지 않아요. 저장은 같은 폴더의 임시 파일을 만들어 검증한 뒤 `ReplaceFileW`로 바꿔요. 만든 날짜와 수정 날짜는 원래 값으로 되돌려서 날짜순 정렬이 바뀌지 않아요(탐색기 썸네일은 새로 그리라고 알려 줘요). 어느 단계에서 실패해도 원본은 그대로예요. 교체 도중 원본이 사라지거나 다른 파일로 바뀌어 새 파일이 유일한 사본이 되면, 지우지 않고 `<이름> (light-view 사본).<확장자>`로 남기고 알려 줘요. 저장하지 않은 회전이 있으면 사진을 넘기거나 닫거나 지울 때 창 안에서 물어봐요.
+- **무손실 회전 저장(Ctrl+S):** JPEG은 가로·세로가 MCU 배수이고 뒤에 붙은 데이터나 MPF가 없으면 픽셀을 다시 압축하지 않고 돌려요(libjpeg-turbo, 회전마다 새로 띄우고 끝나면 닫는 작업자 프로세스). 이때 허프만 표를 다시 최적화하므로 파일 크기와 바이트는 달라질 수 있지만 픽셀은 그대로예요. 네 번 돌려 저장하면 원본과 똑같은 픽셀로 돌아와요. 그렇지 않으면 픽셀은 그대로 두고 EXIF 방향 태그만 바꾸고 "이 사진은 회전 정보로 저장했어요"라고 알려 줘요. HEIC/HEIF는 주 이미지의 `irot`만 바꿔요. 알파가 있거나 좌우 반전(`imir`)된 HEIF, 그리고 PNG·BMP·GIF·WebP는 회전 저장을 지원하지 않아요. 저장은 같은 폴더의 임시 파일을 만들어 검증한 뒤 `ReplaceFileW`로 바꿔요. 만든 날짜와 수정 날짜는 원래 값으로 되돌려서 날짜순 정렬이 바뀌지 않아요(탐색기 썸네일은 새로 그리라고 알려 줘요). 어느 단계에서 실패해도 원본은 그대로예요. 교체 도중 원본이 사라지거나 다른 파일로 바뀌어 새 파일이 유일한 사본이 되면, 지우지 않고 `<이름> (light-view 사본).<확장자>`로 남기고 알려 줘요(이 이름은 파일 이름이라 영어 화면에서도 한국어 그대로예요). 저장하지 않은 회전이 있으면 사진을 넘기거나 닫거나 지울 때 창 안에서 물어봐요.
 - **삭제(Delete):** 확인 없이 목록에서 빼고 "휴지통으로 옮겼어요 [실행 취소]"를 6초 보여 줘요. 실제 휴지통 이동은 다음 삭제나 앱 종료 때 일어나고, 그 전에는 Ctrl+Z로 되돌릴 수 있어요(앱이 비정상 종료되면 파일은 그대로 남아요). 휴지통이 없는 위치(네트워크, 이동식 드라이브 등)와 경로가 260자 이상인 파일은 영구 삭제라고 먼저 물어봐요(기본 단추는 [취소]이고, [삭제]는 Tab이나 ←로 옮겨 Space로 눌러요). 폴더, 바로 가기 링크(심볼릭 링크·정션)는 지우지 않아요. OneDrive 같은 클라우드 파일은 지울 수 있어요.
 - 열 때와 저장·삭제 직전에 파일 ID·크기·수정 시각을 비교해서, 그 사이 파일이 바뀌었으면 아무것도 하지 않아요. 긴 경로(`\\?\`)를 지원해요. 폴더가 바깥에서 바뀌면(파일 추가·삭제·이름 변경) 200 ms 뒤 목록을 다시 읽고 보던 사진을 유지해요.
-- 아직 없는 것: EXIF 카드, 설정 화면, 설치 파일. 아래 로드맵을 보세요.
+- **EXIF 카드(I):** 오른쪽 위에 찍은 날짜, 시간·카메라, 노출, 해상도·용량, 위치(GPS가 있을 때 숫자로만)를 보여 줘요. EXIF가 없으면 "EXIF 정보가 없어요"와 파일 정보·수정 날짜를 보여 줘요. [전체 보기]를 누르면 카드 안에서 모든 태그를 스크롤 목록으로 보고, 고른 값을 [복사]나 Ctrl+C로 복사해요. 카드가 열려 있어도 사진을 넘길 수 있고, 카드는 넘긴 사진을 따라가요. EXIF는 사진을 디코딩할 때 같은 바이트에서 백그라운드로 읽고, 값은 태그당 512자, 태그는 2,000개까지만 읽어요. 지도나 네트워크는 쓰지 않아요.
+- **오른쪽 클릭 메뉴:** 창 안에 그리는 메뉴라 다크 모드를 그대로 따라요. 열기(Ctrl+O), 폴더에서 보기, 경로 복사, 기본 앱 설정 열기, 설정(Ctrl+,), 정보가 있어요. 메뉴 키나 Shift+F10으로도 열고, ↑↓·Enter·Esc로 써요. 사진이 없으면 폴더에서 보기와 경로 복사는 흐리게 나오고 건너뛰어요.
+- **열기와 빈 시작 화면:** 사진 없이 실행하면 "사진을 끌어다 놓거나 열어 주세요"와 [열기] 단추가 나와요. 열기 대화상자는 지원하는 사진만 보여 주는 "사진" 필터가 기본이고, 보던 사진의 폴더에서 시작해요. 사진이나 폴더를 창에 끌어다 놓아도 열려요(폴더면 첫 사진). 열 수 있는 사진이 없으면 "열 수 있는 사진이 없어요"라고 알려 줘요.
+- **정보:** 버전과 라이선스 요약을 창 안 대화상자로 보여 줘요. [오픈소스 고지]는 앱 폴더의 `THIRD_PARTY_NOTICES.md`를 기본 프로그램으로 열어요(개발 빌드에는 이 파일이 exe 옆에 없어서 "열지 못했어요"가 나와요. 배포 단계 M5에서 함께 넣어요).
+- **설정 창(Ctrl+,):** 메인 창에 딸린 작은 창으로, 한 번에 하나만 열려요. 바꾸는 즉시 `%APPDATA%\light-view\settings.toml`에 저장해요(바꾼 항목만 다시 써서 다른 창의 변경을 지우지 않아요).
+  - 언어: 자동 / 한국어 / English
+  - 메뉴 고정
+  - 다른 사진을 열 때: 같은 창 / 새 창 (다음에 사진을 열 때부터 적용)
+  - 회전한 사진을: 저장할지 묻기 / 바로 저장
+  - 메모리 한도: 자동 / 256 / 512 / 1024 / 2048 MB (다음 실행부터 적용)
+  - [기본 앱 설정 열기], 버전
+- **언어:** 한국어와 영어예요. "자동"이면 윈도우 표시 언어가 한국어일 때 한국어, 그 밖에는 영어예요. 설정에서 바꾸면 창 제목, 버튼 줄 도움말, 메뉴, 대화상자, 알림, EXIF 카드까지 바로 바뀌어요. 열기 대화상자의 단추와 제목은 윈도우가 그리는 것이라 윈도우 언어를 따라요.
+- **화면 읽기 프로그램:** UI Automation으로 버튼 줄, 시작 화면 [열기], 메뉴, 대화상자, 알림, EXIF 카드와 목록, 설정 창의 이름·역할·상태(사용 안 함, 고정됨, 선택됨)를 알려 주고, 포커스 이동과 알림을 읽어 줘요.
+- **USB 안전 제거:** 보던 사진이 있는 이동식 드라이브를 "하드웨어 안전 제거"로 빼려고 하면 폴더 감시를 놓아서 제거가 막히지 않아요. 화면의 사진은 그대로 남고, 그 뒤 저장·삭제는 파일이 바뀌었다고 알려 줘요. 제거가 취소되면 감시를 다시 시작하고, 드라이브를 다시 꽂고 같은 폴더의 사진을 열면 다시 감시해요.
+- 아직 없는 것: 설치 파일, 단축키 편집. 아래 로드맵을 보세요.
 - 네트워크 통신은 하지 않아요.
 
 ## 빌드
@@ -58,12 +72,19 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 | 더블클릭 | 화면 맞춤 ↔ 원본 크기(100%) 전환 | 사용 가능 |
 | 확대 상태에서 끌기 | 사진 이동 | 사용 가능 |
 | Ctrl+← / Ctrl+→ | 왼쪽 / 오른쪽 90° 회전 (저장은 Ctrl+S) | 사용 가능 |
-| F11, Enter | 전체 화면 | 사용 가능 |
-| Esc | 전체 화면이면 해제, 아니면 창 닫기 | 사용 가능 |
+| F11, Enter | 전체 화면 (EXIF 카드가 열려 있으면 Enter는 카드가 받아요) | 사용 가능 |
+| Esc | 열린 메뉴·목록·카드를 먼저 닫고, 전체 화면이면 해제, 아니면 창 닫기 | 사용 가능 |
 | Ctrl+S | 회전 저장 (묻지 않고 바로) | 사용 가능 |
 | Delete | 휴지통으로 보내기 | 사용 가능 |
 | Ctrl+Z | 마지막 삭제 되돌리기 (다음 삭제나 앱 종료 전까지) | 사용 가능 |
-| I | EXIF 카드 열기 / 닫기 | M4 예정 |
+| I | EXIF 카드 열기 / 닫기 | 사용 가능 |
+| Enter (카드) | [전체 보기] 열기, 목록에서는 고른 값 복사 | 사용 가능 |
+| ↑ / ↓, PgUp / PgDn, Home / End (목록) | 태그 고르기 | 사용 가능 |
+| Ctrl+C (목록) | 고른 값 복사 | 사용 가능 |
+| 오른쪽 클릭, 메뉴 키, Shift+F10 | 메뉴 열기 | 사용 가능 |
+| Ctrl+O | 열기 대화상자 | 사용 가능 |
+| Ctrl+, | 설정 창 | 사용 가능 |
+| Tab / Shift+Tab, ← / →, Space·Enter, Esc (설정 창) | 항목 옮기기, 선택지 고르기, 체크·단추 누르기, 창 닫기 | 사용 가능 |
 
 폴더의 처음과 끝에서 더 넘기면 멈춰요(순환하지 않아요).
 
@@ -115,6 +136,17 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 - (M3) 네트워크 드라이브(UNC)에서 삭제할 때 "휴지통이 없어 영구 삭제돼요" 확인이 뜨나요(개발 중에는 관리 공유에 접근할 수 없어 직접 확인하지 못했어요)
 - (M3) OneDrive 사진 폴더의 사진(온라인 전용·로컬 보관 모두)을 지우면 휴지통으로 가고 실행 취소가 되나요(개발 중에는 OneDrive 폴더에서 확인하지 못했어요)
 - 아이폰 12 MP 사진의 첫 화면 시간과 폴더 중간 메모리(위 표와 같은 방법)
+- (M4) **내레이터:** 내레이터(Ctrl+Win+Enter)를 켜고 버튼 줄, 시작 화면 [열기], 메뉴, 대화상자(저장 확인·영구 삭제·정보), 알림과 [실행 취소], EXIF 카드와 전체 목록, 설정 창을 키보드로 돌아다녀 보세요. 이름·역할·상태(사용 안 함, 고정됨, 선택됨)를 읽고, 포커스 이동을 따라가고, "휴지통으로 옮겼어요" 같은 알림을 읽어 주나요(개발 중에는 UI Automation 클라이언트로만 확인했어요)
+- (M4) **USB 안전 제거:** USB 메모리의 사진을 열어 둔 채 작업 표시줄의 "하드웨어 안전 제거"로 빼면 성공하고 사진은 화면에 남나요. 그 뒤 회전 저장이나 삭제를 하면 "파일이 바뀌었어요"가 나오나요. 다른 프로그램이 그 드라이브의 파일을 열고 있어 제거가 거부되면 감시가 다시 살아나나요(그 폴더에 파일을 추가하면 목록이 바뀌는지). 드라이브를 다시 꽂고 같은 폴더의 사진을 열면 다시 감시하나요. 폴더에 파일을 넣거나 지운 직후(목록을 다시 읽는 중)에 바로 제거하면 한 번 거부될 수 있어요. 다시 시도하면 되는지 봐 주세요(개발 중에는 실제 드라이브로 확인하지 못했어요)
+- (M4) **영어 화면:** 설정에서 언어를 English로 바꾸고(또는 윈도우 표시 언어를 영어로 두고 "자동"), 시작 화면, 메뉴, 정보, 저장 확인·영구 삭제 대화상자, 알림, EXIF 카드와 목록, 설정 창, 버튼 줄 도움말의 글자가 잘리거나 넘치지 않나요. 특히 영구 삭제 확인의 긴 영어 제목이 카드 안에 들어가나요
+- (M4) 메뉴의 **폴더에서 보기**가 탐색기를 열고 그 사진을 선택해 주나요(네트워크 드라이브와 긴 경로 사진도)
+- (M4) 메뉴와 설정 창의 **기본 앱 설정 열기**가 윈도우 설정의 기본 앱 페이지를 여나요
+- (M4) **오픈소스 고지:** `THIRD_PARTY_NOTICES.md`를 `lv-app.exe` 옆에 두고 정보 → [오픈소스 고지]를 누르면 기본 프로그램으로 열리나요(파일이 없으면 "열지 못했어요")
+- (M4) 탐색기에서 사진, 폴더, 지원하지 않는 파일을 실제로 **끌어다 놓기**: 시작 화면과 사진을 보는 중 모두에서 사진은 열리고, 폴더는 첫 사진이 열리고, 지원하지 않는 파일만 놓으면 "열 수 있는 사진이 없어요"가 나오나요
+- (M4) 설정의 **다른 사진을 열 때: 새 창**으로 바꾼 뒤 탐색기에서 다른 사진을 더블클릭하면 새 창이 뜨고, **같은 창**으로 되돌리면 그다음부터 한 창에서 열리나요("새 창"일 때 띄운 창은 단일 창 확인을 하지 않으므로, 그 창들을 닫고 새로 연 창부터 한 창에서 열려요)
+- (M4) **창 두 개에서 설정:** "새 창"으로 창을 두 개 띄우고 각각 다른 설정(예: 한쪽은 언어, 다른 쪽은 메모리 한도)을 바꾼 뒤 둘 다 닫아도, `settings.toml`에 두 변경이 모두 남아 있나요
+- (M4) 실제 카메라·아이폰·갤럭시 사진(HEIC 포함)에서 EXIF 카드의 날짜, 카메라, 노출, 위치가 맞게 나오나요(HEIC의 EXIF는 EXIF가 든 샘플이 없어 자동 테스트로 확인하지 못했어요)
+- (M4) 다크 모드에서 메뉴, EXIF 카드, 정보 대화상자, 설정 창의 색과 테두리가 자연스럽나요
 
 ## 라이선스
 
