@@ -5,6 +5,7 @@ pub mod command;
 pub mod decode;
 pub mod exif_edit;
 pub mod format;
+pub mod heif_edit;
 #[cfg(windows)]
 pub mod identity;
 pub mod jpeg_check;

@@ -272,6 +272,41 @@ pub fn compose_tag_only(orientation: u16, user_quarters: u8) -> u16 {
     join(mirror, r + user_quarters % 4)
 }
 
+/// Sets IFD0's Orientation in the TIFF block `buf[tiff]` to `value`, in place (the size
+/// never changes). A block without the tag is left as is. Errs on a malformed block or an
+/// Orientation that is not one SHORT. Used for the EXIF item of a HEIF file.
+pub(crate) fn set_tiff_orientation_in_place(
+    buf: &mut [u8],
+    tiff: std::ops::Range<usize>,
+    value: u16,
+) -> Result<(), String> {
+    let (be, targets) = {
+        let block = Tiff::new(buf.get(tiff.clone()).ok_or_else(oob)?)?;
+        let ifd0 = block.ifd(block.u32(4)?)?;
+        let mut targets = Vec::new();
+        for entry in ifd0.entries().filter(|e| e.tag == TAG_ORIENTATION) {
+            if entry.typ != TYPE_SHORT || entry.count != 1 {
+                return Err("EXIF Orientation is not one SHORT".into());
+            }
+            targets.push(entry.value_at);
+        }
+        (block.be, targets)
+    };
+    let bytes = if be {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
+    };
+    for at in targets {
+        // `value_at` lies inside an IFD that `Tiff::ifd` checked to be inside the block.
+        let at = tiff.start + at;
+        buf.get_mut(at..at + 2)
+            .ok_or_else(oob)?
+            .copy_from_slice(&bytes);
+    }
+    Ok(())
+}
+
 /// Where the EXIF APP1 is in a JPEG.
 struct App1 {
     /// Offset of the payload (just past the length field).
