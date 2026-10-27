@@ -509,7 +509,8 @@ pub struct Overlay {
     target: Option<DialogTarget>,
     pub toast: Option<Toast>,
     pressed: Option<Target>,
-    /// The latest path forwarded by another launch while a dialog was open.
+    /// The latest path forwarded by another launch while a dialog (in the window, or
+    /// the modal Open dialog) was open.
     deferred_open: Option<PathBuf>,
 }
 
@@ -520,10 +521,11 @@ impl Overlay {
         self.pressed = None;
     }
 
-    /// While a dialog is open, keeps `path` (replacing any kept before) to open once
-    /// the dialog closes, and returns true. Otherwise returns false: open it now.
-    pub fn defer_open(&mut self, path: PathBuf) -> bool {
-        if !self.dialog_open() {
+    /// While a dialog is open, or the window is `blocked` by the modal Open dialog,
+    /// keeps `path` (replacing any kept before) to open once that closes, and returns
+    /// true. Otherwise returns false: open it now.
+    pub fn defer_open(&mut self, path: PathBuf, blocked: bool) -> bool {
+        if !self.dialog_open() && !blocked {
             return false;
         }
         self.deferred_open = Some(path);
@@ -1324,14 +1326,26 @@ mod tests {
     fn forwarded_opens_wait_for_the_dialog() {
         let mut o = Overlay::default();
         // No dialog: open right away, nothing kept.
-        assert!(!o.defer_open(PathBuf::from("a.jpg")));
+        assert!(!o.defer_open(PathBuf::from("a.jpg"), false));
         assert_eq!(o.take_deferred_open(), None);
         o.show_dialog(Prompt::SaveRotation, target(1));
-        assert!(o.defer_open(PathBuf::from("b.jpg")));
-        assert!(o.defer_open(PathBuf::from("c.jpg"))); // the latest wins
+        assert!(o.defer_open(PathBuf::from("b.jpg"), false));
+        assert!(o.defer_open(PathBuf::from("c.jpg"), false)); // the latest wins
         assert_eq!(o.take_deferred_open(), None); // still open
         o.on_key(VK_ESCAPE, NONE);
         assert_eq!(o.take_deferred_open(), Some(PathBuf::from("c.jpg")));
+        assert_eq!(o.take_deferred_open(), None);
+    }
+
+    #[test]
+    fn forwarded_opens_wait_for_the_open_dialog() {
+        let mut o = Overlay::default();
+        // The modal Open dialog has the window disabled: keep the path.
+        assert!(o.defer_open(PathBuf::from("a.jpg"), true));
+        // The latest wins.
+        assert!(o.defer_open(PathBuf::from("b.jpg"), true));
+        // It closed (no in-window dialog is open): the path is handed out once.
+        assert_eq!(o.take_deferred_open(), Some(PathBuf::from("b.jpg")));
         assert_eq!(o.take_deferred_open(), None);
     }
 
