@@ -15,13 +15,22 @@
 //!   per progressive one), add up to more than [`WORK_FACTOR`] full decodes of the frame.
 //!   libjpeg's default progressive script codes at most 191 per block (gray), under 192.
 //!
-//! Markers are found the way decoders find them after a damaged segment: any `FF xx`
-//! that is not a stuffed `FF00`, a fill byte or `RSTn`, so no scan a decoder would see is
-//! missed. Segments are stepped over by their length, scans end at the next marker, and
-//! the walk ends at EOI.
+//! The walk fails closed rather than mirror any decoder's recovery (R12): between
+//! segments only `0xFF` fill bytes may come before a marker, and anything else (a stray
+//! byte, `FF00`, `RSTn`, TEM, a second SOI) is `Corrupt`, as are a second frame header, a
+//! frame of width or height 0 (sized later by DNL), DNL and DAC. Inside a scan's
+//! entropy-coded data, stuffed `FF00` and `RSTn` are stepped over and the scan ends at
+//! the next marker. Segments are stepped over by their length and the walk ends at EOI
+//! (or where the file ends). As the check runs before every JPEG decode, any layout it
+//! does not understand never reaches a decoder, so no scan can hide from it.
+//!
+//! Worst cases measured within these rules (release, 16-thread laptop): about 21 s for
+//! an honest noise-filled gray 23168² progressive JPEG on the reduced-size path, and
+//! about 21.5 s on the full path for a 4-component 16384² progressive frame of 64 cheap
+//! scans, which the 64-scan cap bounds.
 
 use super::{corrupt, DecodeError};
-use crate::jpeg_markers::{is_frame_header, EOI, SOS};
+use crate::jpeg_markers::{is_frame_header, EOI, SOI, SOS};
 
 /// The most scans a progressive frame may have (R10).
 pub(super) const MAX_PROGRESSIVE_SCANS: usize = 64;
@@ -39,20 +48,45 @@ pub(super) struct JpegFrame {
 
 /// Checks the JPEG in `bytes` (which starts with SOI). `Ok(None)` for a frame other than
 /// SOF0, SOF1 or SOF2, which is left to the decoder; `Corrupt` as the module says, or
-/// when the frame header is missing or malformed, there is no scan, or a scan header is
-/// malformed or names a component the frame lacks.
+/// when the frame header is missing or malformed, a scan comes before it, there is no
+/// scan, or a scan header is malformed or names a component the frame lacks.
 pub(super) fn check(bytes: &[u8]) -> Result<Option<JpegFrame>, DecodeError> {
     let bad = |what: &str| Err(corrupt(what));
     let mut frame: Option<(bool, Sof)> = None;
     let mut seen: Vec<u8> = Vec::new();
     let (mut scans, mut work) = (0usize, 0u64);
     let mut at = 2;
-    while let Some((pos, code)) = next_marker(bytes, at) {
-        at = pos + 2;
+    let mut in_scan = false;
+    loop {
+        if in_scan {
+            // The scan's data runs to the next marker (past stuffing and restarts).
+            match next_marker(bytes, at) {
+                Some((i, _)) => at = i,
+                None => break,
+            }
+            in_scan = false;
+        }
+        // Between segments: fill bytes, then a marker; the file may end here.
+        let Some(&first) = bytes.get(at) else {
+            break;
+        };
+        if first != 0xFF {
+            return bad("stray byte between segments");
+        }
+        while bytes.get(at + 1) == Some(&0xFF) {
+            at += 1;
+        }
+        let Some(&code) = bytes.get(at + 1) else {
+            break;
+        };
+        at += 2;
         match code {
             EOI => break,
-            // Standalone markers: SOI, TEM, RSTn (outside a scan).
-            0xD8 | 0x01 | 0xD0..=0xD7 => continue,
+            // Not markers between segments: a stuffed zero, RSTn, TEM, a second SOI;
+            // DNL and DAC are not supported.
+            0x00 | 0xD0..=0xD7 | 0x01 | SOI | DNL | DAC => {
+                return bad("unexpected marker between segments");
+            }
             _ => {}
         }
         let Some(len) = bytes.get(at..at + 2) else {
@@ -60,13 +94,16 @@ pub(super) fn check(bytes: &[u8]) -> Result<Option<JpegFrame>, DecodeError> {
         };
         let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
         if len < 2 {
-            continue;
+            return bad("bad segment length");
         }
         let Some(payload) = bytes.get(at + 2..at + len) else {
             break;
         };
         at += len;
-        if frame.is_none() && is_frame_header(code) {
+        if is_frame_header(code) {
+            if frame.is_some() {
+                return bad("a second frame header");
+            }
             let progressive = match code {
                 0xC0 | 0xC1 => false,
                 0xC2 => true,
@@ -75,11 +112,18 @@ pub(super) fn check(bytes: &[u8]) -> Result<Option<JpegFrame>, DecodeError> {
             let Some(sof) = Sof::parse(payload) else {
                 return bad("bad frame header");
             };
+            if sof.width == 0 || sof.height == 0 {
+                return bad("frame size left to a DNL marker");
+            }
             frame = Some((progressive, sof));
             continue;
         }
-        let (Some((progressive, sof)), SOS) = (&frame, code) else {
+        if code != SOS {
             continue;
+        }
+        in_scan = true;
+        let Some((progressive, sof)) = &frame else {
+            return bad("scan before the frame header");
         };
         scans += 1;
         if *progressive && scans > MAX_PROGRESSIVE_SCANS {
@@ -124,8 +168,12 @@ pub(super) fn check(bytes: &[u8]) -> Result<Option<JpegFrame>, DecodeError> {
     }))
 }
 
-/// The next marker at or after `from`: its offset (of the `FF`) and code. Skips stuffed
-/// `FF00`, fill bytes and `RSTn`.
+/// Define number of lines and define arithmetic conditioning: not supported (R12).
+const DNL: u8 = 0xDC;
+const DAC: u8 = 0xCC;
+
+/// Inside entropy-coded data, the next marker at or after `from`: its offset (of the
+/// `FF`) and code. Skips stuffed `FF00`, fill bytes and `RSTn`.
 fn next_marker(bytes: &[u8], mut from: usize) -> Option<(usize, u8)> {
     loop {
         let i = from + bytes.get(from..)?.iter().position(|&b| b == 0xFF)?;
@@ -300,20 +348,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn markers_are_found_past_damage() {
-        let seg = crate::jpeg_markers::tests::segment;
+    /// SOI, then the given parts, then EOI.
+    fn jpeg(parts: &[&[u8]]) -> Vec<u8> {
         let mut b = vec![0xFF, 0xD8];
-        b.extend(seg(0xC0, &sof(64, 64, &[(1, 1)])));
-        // Garbage between segments that a strict walker would stop at.
-        b.extend([0x12, 0x34]);
-        for _ in 0..2 {
-            b.extend(seg(SOS, &sos(&[1], 0, 63, 0)));
-            b.extend([0x55; 8]);
+        for p in parts {
+            b.extend_from_slice(p);
         }
         b.extend([0xFF, 0xD9]);
-        assert!(matches!(check(&b), Err(DecodeError::Corrupt(_))));
-        // The marker search skips stuffing, fill bytes and restarts.
+        b
+    }
+
+    fn is_corrupt(bytes: &[u8]) -> bool {
+        matches!(check(bytes), Err(DecodeError::Corrupt(_)))
+    }
+
+    #[test]
+    fn the_walk_fails_closed_between_segments() {
+        let seg = crate::jpeg_markers::tests::segment;
+        let frame = seg(0xC0, &sof(64, 64, &[(1, 1)]));
+        let scan = seg(SOS, &sos(&[1], 0, 63, 0));
+        let data = [0x55u8; 8];
+        let good = jpeg(&[&frame, &scan, &data]);
+        assert!(check(&good).unwrap().is_some());
+        // Fill bytes before markers, and stuffing and restarts inside the scan, are fine.
+        let filled = jpeg(&[
+            &[0xFF, 0xFF],
+            &frame,
+            &[0xFF, 0xFF, 0xFF],
+            &scan,
+            &[
+                0x55, 0xFF, 0x00, 0x55, 0xFF, 0xD0, 0x55, 0x55, 0x55, 0x55, 0x55, 0xFF,
+            ],
+        ]);
+        assert!(check(&filled).unwrap().is_some());
+        // A stray byte, FF00, RSTn, TEM or a second SOI between segments.
+        for junk in [
+            &[0x12][..],
+            &[0xFF, 0x00],
+            &[0xFF, 0xD3],
+            &[0xFF, 0x01],
+            &[0xFF, 0xD8],
+        ] {
+            assert!(is_corrupt(&jpeg(&[&frame, junk, &scan, &data])), "{junk:?}");
+        }
+        // A second frame header after the first scan.
+        assert!(is_corrupt(&jpeg(&[&frame, &scan, &data, &frame])));
+        // Height 0 (sized by DNL), DNL itself and DAC.
+        let no_height = seg(0xC0, &sof(64, 0, &[(1, 1)]));
+        assert!(is_corrupt(&jpeg(&[&no_height, &scan, &data])));
+        let dnl = seg(0xDC, &[0, 64]);
+        assert!(is_corrupt(&jpeg(&[&frame, &scan, &data, &dnl])));
+        assert!(is_corrupt(&jpeg(&[
+            &seg(0xCC, &[0x00, 0x01]),
+            &frame,
+            &scan,
+            &data
+        ])));
+        // A segment length under 2, and a scan before the frame.
+        assert!(is_corrupt(&jpeg(&[
+            &frame,
+            &[0xFF, 0xE1, 0x00, 0x01],
+            &scan,
+            &data
+        ])));
+        assert!(is_corrupt(&jpeg(&[&scan, &data, &frame])));
+        // The marker search inside scans skips stuffing, fill bytes and restarts.
         assert_eq!(
             next_marker(&[1, 0xFF, 0x00, 0xFF, 0xFF, 0xD3, 0xFF, 0xC4], 0),
             Some((6, 0xC4))
