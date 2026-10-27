@@ -17,4 +17,5 @@ pub mod prefetch;
 pub mod settings;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+pub mod tiling;
 pub mod viewport;
