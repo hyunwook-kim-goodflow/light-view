@@ -676,6 +676,20 @@ pub fn pin_changed(app: &RefCell<App>, hwnd: HWND) {
     after_change(hwnd, timer, true);
 }
 
+/// Re-evaluates the toolbar after the shown file changed (opened, deleted, restored),
+/// so a pinned bar appears as soon as there is a file, without waiting for the mouse,
+/// and the floating pill's auto-hide timer runs.
+pub fn refresh_toolbar_now(app: &RefCell<App>, hwnd: HWND) {
+    let (changed, timer) = {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        let changed = a.refresh_toolbar();
+        (changed, a.start_timer())
+    };
+    after_change(hwnd, timer, changed);
+}
+
 fn after_change(hwnd: HWND, start_timer: bool, repaint: bool) {
     if start_timer {
         // SAFETY: plain call on our window; WM_TIMER is handled above.
