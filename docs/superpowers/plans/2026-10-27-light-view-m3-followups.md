@@ -92,3 +92,15 @@ Checked against the M4 branch (`m4-info-settings`) in Task 8. The history above 
 | R21 deferred list: USB safe-remove (M4) | **M4에서 해결** (54d1895, 6cf4aed) | The folder watch registers its directory handle for `WM_DEVICECHANGE`. On query-remove it closes the handle (keeping the notification until remove-complete or query-remove-failed, per Microsoft's sample, ruling R-T7a); a failed removal restarts the watch; after removal the same folder is watched again on the next open (R-T7b). Real-drive check is on the README user-check list. |
 | Task 8 minor: open dir handle may block USB safe-eject | **M4에서 해결** (54d1895) | Same change as the row above. A rescan thread listing the folder at the moment of removal can still make one removal fail (user-check item). |
 | Task 8 minor: deleted+recreated folder never re-watched | 일부 해결 (6cf4aed) | Only for a removed drive: following the same folder again after a removal starts a new watch. A folder deleted and recreated on a fixed drive is still not re-watched until the viewer moves to another folder. |
+
+# M5 status of the items carried to M5
+
+Checked against the M5 branch (`m5-harden-ship`) in Task 9. The history above is kept as it was. Items not listed here are still open.
+
+| M3 item | Status | Note |
+|---|---|---|
+| R22: KEPT set compares exact PathBufs (case/UNC spelling) | **M5에서 해결** (9bfa5f8) | Kept copies are known by file ID, so another spelling of the same path is still excluded from the sweep. The set is still process-scoped (a copy kept by a crashed earlier run is treated as a stale temp file), unchanged by design. |
+| Task 2 minor: BSD license texts only linked (M5 packaging) | **M5에서 해결** (bfcf3da, 41737b7) | `THIRD_PARTY_NOTICES.md` (made by `scripts/package.ps1`) carries the full libjpeg-turbo, IJG, libspng, libpng and zlib texts and ships beside `light-view.exe`. |
+| Oversized files: viewer.rs, delete.rs, commands.rs, save.rs, overlay.rs, heif_edit.rs | **M5에서 해결** (8a9d70e, d786eee, 95272fc, a14c129, e87ea00, 903254b) | Split by responsibility with no behaviour change. |
+| R21 deferred: handle-held verify→replace gap, handle-based permanent delete, surfacing non-recycled deletes, rescan/save epoch, `SHQueryRecycleBinW` off the UI thread, padding-only trailer pixel rotation | 미해결 | Not in the M5 plan. |
+| R22 rest: misleading verify after a ReplaceFileW error, `is_refusal` substring match, reparse-tag open failure message, fresh-worker PID test | 미해결 | Not in the M5 plan. |

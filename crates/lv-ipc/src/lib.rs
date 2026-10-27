@@ -60,6 +60,9 @@
 //! Readers *reject* (`Malformed`) a longer string rather than truncating it, and also reject
 //! invalid UTF-8.
 
+#[doc(hidden)]
+pub mod fuzzing;
+
 use std::io::{self, Read, Write};
 
 pub const MAGIC: [u8; 4] = *b"LVW1";

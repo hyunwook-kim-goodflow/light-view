@@ -8,467 +8,25 @@
 
 use std::path::PathBuf;
 
-use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
+use lv_core::command::Mods;
 
-use crate::about;
-use crate::render::{Align, Renderer, TextRun};
-use crate::strings::{t, text, tf, Lang, S};
-use crate::theme::{Palette, Rgb};
-use crate::toolbar::{pinned_bar_height, Rect};
+use crate::strings::Lang;
 
-const VK_TAB: u16 = 0x09;
-const VK_SPACE: u16 = 0x20;
+mod dialog;
+mod draw;
+mod toast;
+
+#[cfg(test)]
+use dialog::{dialog_inner_width, VK_SPACE, VK_TAB};
+pub use dialog::{dialog_layout, Dialog, Item, Prompt, PromptResult};
+pub use draw::{draw, OverlayView};
+#[cfg(test)]
+use draw::{scrim, toast_colors};
+#[cfg(test)]
+use toast::toast_parts;
+pub use toast::{toast_layout, Toast, ToastAction, ToastParts};
 
 pub const TOAST_MS: u64 = 6000;
-
-// Dialog layout (DIPs).
-const CARD_MAX_W: f32 = 420.0;
-const CARD_MARGIN: f32 = 16.0;
-const CARD_PAD: f32 = 24.0;
-const CARD_RADIUS: f32 = 18.0;
-const TITLE_LINE_H: f32 = 22.0;
-const DETAIL_GAP: f32 = 4.0;
-const DETAIL_H: f32 = 20.0;
-const SECTION_GAP: f32 = 16.0;
-const BUTTONS_GAP: f32 = 20.0;
-const ROW_H: f32 = 44.0;
-const BUTTON_GAP: f32 = 8.0;
-const BUTTON_RADIUS: f32 = 12.0;
-
-// Toast layout (DIPs).
-const TOAST_H: f32 = 52.0;
-const TOAST_RADIUS: f32 = 14.0;
-const TOAST_MARGIN: f32 = 16.0;
-const TOAST_PAD_L: f32 = 16.0;
-const TOAST_PAD_R: f32 = 8.0;
-const ACTION_GAP: f32 = 12.0;
-const PILL_H: f32 = 36.0;
-const PILL_PAD: f32 = 14.0;
-const HIT_MIN: f32 = 44.0;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Prompt {
-    SaveRotation,
-    PermanentDelete {
-        name: String,
-    },
-    /// The About dialog (ruling R4).
-    About,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptResult {
-    Save,
-    Discard,
-    Cancel,
-    Confirm,
-    /// About: [오픈소스 고지].
-    Notices,
-    /// About: [닫기].
-    Close,
-}
-
-/// A focusable part of a dialog.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Item {
-    Checkbox,
-    Button(PromptResult),
-}
-
-impl Prompt {
-    pub fn title(&self) -> &'static str {
-        match self {
-            Prompt::SaveRotation => t(S::PromptSaveRotation),
-            Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
-            Prompt::About => t(S::AboutTitle),
-        }
-    }
-
-    /// Focus order: top to bottom, then left to right (as drawn).
-    pub fn items(&self) -> &'static [Item] {
-        match self {
-            Prompt::SaveRotation => &[
-                Item::Checkbox,
-                Item::Button(PromptResult::Save),
-                Item::Button(PromptResult::Discard),
-                Item::Button(PromptResult::Cancel),
-            ],
-            Prompt::PermanentDelete { .. } => &[
-                Item::Button(PromptResult::Confirm),
-                Item::Button(PromptResult::Cancel),
-            ],
-            Prompt::About => &[
-                Item::Button(PromptResult::Notices),
-                Item::Button(PromptResult::Close),
-            ],
-        }
-    }
-
-    /// The Enter button, focused first and drawn in highlighter. Permanent delete has
-    /// no undo, so its default is [취소] (ruling R13).
-    pub fn default_result(&self) -> PromptResult {
-        match self {
-            Prompt::SaveRotation => PromptResult::Save,
-            Prompt::PermanentDelete { .. } => PromptResult::Cancel,
-            Prompt::About => PromptResult::Close,
-        }
-    }
-
-    /// Title lines until the title is measured (`Dialog::title_lines`): the delete
-    /// question wraps.
-    fn estimated_title_lines(&self) -> u32 {
-        match self {
-            Prompt::SaveRotation | Prompt::About => 1,
-            Prompt::PermanentDelete { .. } => 2,
-        }
-    }
-
-    /// Lines under the title in ink2: the file name, or About's version and license.
-    pub fn details(&self) -> Vec<String> {
-        match self {
-            Prompt::SaveRotation => Vec::new(),
-            Prompt::PermanentDelete { name } => vec![name.clone()],
-            Prompt::About => vec![about::version_line(), about::license_line().to_owned()],
-        }
-    }
-}
-
-impl PromptResult {
-    pub fn label(self) -> &'static str {
-        match self {
-            PromptResult::Save => t(S::BtnSave),
-            PromptResult::Discard => t(S::BtnDiscard),
-            PromptResult::Cancel => t(S::BtnCancel),
-            PromptResult::Confirm => t(S::BtnDelete),
-            PromptResult::Notices => t(S::BtnNotices),
-            PromptResult::Close => t(S::BtnClose),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Dialog {
-    pub prompt: Prompt,
-    /// Index into `prompt.items()`.
-    pub focused: usize,
-    pub dont_ask: bool,
-    /// The title's line count as last drawn (it depends on the language and the card
-    /// width); `None` until then.
-    pub title_lines: Option<u32>,
-}
-
-impl Dialog {
-    /// Focus starts on the default button.
-    pub fn new(prompt: Prompt) -> Dialog {
-        let default = Item::Button(prompt.default_result());
-        let focused = prompt
-            .items()
-            .iter()
-            .position(|i| *i == default)
-            .unwrap_or(0);
-        Dialog {
-            prompt,
-            focused,
-            dont_ask: false,
-            title_lines: None,
-        }
-    }
-
-    /// `Some` closes the dialog with that result.
-    pub fn on_key(&mut self, vk: u16, mods: Mods) -> Option<PromptResult> {
-        let n = self.prompt.items().len();
-        match vk {
-            VK_RETURN => return Some(self.prompt.default_result()),
-            VK_ESCAPE => return Some(PromptResult::Cancel),
-            VK_SPACE => return self.activate(self.focused),
-            VK_TAB if mods.shift => self.focused = (self.focused + n - 1) % n,
-            VK_LEFT => self.focused = (self.focused + n - 1) % n,
-            VK_TAB | VK_RIGHT => self.focused = (self.focused + 1) % n,
-            _ => {}
-        }
-        None
-    }
-
-    /// A click on an item focuses and activates it.
-    pub fn on_click(&mut self, x: f32, y: f32, layout: &DialogLayout) -> Option<PromptResult> {
-        let i = self.hit(x, y, layout)?;
-        self.focused = i;
-        self.activate(i)
-    }
-
-    /// The item at (x, y), as an index into `prompt.items()`.
-    pub fn hit(&self, x: f32, y: f32, layout: &DialogLayout) -> Option<usize> {
-        layout.items.iter().position(|r| r.contains(x, y))
-    }
-
-    fn activate(&mut self, i: usize) -> Option<PromptResult> {
-        match self.prompt.items().get(i)? {
-            Item::Checkbox => {
-                self.dont_ask = !self.dont_ask;
-                None
-            }
-            Item::Button(r) => Some(*r),
-        }
-    }
-}
-
-/// Dialog rects in DIPs; `items` follows `prompt.items()`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DialogLayout {
-    pub card: Rect,
-    pub title: Rect,
-    /// One rect per `Prompt::details` line.
-    pub details: Vec<Rect>,
-    pub items: Vec<Rect>,
-}
-
-fn dialog_card_width(view_w: f32) -> f32 {
-    (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W)
-}
-
-/// The width the title wraps in.
-pub fn dialog_inner_width(view_w: f32) -> f32 {
-    (dialog_card_width(view_w) - 2.0 * CARD_PAD).max(0.0)
-}
-
-/// The card is at most 420 DIP wide (16 DIP from the window edges when narrower) and
-/// centered in the client area. Inside its 24 DIP padding: the title, the detail lines,
-/// the checkbox row, then the buttons in one row of equal widths, all 44 DIP tall.
-pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout {
-    let p = &dialog.prompt;
-    let card_w = dialog_card_width(view_w);
-    let inner_w = dialog_inner_width(view_w);
-    let lines = dialog
-        .title_lines
-        .unwrap_or_else(|| p.estimated_title_lines())
-        .max(1);
-    let title_h = lines as f32 * TITLE_LINE_H;
-    let detail_count = p.details().len();
-    let has_checkbox = p.items().contains(&Item::Checkbox);
-    let card_h = CARD_PAD
-        + title_h
-        + if detail_count > 0 {
-            DETAIL_GAP + detail_count as f32 * DETAIL_H
-        } else {
-            0.0
-        }
-        + if has_checkbox {
-            SECTION_GAP + ROW_H
-        } else {
-            0.0
-        }
-        + BUTTONS_GAP
-        + ROW_H
-        + CARD_PAD;
-    let card = Rect {
-        x: (view_w - card_w) / 2.0,
-        y: (view_h - card_h) / 2.0,
-        w: card_w,
-        h: card_h,
-    };
-    let x = card.x + CARD_PAD;
-    let mut y = card.y + CARD_PAD;
-    let title = Rect {
-        x,
-        y,
-        w: inner_w,
-        h: title_h,
-    };
-    y += title_h;
-    if detail_count > 0 {
-        y += DETAIL_GAP;
-    }
-    let details = (0..detail_count)
-        .map(|_| {
-            let r = Rect {
-                x,
-                y,
-                w: inner_w,
-                h: DETAIL_H,
-            };
-            y += DETAIL_H;
-            r
-        })
-        .collect();
-    let checkbox = has_checkbox.then(|| {
-        let r = Rect {
-            x,
-            y: y + SECTION_GAP,
-            w: inner_w,
-            h: ROW_H,
-        };
-        y = r.y + r.h;
-        r
-    });
-    let buttons_y = y + BUTTONS_GAP;
-    let count = p.items().len() - usize::from(has_checkbox);
-    let button_w = (inner_w - BUTTON_GAP * (count as f32 - 1.0)) / count as f32;
-    let mut bx = x;
-    let items = p
-        .items()
-        .iter()
-        .map(|item| match item {
-            Item::Checkbox => checkbox.expect("checkbox row"),
-            Item::Button(_) => {
-                let r = Rect {
-                    x: bx,
-                    y: buttons_y,
-                    w: button_w,
-                    h: ROW_H,
-                };
-                bx += button_w + BUTTON_GAP;
-                r
-            }
-        })
-        .collect();
-    DialogLayout {
-        card,
-        title,
-        details,
-        items,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToastAction {
-    Undo,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Toast {
-    pub text: String,
-    /// What `text` is made of (a string key and a file name after it), so a language
-    /// change can rebuild it.
-    source: (S, String),
-    /// The highlighter pill's label and what it does.
-    pub action: Option<(String, ToastAction)>,
-    pub shown_at_ms: u64,
-    pub duration_ms: u64,
-    /// Where the toast was last drawn (for hit testing).
-    parts: Option<ToastParts>,
-}
-
-impl Toast {
-    pub fn new(key: S, now_ms: u64) -> Toast {
-        Toast::with_suffix(key, "", now_ms)
-    }
-
-    /// `key`'s text followed by `suffix` (a file name).
-    pub fn with_suffix(key: S, suffix: &str, now_ms: u64) -> Toast {
-        Toast {
-            text: tf(key, &[&suffix]),
-            source: (key, suffix.to_owned()),
-            action: None,
-            shown_at_ms: now_ms,
-            duration_ms: TOAST_MS,
-            parts: None,
-        }
-    }
-
-    /// "휴지통으로 옮겼어요 [실행 취소]".
-    pub fn recycled(now_ms: u64) -> Toast {
-        Toast {
-            action: Some((t(S::ToastUndo).to_owned(), ToastAction::Undo)),
-            ..Toast::new(S::ToastRecycled, now_ms)
-        }
-    }
-
-    /// Rebuilds the text and the action's label in `lang`.
-    pub fn retranslate(&mut self, lang: Lang) {
-        let (key, suffix) = &self.source;
-        self.text = format!("{}{suffix}", text(lang, *key));
-        if let Some((label, action)) = &mut self.action {
-            *label = match action {
-                ToastAction::Undo => text(lang, S::ToastUndo).to_owned(),
-            };
-        }
-    }
-
-    pub fn visible(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.shown_at_ms) < self.duration_ms
-    }
-
-    /// The action under (x, y), once the toast has been placed (drawn).
-    pub fn hit_action(&self, x: f32, y: f32) -> Option<ToastAction> {
-        let hit = self.parts.as_ref()?.action?;
-        let (_, action) = self.action.as_ref()?;
-        hit.contains(x, y).then_some(*action)
-    }
-
-    fn contains(&self, x: f32, y: f32) -> bool {
-        self.parts.as_ref().is_some_and(|p| p.bg.contains(x, y))
-    }
-
-    /// Where the toast was last drawn.
-    pub fn parts(&self) -> Option<ToastParts> {
-        self.parts
-    }
-
-    pub fn place(&mut self, parts: ToastParts) {
-        self.parts = Some(parts);
-    }
-}
-
-/// Where toasts go: bottom-left, 16 DIP from the window edges and above a pinned
-/// toolbar; `w` is the widest a toast may be.
-pub fn toast_layout(view_w: f32, view_h: f32, pinned: bool) -> Rect {
-    let bar = if pinned { pinned_bar_height() } else { 0.0 };
-    Rect {
-        x: TOAST_MARGIN,
-        y: view_h - bar - TOAST_MARGIN - TOAST_H,
-        w: (view_w - 2.0 * TOAST_MARGIN).max(0.0),
-        h: TOAST_H,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ToastParts {
-    pub bg: Rect,
-    pub text: Rect,
-    pub pill: Option<Rect>,
-    /// The pill's hit area: its width, 44 DIP tall.
-    pub action: Option<Rect>,
-}
-
-/// Fits a toast to its measured text (and action label) inside `anchor`: 16 DIP left
-/// padding, the text, then the pill 8 DIP from the right edge (16 without a pill).
-/// Too long a text is clipped, never the pill.
-pub fn toast_parts(anchor: Rect, text_w: f32, action_w: Option<f32>) -> ToastParts {
-    let pill_w = action_w.map(|w| (w + 2.0 * PILL_PAD).max(HIT_MIN));
-    let pad_r = if pill_w.is_some() {
-        TOAST_PAD_R
-    } else {
-        TOAST_PAD_L
-    };
-    let fixed = TOAST_PAD_L + pad_r + pill_w.map_or(0.0, |w| ACTION_GAP + w);
-    let bg = Rect {
-        w: (fixed + text_w).min(anchor.w),
-        ..anchor
-    };
-    let text = Rect {
-        x: bg.x + TOAST_PAD_L,
-        y: bg.y,
-        w: (bg.w - fixed).max(0.0),
-        h: bg.h,
-    };
-    let pill = pill_w.map(|w| Rect {
-        x: bg.x + bg.w - pad_r - w,
-        y: bg.y + (bg.h - PILL_H) / 2.0,
-        w,
-        h: PILL_H,
-    });
-    let action = pill.map(|p| Rect {
-        y: bg.y + (bg.h - HIT_MIN) / 2.0,
-        h: HIT_MIN,
-        ..p
-    });
-    ToastParts {
-        bg,
-        text,
-        pill,
-        action,
-    }
-}
 
 /// The photo a dialog asks about, given by its caller and handed back with the answer,
 /// so the answer applies to that photo even if the current one changed meanwhile
@@ -657,215 +215,13 @@ impl Overlay {
     }
 }
 
-// ---- Drawing -------------------------------------------------------------------
-
-const UI_FAMILY: &str = "Segoe UI";
-const TITLE_SIZE: f32 = 15.0;
-const TEXT_SIZE: f32 = 14.0;
-const DETAIL_SIZE: f32 = 13.0;
-const CHECK_BOX: f32 = 20.0;
-const CHECK_GLYPH: char = '\u{E73E}';
-const FOCUS_OUTSET: f32 = 3.0;
-
-/// Scrim over the photo: light `ink` at 30%, dark `paper` at 60%.
-pub fn scrim(p: &Palette, dark: bool) -> (Rgb, f32) {
-    if dark {
-        (p.paper, 0.6)
-    } else {
-        (p.ink, 0.3)
-    }
-}
-
-/// Toast background, text and optional border: inverted ink (ink + paper) in light
-/// mode; surface2 + ink with a hairline in dark mode. The dark pair deliberately departs
-/// from the brief's literal "inverted" wording (light ink background with dark text
-/// would glare on a dark window); it is contrast-tested at >= 4.5:1 (ruling R15).
-pub fn toast_colors(p: &Palette, dark: bool) -> (Rgb, Rgb, Option<Rgb>) {
-    if dark {
-        (p.surface2, p.ink, Some(p.hairline))
-    } else {
-        (p.ink, p.paper, None)
-    }
-}
-
-/// Everything the overlay draws besides its own state.
-pub struct OverlayView<'a> {
-    /// Client area size in DIPs.
-    pub client: (f32, f32),
-    pub pinned: bool,
-    pub palette: &'a Palette,
-    pub dark: bool,
-    pub icon_family: &'a str,
-    pub now_ms: u64,
-}
-
-fn tuple(r: Rect) -> (f32, f32, f32, f32) {
-    (r.x, r.y, r.w, r.h)
-}
-
-fn outset(r: Rect, dx: f32, dy: f32) -> Rect {
-    Rect {
-        x: r.x - dx,
-        y: r.y - dy,
-        w: r.w + 2.0 * dx,
-        h: r.h + 2.0 * dy,
-    }
-}
-
-fn ui_run(text: &str, color: Rgb, size: f32, bold: bool) -> TextRun<'_> {
-    TextRun {
-        text,
-        family: UI_FAMILY,
-        size,
-        bold,
-        color,
-    }
-}
-
-/// The toast, then the dialog above it. Places the toast for hit testing.
-pub fn draw(r: &mut Renderer, o: &mut Overlay, v: &OverlayView) {
-    if let Some(t) = o.toast.as_mut().filter(|t| t.visible(v.now_ms)) {
-        draw_toast(r, t, v);
-    }
-    if let Some(d) = &mut o.dialog {
-        // Measured first: the layout (and later hit tests) use the line count.
-        let width = dialog_inner_width(v.client.0);
-        if let Some(n) = r.wrapped_line_count(d.prompt.title(), UI_FAMILY, TITLE_SIZE, width) {
-            d.title_lines = Some(n);
-        }
-        draw_dialog(r, d, v);
-    }
-}
-
-fn draw_toast(r: &mut Renderer, t: &mut Toast, v: &OverlayView) {
-    let p = v.palette;
-    let (bg, fg, border) = toast_colors(p, v.dark);
-    let anchor = toast_layout(v.client.0, v.client.1, v.pinned);
-    let text = [ui_run(&t.text, fg, TEXT_SIZE, false)];
-    let label = t
-        .action
-        .as_ref()
-        .map(|(l, _)| [ui_run(l, p.on_highlighter, TEXT_SIZE, true)]);
-    let text_w = r.measure_runs(&text).unwrap_or(anchor.w);
-    let action_w = label
-        .as_ref()
-        .map(|l| r.measure_runs(l).unwrap_or(2.0 * HIT_MIN));
-    let parts = toast_parts(anchor, text_w, action_w);
-    if !v.dark {
-        r.fill_soft_shadow(tuple(parts.bg), TOAST_RADIUS, p.ink, (4.0, 14.0, 0.08));
-    }
-    r.fill_round_rect(tuple(parts.bg), TOAST_RADIUS, bg);
-    if let Some(c) = border {
-        r.stroke_round_rect(tuple(parts.bg), TOAST_RADIUS, c, 1.0);
-    }
-    r.draw_runs_ellipsis(tuple(parts.text), &text, Align::Leading);
-    if let (Some(pill), Some(label)) = (parts.pill, label) {
-        r.fill_round_rect(tuple(pill), pill.h / 2.0, p.highlighter);
-        r.draw_runs(tuple(pill), &label, Align::Center);
-    }
-    t.place(parts);
-}
-
-fn draw_dialog(r: &mut Renderer, d: &Dialog, v: &OverlayView) {
-    let p = v.palette;
-    let (w, h) = v.client;
-    let l = dialog_layout(w, h, d);
-    let (scrim_color, alpha) = scrim(p, v.dark);
-    r.fill_rect_alpha((0.0, 0.0, w, h), scrim_color, alpha);
-    // Light: soft shadow. Dark: no shadow; a hairline border lifts the card.
-    if !v.dark {
-        r.fill_soft_shadow(tuple(l.card), CARD_RADIUS, p.ink, (8.0, 24.0, 0.12));
-    }
-    r.fill_round_rect(tuple(l.card), CARD_RADIUS, p.surface);
-    if v.dark {
-        r.stroke_round_rect(tuple(l.card), CARD_RADIUS, p.hairline, 1.0);
-    }
-    r.draw_wrapped(
-        tuple(l.title),
-        d.prompt.title(),
-        UI_FAMILY,
-        TITLE_SIZE,
-        p.ink,
-    );
-    for (rect, detail) in l.details.iter().zip(d.prompt.details()) {
-        let run = [ui_run(&detail, p.ink2, DETAIL_SIZE, false)];
-        r.draw_runs_ellipsis(tuple(*rect), &run, Align::Leading);
-    }
-    for (i, (item, rect)) in d.prompt.items().iter().zip(&l.items).enumerate() {
-        let focused = i == d.focused;
-        match item {
-            Item::Checkbox => draw_checkbox(r, *rect, d.dont_ask, focused, v),
-            Item::Button(res) => {
-                let default = *res == d.prompt.default_result();
-                draw_button(r, *rect, res.label(), default, focused, p);
-            }
-        }
-    }
-}
-
-fn draw_button(
-    r: &mut Renderer,
-    rect: Rect,
-    label: &str,
-    default: bool,
-    focused: bool,
-    p: &Palette,
-) {
-    let (fill, color) = if default {
-        (p.highlighter, p.on_highlighter)
-    } else {
-        (p.surface2, p.ink)
-    };
-    r.fill_round_rect(tuple(rect), BUTTON_RADIUS, fill);
-    r.draw_runs(
-        tuple(rect),
-        &[ui_run(label, color, TEXT_SIZE, default)],
-        Align::Center,
-    );
-    if focused {
-        let ring = outset(rect, FOCUS_OUTSET, FOCUS_OUTSET);
-        r.stroke_round_rect(tuple(ring), BUTTON_RADIUS + FOCUS_OUTSET, p.ink, 1.5);
-    }
-}
-
-fn draw_checkbox(r: &mut Renderer, row: Rect, checked: bool, focused: bool, v: &OverlayView) {
-    let p = v.palette;
-    let mark = (
-        row.x,
-        row.y + (row.h - CHECK_BOX) / 2.0,
-        CHECK_BOX,
-        CHECK_BOX,
-    );
-    if checked {
-        r.fill_round_rect(mark, 5.0, p.highlighter);
-        r.draw_glyph(
-            mark,
-            CHECK_GLYPH,
-            v.icon_family,
-            14.0,
-            p.on_highlighter,
-            false,
-        );
-    } else {
-        r.stroke_round_rect(mark, 5.0, p.ink2, 1.5);
-    }
-    let label_x = row.x + CHECK_BOX + 10.0;
-    let label = (label_x, row.y, row.x + row.w - label_x, row.h);
-    r.draw_runs(
-        label,
-        &[ui_run(t(S::CheckboxAutoSave), p.ink, TEXT_SIZE, false)],
-        Align::Leading,
-    );
-    if focused {
-        let ring = outset(row, 8.0, 0.0);
-        r.stroke_round_rect(tuple(ring), 10.0, p.ink, 1.5);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strings::{t, S};
     use crate::theme::{contrast, DARK, LIGHT};
+    use crate::toolbar::Rect;
+    use lv_core::command::{VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
     use std::path::PathBuf;
 
     const NONE: Mods = Mods {
@@ -1160,6 +516,35 @@ mod tests {
         assert_eq!(toast.text, text(Lang::Ko, S::ToastRecycled));
         assert_eq!(toast.action.as_ref().unwrap().0, "실행 취소");
         assert_eq!(Toast::new(S::ToastCopied, 0).text, t(S::ToastCopied));
+        // The update toast keeps its version between the two parts.
+        o.show_toast(Toast::update_available("0.2.0", 0));
+        assert_eq!(o.toast.as_ref().unwrap().text, "새 버전(0.2.0)이 나왔어요");
+        o.retranslate(Lang::En);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "Version 0.2.0 is out");
+        assert_eq!(
+            toast.action.as_ref().unwrap(),
+            &("View".to_owned(), ToastAction::ViewUpdate)
+        );
+    }
+
+    /// The update question (spec §6.6): two buttons, keyboard operable, and only
+    /// [알려 주세요] itself turns checks on: Enter and Esc never do.
+    #[test]
+    fn update_question_needs_an_explicit_yes() {
+        let mut d = Dialog::new(Prompt::UpdateCheck);
+        assert_eq!(d.prompt.title(), "새 버전이 나오면 알려 드릴까요?");
+        assert_eq!(PromptResult::NotifyMe.label(), "알려 주세요");
+        assert_eq!(PromptResult::NoThanks.label(), "괜찮아요");
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::NoThanks));
+        assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::NoThanks));
+        assert_eq!(d.on_key(VK_ESCAPE, NONE), Some(PromptResult::Cancel));
+        d.on_key(VK_LEFT, NONE);
+        assert_eq!(focused_item(&d), Item::Button(PromptResult::NotifyMe));
+        assert_eq!(d.on_key(VK_SPACE, NONE), Some(PromptResult::NotifyMe));
+        let l = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(l.items.len(), 2);
+        assert!(l.details.is_empty());
     }
 
     #[test]

@@ -79,3 +79,15 @@ Checked against the M3 branch (`m3-file-ops`) in Task 9. The history above is ke
 | Allow libjpeg-turbo, forbid libheif's `jpeg` feature instead | **M3에서 해결** | `setup-deps.ps1` allows libjpeg-turbo and fails if libheif was built with `jpeg`. |
 
 Still open for M5 (unchanged): AppContainer, sibling-worker isolation, deny-only Administrators SID, per-kind caps and the "accepted" handshake beyond the time limits above.
+
+# M5 status of the items deferred to M5
+
+Checked against the M5 branch (`m5-harden-ship`) in Task 9. The history above is kept as it was.
+
+| M2 item | Status | Note |
+|---|---|---|
+| R13: AppContainer for the worker | **M5에서 해결** (5004bb1, 973a2a6) | The worker runs in a capability-less AppContainer (`goodflow.LightView.Worker`) on top of low IL, the Job Object and the mitigations, when the worker folder grants `ALL APPLICATION PACKAGES` read/execute (the installer grants it). Otherwise, or if the AppContainer start fails, it logs once and runs in the low-IL sandbox only, keeping the mitigations (`worker_falls_back_without_appcontainer`, `failed_appcontainer_start_keeps_mitigations`). Not verified with an installed copy (README user-check). |
+| R13: pool start off the UI thread | **M5에서 해결** (97afd57) | HEIF workers start in the background; the first decode overlaps window and Direct2D creation. |
+| R13: sibling-worker isolation, deny-only Administrators SID, per-worker libheif instance reuse | 미해결 | Not in the M5 plan. |
+| Per-kind caps and the "accepted" handshake | 미해결 | Unchanged since M3 (time limits per kind only). |
+| Task 7 note / R15: HEIC first-present (target 400 ms) and the worker memory row measured single-threaded | 미해결 | No 12 MP HEIC sample on this PC; `lv-bench --heic <file>` is ready for the user's iPhone samples (README user-check). |

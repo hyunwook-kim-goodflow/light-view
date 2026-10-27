@@ -4,6 +4,7 @@
 mod about;
 mod clipboard;
 mod commands;
+mod crash;
 mod delete;
 mod exif_card;
 mod fullscreen;
@@ -25,6 +26,7 @@ mod toolbar;
 mod tooltip;
 mod uia;
 mod uia_provider;
+mod update;
 mod viewer;
 mod watch;
 mod window;
@@ -34,7 +36,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
-use lv_core::settings::load_settings;
+use lv_core::portable::{self, DataDir};
+use lv_core::settings::{load_settings, sweep_stale_temps};
 use windows::core::w;
 use windows::Win32::System::Diagnostics::Debug::{
     SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
@@ -45,6 +48,10 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 use crate::instance::{acquire_or_forward, Launch};
+
+/// `light-view.exe --uninstall-cleanup`: deletes the worker's AppContainer profile and
+/// exits with 0, whatever happened, without showing anything.
+const UNINSTALL_CLEANUP: &str = "--uninstall-cleanup";
 
 fn main() -> anyhow::Result<()> {
     let start = Instant::now();
@@ -59,27 +66,65 @@ fn main() -> anyhow::Result<()> {
         eprintln!("light-view: could not set the AppUserModelID: {e}");
     }
     let mut args = std::env::args_os().skip(1).peekable();
-    if args.peek().is_some_and(|a| a == "--timing") {
-        args.next();
+    // The uninstaller runs this before it removes the files (installer/light-view.iss).
+    if args.peek().is_some_and(|a| a == UNINSTALL_CLEANUP) {
+        worker::delete_profile();
+        return Ok(());
+    }
+    let mut bench = false;
+    while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
         timing::enable(start);
+        bench |= flag == "--bench";
     }
     let initial = args.next().map(PathBuf::from);
-    let settings_path = window::settings_path();
+    // `--bench` (lv-bench): default settings, nothing saved, no single-instance check,
+    // so a measurement neither depends on nor changes the user's settings and windows.
+    let data = data_dir();
+    let settings_path = if bench {
+        None
+    } else {
+        window::settings_path(&data)
+    };
+    // Crash records (ruling R6); a measurement run leaves none.
+    if !bench {
+        if let Some(dir) = window::crash_dir(&data) {
+            crash::install(&dir);
+        }
+    }
+    // A crash between writing and renaming leaves a `settings.toml.<pid>.tmp` behind.
+    if let Some(path) = &settings_path {
+        sweep_stale_temps(path, std::time::SystemTime::now());
+    }
     let settings = settings_path
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
     strings::set(settings.language);
     // Held until the window closes, so later launches forward to it.
-    let _guard = if settings.open_in_new_window {
+    let _guard = if settings.open_in_new_window || bench {
         None
     } else {
-        match acquire_or_forward(initial.as_deref()) {
+        let key = instance::own_instance_key();
+        match timing::step("instance-ms", || {
+            acquire_or_forward(initial.as_deref(), key.as_deref())
+        }) {
             Launch::Forwarded => return Ok(()),
             Launch::Primary(guard) => Some(guard),
         }
     };
+    // COM for the UI thread, once (the shell's calls and the Open dialog), held until
+    // the window is gone.
+    let _com = shell::ComApartment::init();
     window::run(initial, settings, settings_path)
+}
+
+/// Where this copy keeps settings and crash records: beside the exe when `portable.txt` is
+/// there (spec §9), else in the user profile.
+fn data_dir() -> DataDir {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(portable::data_dir(exe.parent()?)))
+        .unwrap_or(DataDir::Installed)
 }
 
 /// Turns off Windows' "System Error" boxes (a missing DLL, say) and the crash dialog for
