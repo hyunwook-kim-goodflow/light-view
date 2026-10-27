@@ -27,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::fullscreen;
 use crate::input;
+use crate::overlay::OverlayEvent;
 use crate::routing::RoutingDecoder;
 use crate::viewer::{Redraw, Viewer};
 use crate::window::{invalidate, App};
@@ -173,6 +174,15 @@ fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     }
     input::sync_tooltips(app, hwnd);
     invalidate(hwnd);
+}
+
+/// Acts on a closed dialog or a used toast action. Nothing shows them for real yet:
+/// the save prompt arrives in Task 6, the delete undo and permanent-delete
+/// confirmation in Task 7.
+pub fn on_overlay_event(_app: &RefCell<App>, _hwnd: HWND, event: OverlayEvent) {
+    if cfg!(debug_assertions) {
+        eprintln!("light-view: overlay {event:?}");
+    }
 }
 
 /// Starts the animation timer for `delay_ms`, or stops it.

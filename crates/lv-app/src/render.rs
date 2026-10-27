@@ -21,10 +21,11 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
     IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
@@ -268,6 +269,65 @@ impl Renderer {
         unsafe {
             d.brush.SetColor(&color.to_d2d());
             d.target.FillRoundedRectangle(&rr, &d.brush);
+        }
+    }
+
+    /// Fills `rect` (x, y, w, h in DIPs) with `color` at `alpha` opacity.
+    pub fn fill_rect_alpha(&mut self, rect: (f32, f32, f32, f32), color: Rgb, alpha: f32) {
+        let Some(d) = &self.device else { return };
+        let c = D2D1_COLOR_F {
+            a: alpha,
+            ..color.to_d2d()
+        };
+        // SAFETY: the rect and color are live locals.
+        unsafe {
+            d.brush.SetColor(&c);
+            d.target.FillRectangle(&to_rect_f(rect), &d.brush);
+        }
+    }
+
+    /// Semibold `text` wrapped at word boundaries inside `rect`, from its top-left
+    /// corner, clipped to the rect.
+    pub fn draw_wrapped(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        text: &str,
+        family: &str,
+        size: f32,
+        color: Rgb,
+    ) {
+        let Some(d) = &self.device else { return };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        // SAFETY: plain calls on live COM objects; `wide`, the family string, the
+        // rect and the color are live locals that outlive the calls using them.
+        let result = unsafe {
+            self.dwrite
+                .CreateTextFormat(
+                    &HSTRING::from(family),
+                    None,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!("ko-KR"),
+                )
+                .and_then(|f| {
+                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+                    f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+                    d.brush.SetColor(&color.to_d2d());
+                    d.target.DrawText(
+                        &wide,
+                        &f,
+                        &to_rect_f(rect),
+                        &d.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    Ok(())
+                })
+        };
+        if let Err(e) = result {
+            eprintln!("light-view: text drawing failed: {e}");
         }
     }
 

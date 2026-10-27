@@ -28,6 +28,7 @@ use crate::commands::{self, HwndCell};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
+use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
@@ -58,6 +59,7 @@ pub struct App {
     pub dip: f32,
     icon_family: &'static str,
     pub pointer: Pointer,
+    pub overlay: Overlay,
 }
 
 pub fn run(
@@ -79,6 +81,7 @@ pub fn run(
         dip: 1.0,
         icon_family: "",
         pointer: Pointer::default(),
+        overlay: Overlay::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -221,6 +224,11 @@ impl App {
         self.viewer.set_view(view, dip);
     }
 
+    /// Client area size in DIPs.
+    pub fn client(&self) -> (f32, f32) {
+        self.client_dips
+    }
+
     /// The image area: the client area above a pinned toolbar.
     fn view_dips(&self) -> (f32, f32) {
         let (w, h) = self.client_dips;
@@ -266,6 +274,8 @@ impl App {
             .map(toolbar::zoom_text)
             .unwrap_or_default();
         let (view_w, view_h) = self.view_dips();
+        let now_ms = self.pointer.now_ms();
+        let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -294,6 +304,15 @@ impl App {
             };
             toolbar::draw(r, &view);
         }
+        let view = OverlayView {
+            client: self.client_dips,
+            pinned: pinned_bar,
+            palette: p,
+            dark: self.dark,
+            icon_family: self.icon_family,
+            now_ms,
+        };
+        overlay::draw(r, &mut self.overlay, &view);
         match r.end() {
             Ok(()) if drew_image => crate::timing::first_image_presented(),
             Ok(()) => {}
@@ -454,6 +473,11 @@ fn handle(
             None
         }
         WM_CLOSE => {
+            // An open dialog must be answered first: the close is cancelled. (Task 6
+            // hooks in here: an unsaved rotation shows the save prompt instead.)
+            if app.try_borrow().ok()?.overlay.dialog_open() {
+                return Some(LRESULT(0));
+            }
             // From here on, paths forwarded by later launches open their own window.
             instance::mark_closing();
             app.try_borrow_mut().ok()?.save_placement(hwnd);
@@ -474,7 +498,9 @@ fn handle(
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
         }
-        _ => commands::handle(app, hwnd, msg, wparam, lparam)
+        // The overlay sees input first: an open dialog takes it all.
+        _ => input::overlay(app, hwnd, msg, wparam, lparam)
+            .or_else(|| commands::handle(app, hwnd, msg, wparam, lparam))
             .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
     }
 }
