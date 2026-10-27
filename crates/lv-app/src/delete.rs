@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,18 +20,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
+use lv_core::listing::same_path;
 use windows::core::{implement, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, HWND};
 use windows::Win32::Storage::FileSystem::{DeleteFileW, GetDriveTypeW, GetVolumePathNameW};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
-    COINIT_DISABLE_OLE1DDE,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::UI::Shell::{
     FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
     IShellItem, SHCreateItemFromParsingName, SHQueryRecycleBinW, FOFX_EARLYFAILURE,
     FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-    SHQUERYRBINFO, TSF_DELETE_RECYCLE_IF_POSSIBLE,
+    SHQUERYRBINFO, SIGDN_FILESYSPATH, TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
 
 use crate::commands;
@@ -234,6 +235,13 @@ fn delete_file(ext: &Path) -> Result<(), Refusal> {
 /// through its short (8.3) form it deletes for good: the Recycle Bin cannot hold it. So
 /// only paths shorter than this (UTF-16 units) are recycled.
 const MAX_PATH: usize = 260;
+
+/// Whether the shell can recycle `path` as given (the form `recycle_item` passes to it):
+/// shorter than `MAX_PATH` UTF-16 units, as Windows counts (not bytes: Hangul is three
+/// bytes in an `OsStr` but one unit).
+fn short_enough_for_shell(path: &Path) -> bool {
+    path.as_os_str().encode_wide().count() < MAX_PATH
+}
 const DRIVE_FIXED: u32 = 3;
 
 /// Called on the recycle thread with each pending file's result.
@@ -263,7 +271,7 @@ impl Trash for ShellTrash {
     /// `MAX_PATH`. Network, removable and unknown locations and long paths need the
     /// permanent-delete question.
     fn has_recycle_bin(&self, path: &Path) -> bool {
-        if path.as_os_str().len() >= MAX_PATH {
+        if !short_enough_for_shell(path) {
             return false;
         }
         let Some(root) = volume_root(path) else {
@@ -336,7 +344,7 @@ fn recycle_thread(jobs: &Receiver<Job>, report: &Report) {
 /// recycle (too large for the bin, bin turned off) even with `FOFX_RECYCLEONDELETE`;
 /// [`RecycleOnly`] stops such a delete before it starts.
 fn recycle_item(path: &Path) -> Result<(), String> {
-    if path.as_os_str().len() >= MAX_PATH {
+    if !short_enough_for_shell(path) {
         return Err("the path is too long for the Recycle Bin".into());
     }
     let refused = Arc::new(AtomicBool::new(false));
@@ -376,6 +384,20 @@ fn recycle_item(path: &Path) -> Result<(), String> {
         return Err("still there after the operation".into());
     }
     Ok(())
+}
+
+/// A shell item's file-system path, for logs.
+fn display_path(item: &IShellItem) -> String {
+    // SAFETY: a live item; the returned string is shell-allocated, read once and freed
+    // once with CoTaskMemFree.
+    unsafe {
+        let Ok(p) = item.GetDisplayName(SIGDN_FILESYSPATH) else {
+            return String::new();
+        };
+        let s = p.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    }
 }
 
 /// Cancels a delete the shell would do permanently instead of recycling.
@@ -420,7 +442,12 @@ impl IFileOperationProgressSink_Impl for RecycleOnly_Impl {
     fn PostCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, _: HRESULT, _: Item) -> ComResult {
         Ok(())
     }
-    fn PostDeleteItem(&self, _: u32, _: Item, _: HRESULT, _: Item) -> ComResult {
+    fn PostDeleteItem(&self, _: u32, item: Item, hr: HRESULT, recycled: Item) -> ComResult {
+        // Deleted, yet no item was created in the Recycle Bin: it did not go there.
+        if hr.is_ok() && recycled.is_none() {
+            let name = item.map(display_path).unwrap_or_default();
+            eprintln!("light-view: warning: {name} was deleted without a Recycle Bin item");
+        }
         Ok(())
     }
     fn PreNewItem(&self, _: u32, _: Item, _: &PCWSTR) -> ComResult {
@@ -585,8 +612,7 @@ pub fn undo(app: &RefCell<App>, hwnd: HWND) {
 
 /// Opening the pending deleted photo itself cancels its delete.
 pub fn cancel_if_pending(a: &mut App, path: &Path) {
-    let same = |p: &Path| p.as_os_str().eq_ignore_ascii_case(path.as_os_str());
-    if a.deleter.pending_path().is_some_and(same) {
+    if a.deleter.pending_path().is_some_and(|p| same_path(p, path)) {
         if let Some(p) = a.deleter.undo() {
             a.viewer.forget_hidden(&p);
         }
@@ -604,11 +630,18 @@ pub fn on_reports(app: &RefCell<App>, hwnd: HWND) {
             return;
         };
         // Pending again (a new file under the same name): that delete decides.
-        if a.deleter.pending_path() == Some(path.as_path()) {
+        if a.deleter
+            .pending_path()
+            .is_some_and(|p| same_path(p, &path))
+        {
             continue;
         }
         match result {
             Ok(()) => a.viewer.forget_hidden(&path),
+            // Not a regular file any more, or gone: never listed again (a folder must
+            // never enter the list).
+            Err(CommitError::NotAFile) => a.viewer.forget_hidden(&path),
+            Err(CommitError::Changed) if !exists(&path) => a.viewer.forget_hidden(&path),
             Err(e) => {
                 let redraw = a.viewer.unhide(&path);
                 drop(a);
@@ -620,6 +653,14 @@ pub fn on_reports(app: &RefCell<App>, hwnd: HWND) {
                 }
             }
         }
+    }
+}
+
+/// The path still names something (a read error other than "not found" counts too).
+fn exists(path: &Path) -> bool {
+    match fs::symlink_metadata(to_extended_path(path)) {
+        Ok(_) => true,
+        Err(e) => !matches!(e.kind(), io::ErrorKind::NotFound),
     }
 }
 
@@ -944,6 +985,24 @@ mod tests {
     }
 
     #[test]
+    fn hangul_paths_are_measured_in_utf16_units() {
+        // 100 Hangul syllables: 300 bytes in the OsStr, 100 UTF-16 units.
+        let name = format!("{}.jpg", "가".repeat(100));
+        let path = PathBuf::from(r"C:\사진").join(&name);
+        assert!(path.as_os_str().len() > MAX_PATH);
+        assert!(short_enough_for_shell(&path));
+        let long = PathBuf::from(r"C:\사진").join(format!("{}.jpg", "가".repeat(255)));
+        assert!(!short_enough_for_shell(&long));
+        // On a real fixed drive with a Recycle Bin, length alone does not refuse it.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(&name);
+        fs::write(&file, b"x").unwrap();
+        let trash = ShellTrash::new(Box::new(|_, _| {}));
+        let fixed_with_bin = trash.has_recycle_bin(&dir.path().join("x.jpg"));
+        assert_eq!(trash.has_recycle_bin(&file), fixed_with_bin);
+    }
+
+    #[test]
     fn unknown_drives_have_no_recycle_bin() {
         let trash = ShellTrash::new(Box::new(|_, _| {}));
         let unused = (b'D'..=b'Z')
@@ -1015,7 +1074,7 @@ mod tests {
         assert!(!trash.has_recycle_bin(&path));
         assert!(on_sta(&path).is_err());
         let short = short_path(&path).expect("8.3 names on the temp drive");
-        assert!(short.as_os_str().len() < MAX_PATH);
+        assert!(short_enough_for_shell(&short));
         let r = on_sta(&short);
         assert_eq!(
             r,
