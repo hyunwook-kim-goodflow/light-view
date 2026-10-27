@@ -9,11 +9,14 @@
 //!
 //! `jpeg-decoder` decodes every block of the full-size image (zero-filling what the file
 //! lacks) and cannot be cancelled, so a header claiming a huge image over a few bytes of
-//! data would keep a decoding thread busy for many seconds (ruling R9). So, before
-//! decoding: a source over `MAX_SOURCE_PIXELS` (32768², about 7 s at worst) is
-//! `TooLarge`, and a file whose entropy-coded data (the bytes of its scans, not its
-//! metadata, tables or anything after EOI) has fewer bits than the frame has blocks
-//! (every block takes at least one bit) is `Corrupt`.
+//! data, or one scan repeated many times, would keep a decoding thread busy for many
+//! seconds (rulings R9, R10). So, before decoding: a source over `MAX_SOURCE_PIXELS`
+//! (32768², about 12 s at worst on a 4-core laptop) is `TooLarge`; and it is `Corrupt`
+//! when a sequential frame codes a component in two scans, a progressive frame has more
+//! than 64 scans, or a scan that codes every block of its components (any sequential
+//! scan, a progressive DC-first scan) has fewer bits of entropy-coded data (not
+//! metadata, tables or anything after EOI) than it has blocks: every block takes at
+//! least one bit.
 
 use std::io::Cursor;
 
@@ -88,64 +91,165 @@ pub(super) fn decode(
     })
 }
 
-/// Checks the first frame header: `Err(None)` if it cannot be scaled within
-/// `alloc_cap` bytes, `Err(Some(Corrupt))` if there is none, it is malformed, or the
-/// file is too small for its blocks.
+/// The most scans a progressive frame may have (R10).
+const MAX_PROGRESSIVE_SCANS: usize = 64;
+
+/// Checks the first frame and its scans before anything is decoded (R9, R10).
+/// `Err(None)` if it cannot be scaled (not SOF0..2, or progressive coefficients over
+/// `alloc_cap` bytes); `Err(Some(Corrupt))` if the frame header is missing or malformed,
+/// there is no scan, a scan is malformed or names an unknown component, a sequential
+/// frame has a component in two scans, a progressive frame has more than
+/// `MAX_PROGRESSIVE_SCANS` scans, or a scan that must code every block of its
+/// components (any sequential scan, a progressive DC-first scan) has fewer bits of data
+/// than it has blocks.
 fn check_frame(bytes: &[u8], alloc_cap: u64) -> Result<(), Option<DecodeError>> {
-    let frame = Markers::new(bytes)
-        .map_while(Result::ok)
+    let bad = |what: &str| Some(corrupt(what));
+    let mut markers = Markers::new(bytes).map_while(Result::ok);
+    let frame = markers
+        .by_ref()
         .find(|m| is_frame_header(m.code))
-        .ok_or_else(|| Some(corrupt("no frame header")))?;
+        .ok_or_else(|| bad("no frame header"))?;
     let progressive = match frame.code {
         0xC0 | 0xC1 => false,
         0xC2 => true,
         _ => return Err(None),
     };
-    let blocks = frame_blocks(frame.payload).ok_or_else(|| Some(corrupt("bad frame header")))?;
-    if entropy_bytes(bytes).saturating_mul(8) < blocks {
-        return Err(Some(corrupt("too little data for the image size")));
-    }
-    if progressive && blocks.saturating_mul(COEFFICIENT_BYTES) > alloc_cap {
+    let sof = Sof::parse(frame.payload).ok_or_else(|| bad("bad frame header"))?;
+    if progressive && sof.blocks().saturating_mul(COEFFICIENT_BYTES) > alloc_cap {
         return Err(None);
+    }
+    let mut seen: Vec<u8> = Vec::new();
+    let mut scans = 0;
+    for scan in markers.filter(|m| m.code == SOS) {
+        scans += 1;
+        if progressive && scans > MAX_PROGRESSIVE_SCANS {
+            return Err(bad("too many scans"));
+        }
+        let header = ScanHeader::parse(scan.payload).ok_or_else(|| bad("bad scan header"))?;
+        if !progressive {
+            if header.ids.iter().any(|id| seen.contains(id)) {
+                return Err(bad("a component in two scans"));
+            }
+            seen.extend_from_slice(&header.ids);
+        }
+        let blocks = sof
+            .scan_blocks(&header.ids)
+            .ok_or_else(|| bad("scan of an unknown component"))?;
+        let codes_every_block = !progressive || header.dc_first;
+        let bits = scan_data_len(bytes, scan.end).saturating_mul(8);
+        if codes_every_block && bits < blocks {
+            return Err(bad("too little data for the image size"));
+        }
+    }
+    if scans == 0 {
+        return Err(bad("no scan"));
     }
     Ok(())
 }
 
-/// The bytes of entropy-coded data in all scans up to EOI: from each SOS header's end to
-/// the next marker that is not `RSTn` or a stuffed `FF00` (or the end of the file).
-fn entropy_bytes(bytes: &[u8]) -> u64 {
-    Markers::new(bytes)
-        .map_while(Result::ok)
-        .filter(|m| m.code == SOS)
-        .map(|m| {
-            let next = skip_entropy_data(bytes, m.end).unwrap_or(bytes.len());
-            next.saturating_sub(m.end) as u64
-        })
-        .sum()
+/// The bytes of a scan's entropy-coded data, from its header's end (`start`) to the next
+/// marker that is not `RSTn` or a stuffed `FF00` (or the end of the file).
+fn scan_data_len(bytes: &[u8], start: usize) -> u64 {
+    let end = skip_entropy_data(bytes, start).unwrap_or(bytes.len());
+    end.saturating_sub(start) as u64
 }
 
 /// The bytes a progressive decode holds per block: 64 `i16` coefficients.
 const COEFFICIENT_BYTES: u64 = 64 * 2;
 
+/// A frame header: its size and each component's id and sampling factors.
+struct Sof {
+    width: u64,
+    height: u64,
+    /// (id, horizontal, vertical), every factor at least 1.
+    components: Vec<(u8, u64, u64)>,
+    h_max: u64,
+    v_max: u64,
+}
+
+impl Sof {
+    /// `None` if the SOF payload is malformed.
+    fn parse(sof: &[u8]) -> Option<Sof> {
+        let height = u64::from(u16::from_be_bytes([*sof.get(1)?, *sof.get(2)?]));
+        let width = u64::from(u16::from_be_bytes([*sof.get(3)?, *sof.get(4)?]));
+        let count = usize::from(*sof.get(5)?);
+        let components: Vec<(u8, u64, u64)> = sof
+            .get(6..6 + 3 * count)?
+            .chunks_exact(3)
+            .map(|c| (c[0], u64::from(c[1] >> 4), u64::from(c[1] & 0xF)))
+            .collect();
+        if components.iter().any(|c| c.1 == 0 || c.2 == 0) {
+            return None;
+        }
+        Some(Sof {
+            width,
+            height,
+            h_max: components.iter().map(|c| c.1).max()?,
+            v_max: components.iter().map(|c| c.2).max()?,
+            components,
+        })
+    }
+
+    fn mcus(&self) -> (u64, u64) {
+        (
+            self.width.div_ceil(8 * self.h_max),
+            self.height.div_ceil(8 * self.v_max),
+        )
+    }
+
+    /// Every component's blocks over the MCU-padded image.
+    fn blocks(&self) -> u64 {
+        let (mx, my) = self.mcus();
+        self.components.iter().map(|c| mx * c.1 * my * c.2).sum()
+    }
+
+    /// The blocks a scan of these components codes: MCU-padded when interleaved, the
+    /// component's own (unpadded) blocks when alone. `None` for an unknown component.
+    fn scan_blocks(&self, ids: &[u8]) -> Option<u64> {
+        let find = |id: &u8| self.components.iter().find(|c| c.0 == *id);
+        if let [id] = ids {
+            let (_, h, v) = find(id)?;
+            let w = (self.width * h).div_ceil(self.h_max);
+            let ht = (self.height * v).div_ceil(self.v_max);
+            return Some(w.div_ceil(8) * ht.div_ceil(8));
+        }
+        let (mx, my) = self.mcus();
+        ids.iter()
+            .map(|id| find(id).map(|c| mx * c.1 * my * c.2))
+            .sum()
+    }
+}
+
+/// A scan header: its components and whether it is a DC-first scan (Ss = 0, Ah = 0).
+struct ScanHeader {
+    ids: Vec<u8>,
+    dc_first: bool,
+}
+
+impl ScanHeader {
+    /// `None` if the SOS payload is malformed or names no component.
+    fn parse(sos: &[u8]) -> Option<ScanHeader> {
+        let count = usize::from(*sos.first()?);
+        let ids: Vec<u8> = sos
+            .get(1..1 + 2 * count)?
+            .iter()
+            .step_by(2)
+            .copied()
+            .collect();
+        let ss = *sos.get(1 + 2 * count)?;
+        let ah = *sos.get(3 + 2 * count)? >> 4;
+        (!ids.is_empty()).then_some(ScanHeader {
+            ids,
+            dc_first: ss == 0 && ah == 0,
+        })
+    }
+}
+
 /// The blocks of the frame whose SOF payload this is: per component, its blocks over the
 /// MCU-padded image. `None` if the header is malformed.
+#[cfg(test)]
 fn frame_blocks(sof: &[u8]) -> Option<u64> {
-    let height = u64::from(u16::from_be_bytes([*sof.get(1)?, *sof.get(2)?]));
-    let width = u64::from(u16::from_be_bytes([*sof.get(3)?, *sof.get(4)?]));
-    let count = usize::from(*sof.get(5)?);
-    let sampling: Vec<(u64, u64)> = sof
-        .get(6..6 + 3 * count)?
-        .chunks_exact(3)
-        .map(|c| (u64::from(c[1] >> 4), u64::from(c[1] & 0xF)))
-        .collect();
-    let h_max = sampling.iter().map(|s| s.0).max()?;
-    let v_max = sampling.iter().map(|s| s.1).max()?;
-    if h_max == 0 || v_max == 0 || sampling.iter().any(|s| s.0 == 0 || s.1 == 0) {
-        return None;
-    }
-    let mcus_x = width.div_ceil(8 * h_max);
-    let mcus_y = height.div_ceil(8 * v_max);
-    Some(sampling.iter().map(|(h, v)| mcus_x * h * mcus_y * v).sum())
+    Sof::parse(sof).map(|s| s.blocks())
 }
 
 /// Expands `jpeg-decoder` output of `pixels` pixels to RGBA8.
@@ -432,10 +536,8 @@ mod tests {
         let jpeg = |code: u8, payload: &[u8], data: usize| {
             let mut b = vec![0xFF, 0xD8];
             b.extend(crate::jpeg_markers::tests::segment(code, payload));
-            b.extend(crate::jpeg_markers::tests::segment(
-                SOS,
-                &[1, 1, 0, 0, 63, 0],
-            ));
+            // One interleaved scan of all three components.
+            b.extend(crate::jpeg_markers::tests::segment(SOS, &ALL_THREE));
             b.resize(b.len() + data, 0);
             b.extend([0xFF, 0xD9]);
             b
@@ -478,19 +580,160 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn entropy_bytes_count_scans_only() {
+    /// SOS payload: the components `ids`, spectral range `ss..=se`, and `ah`.
+    fn sos(ids: &[u8], ss: u8, se: u8, ah: u8) -> Vec<u8> {
+        let mut p = vec![ids.len() as u8];
+        for id in ids {
+            p.extend([*id, 0]);
+        }
+        p.extend([ss, se, ah << 4]);
+        p
+    }
+
+    /// One interleaved sequential scan of components 1, 2 and 3.
+    const ALL_THREE: [u8; 10] = [3, 1, 0, 2, 0, 3, 0, 0, 63, 0];
+
+    /// SOI, a frame header, each scan followed by that many bytes of data, EOI.
+    fn file(code: u8, sof_payload: &[u8], scans: &[(Vec<u8>, usize)]) -> Vec<u8> {
         let seg = crate::jpeg_markers::tests::segment;
         let mut b = vec![0xFF, 0xD8];
-        b.extend(seg(0xE1, &[0; 100]));
-        b.extend(seg(SOS, &[0; 6]));
-        // 4 data bytes, a stuffed FF00 and a restart marker inside the scan.
-        b.extend([1, 2, 0xFF, 0x00, 3, 0xFF, 0xD0, 4]);
-        b.extend(seg(0xC4, &[0; 50]));
-        b.extend(seg(SOS, &[0; 6]));
-        b.extend([5, 6]);
+        b.extend(seg(code, sof_payload));
+        for (header, data) in scans {
+            b.extend(seg(SOS, header));
+            b.resize(b.len() + data, 0);
+        }
         b.extend([0xFF, 0xD9]);
-        b.extend([7; 1000]);
-        assert_eq!(entropy_bytes(&b), 8 + 2);
+        b
+    }
+
+    #[test]
+    fn scan_data_counts_stuffing_and_restarts_up_to_the_next_marker() {
+        let mut b = vec![0; 4];
+        b.extend([1, 2, 0xFF, 0x00, 3, 0xFF, 0xD0, 4, 0xFF, 0xC4, 0, 2]);
+        assert_eq!(scan_data_len(&b, 4), 8);
+        assert_eq!(scan_data_len(&[0, 0, 1, 2, 3], 2), 3);
+    }
+
+    #[test]
+    fn scan_blocks_pad_only_interleaved_scans() {
+        let s = Sof::parse(&sof(648, 480, &[(2, 2), (1, 1), (1, 1)])).unwrap();
+        // Alone, Y has its own 81x60 blocks; MCU padding would make it 82x60.
+        assert_eq!(s.scan_blocks(&[1]), Some(81 * 60));
+        assert_eq!(s.scan_blocks(&[2]), Some(41 * 30));
+        // Interleaved: 41x30 MCUs of 4 + 1 + 1 blocks.
+        assert_eq!(s.scan_blocks(&[1, 2, 3]), Some(41 * 30 * 6));
+        assert_eq!(s.scan_blocks(&[4]), None);
+    }
+
+    /// A real 64x48 gray JPEG claiming 32768x32768, its scan data replaced by enough
+    /// zero bytes for every block, then `repeats` more scans of the same component with
+    /// one byte each.
+    fn gray_crafted(repeats: usize) -> Vec<u8> {
+        let gray = image::GrayImage::from_pixel(64, 48, image::Luma([128]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&gray)
+            .unwrap();
+        let (sof_at, sos_at, sos_end) = {
+            let markers: Vec<_> = Markers::new(&jpeg).map_while(Result::ok).collect();
+            let at = |m: &crate::jpeg_markers::Marker| {
+                m.payload.as_ptr() as usize - jpeg.as_ptr() as usize
+            };
+            let sof = markers.iter().find(|m| is_frame_header(m.code)).unwrap();
+            let sos = markers.iter().find(|m| m.code == SOS).unwrap();
+            (at(sof), at(sos) - 4, sos.end)
+        };
+        let mut out = jpeg[..sos_end].to_vec();
+        out[sof_at + 1..sof_at + 5].copy_from_slice(&[0x80, 0, 0x80, 0]);
+        out.resize(out.len() + 4096 * 4096 / 8, 0);
+        for _ in 0..repeats {
+            out.extend_from_slice(&jpeg[sos_at..sos_end]);
+            out.push(0);
+        }
+        out.extend([0xFF, 0xD9]);
+        out
+    }
+
+    #[test]
+    fn repeated_sequential_scans_fail_fast() {
+        // One full scan passes the check (it is not decoded here: that takes seconds).
+        assert!(check_frame(&gray_crafted(0), u64::MAX).is_ok());
+        assert!(matches!(
+            check_frame(&gray_crafted(4), u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        assert!(matches!(
+            refused_fast(&gray_crafted(4)),
+            DecodeError::Corrupt(_)
+        ));
+        // Even repeats with enough data each: a component is coded once.
+        let gray = sof(32768, 32768, &[(1, 1)]);
+        let full = (sos(&[1], 0, 63, 0), 4096 * 4096 / 8);
+        assert!(matches!(
+            check_frame(&file(0xC0, &gray, &[full.clone(), full]), u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+    }
+
+    #[test]
+    fn sequential_scans_are_checked_one_by_one() {
+        // 4:2:0 640x480: Y alone has 80x60 blocks; Cb and Cr interleaved, 40x30 MCUs
+        // of one block each.
+        let s = sof(640, 480, &[(2, 2), (1, 1), (1, 1)]);
+        let scans = |second: usize| {
+            file(
+                0xC0,
+                &s,
+                &[(sos(&[1], 0, 63, 0), 600), (sos(&[2, 3], 0, 63, 0), second)],
+            )
+        };
+        assert!(check_frame(&scans(300), u64::MAX).is_ok());
+        assert!(matches!(
+            check_frame(&scans(299), u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        // A scan of a component the frame does not have, and a frame without scans.
+        let unknown = file(0xC0, &s, &[(sos(&[9], 0, 63, 0), 10_000)]);
+        assert!(matches!(
+            check_frame(&unknown, u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        assert!(matches!(
+            check_frame(&file(0xC0, &s, &[]), u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+    }
+
+    #[test]
+    fn progressive_scans_are_capped_and_only_dc_first_needs_data() {
+        let s = sof(640, 480, &[(1, 1), (1, 1), (1, 1)]);
+        // A DC-first scan of all 3 * 4800 blocks, then near-empty AC scans.
+        let scans = |total: usize| {
+            let mut v = vec![(sos(&[1, 2, 3], 0, 0, 0), 3 * 4800 / 8)];
+            v.extend((1..total).map(|_| (sos(&[1], 1, 63, 0), 1)));
+            file(0xC2, &s, &v)
+        };
+        let start = std::time::Instant::now();
+        assert!(check_frame(&scans(64), u64::MAX).is_ok());
+        assert!(matches!(
+            check_frame(&scans(65), u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        // A short DC-first scan, and a DC refinement (Ah = 1) needing no floor.
+        let short = file(0xC2, &s, &[(sos(&[1, 2, 3], 0, 0, 0), 100)]);
+        assert!(matches!(
+            check_frame(&short, u64::MAX),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        let refine = file(
+            0xC2,
+            &s,
+            &[
+                (sos(&[1, 2, 3], 0, 0, 0), 1800),
+                (sos(&[1, 2, 3], 0, 0, 1), 1),
+            ],
+        );
+        assert!(check_frame(&refine, u64::MAX).is_ok());
     }
 }
