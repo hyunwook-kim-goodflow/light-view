@@ -72,13 +72,31 @@ fn seed(target: &str, name: &str) -> Vec<u8> {
 /// The seeds are worth mutating only if they get past the parsers' first checks.
 #[test]
 fn seeds_reach_the_parsers() {
-    use lv_core::decode::{decode_bytes, DecodeLimits};
+    use lv_core::decode::{decode_bytes, DecodeError, DecodeLimits};
+    use lv_core::format::{sniff_format, ImageFormat};
     let limits = DecodeLimits {
         max_pixels: fuzzing::FUZZ_MAX_PIXELS,
     };
     for file in seeds("format_decode") {
-        let image = decode_bytes(&fs::read(&file).unwrap(), &limits)
-            .unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        let data = fs::read(&file).unwrap();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with("heif-") {
+            assert_eq!(sniff_format(&data), Some(ImageFormat::Heif), "{name}");
+            continue;
+        }
+        if name.contains("truncated") {
+            // Past the sniff and the header; the decoder may or may not accept the rest.
+            assert!(!matches!(
+                decode_bytes(&data, &limits),
+                Err(DecodeError::Unsupported)
+            ));
+            continue;
+        }
+        let image =
+            decode_bytes(&data, &limits).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        if name.starts_with("gif-") || name.contains("animated") {
+            assert!(image.frames.len() >= 2, "{name}");
+        }
         let scaled = file.to_string_lossy().contains("scaled");
         assert_eq!(image.scaled_from.is_some(), scaled, "{}", file.display());
     }
@@ -210,6 +228,169 @@ fn bmp(w: u32, h: u32) -> Vec<u8> {
     image::codecs::bmp::BmpEncoder::new(&mut out)
         .write_image(rgb(w, h).as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .unwrap();
+    out
+}
+
+/// A 16x8 grayscale progressive JPEG (SOF2), built by hand since the encoders here write
+/// only baseline: a DC-first scan and an AC-first scan over two blocks, quantization all 1.
+/// Block 1 has DC 5 and AC[1] 3; block 2 has DC 5 and no AC.
+fn progressive_jpeg() -> Vec<u8> {
+    let mut out = vec![0xFF, 0xD8];
+    let mut dqt = vec![0x00];
+    dqt.extend([1u8; 64]);
+    out.extend(segment(0xDB, &dqt));
+    // 8-bit, height 8, width 16, one component (id 1, 1x1 sampling, table 0).
+    out.extend(segment(0xC2, &[8, 0, 8, 0, 16, 1, 1, 0x11, 0]));
+    // Each table: two 2-bit codes, 00 and 01.
+    let table = |class_id: u8, symbols: [u8; 2]| {
+        let mut p = vec![class_id, 0, 2];
+        p.extend([0u8; 14]);
+        p.extend(symbols);
+        segment(0xC4, &p)
+    };
+    out.extend(table(0x00, [0, 3])); // DC: categories 0 and 3
+    out.extend(table(0x10, [0x00, 0x02])); // AC: EOB and (run 0, size 2)
+                                           // DC first: block 1 category 3 (01) + 101, block 2 difference 0 (00), pad with 1s.
+    out.extend(segment(0xDA, &[1, 1, 0x00, 0, 0, 0]));
+    out.push(0b0110_1001);
+    // AC first, coefficients 1..=63: block 1 (0,2) (01) + 11, EOB (00); block 2 EOB (00).
+    out.extend(segment(0xDA, &[1, 1, 0x00, 1, 63, 0]));
+    out.push(0b0111_0000);
+    out.extend([0xFF, 0xD9]);
+    out
+}
+
+/// RIFF chunks of a WebP file after the `WEBP` tag: (fourcc, payload).
+fn webp_chunks(file: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let mut chunks = Vec::new();
+    let mut at = 12;
+    while at + 8 <= file.len() {
+        let fourcc: [u8; 4] = file[at..at + 4].try_into().unwrap();
+        let len = u32::from_le_bytes(file[at + 4..at + 8].try_into().unwrap()) as usize;
+        chunks.push((fourcc, file[at + 8..at + 8 + len].to_vec()));
+        at += 8 + len + (len & 1);
+    }
+    chunks
+}
+
+fn riff_chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut c = fourcc.to_vec();
+    c.extend((payload.len() as u32).to_le_bytes());
+    c.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn u24(v: u32) -> [u8; 3] {
+    let b = v.to_le_bytes();
+    [b[0], b[1], b[2]]
+}
+
+/// A two-frame animated WebP (`VP8X` + `ANIM` + two `ANMF`), each frame the lossless
+/// bitstream the encoder writes for a still image.
+fn animated_webp(w: u32, h: u32) -> Vec<u8> {
+    let frame = |seed: u8| {
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            Rgba([(x as u8 * 30) ^ seed, y as u8 * 30, 90, 255])
+        });
+        let mut out = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let (_, vp8l) = webp_chunks(&out)
+            .into_iter()
+            .find(|(fourcc, _)| fourcc == b"VP8L")
+            .expect("lossless WebP has a VP8L chunk");
+        vp8l
+    };
+    let mut vp8x = vec![0x12, 0, 0, 0]; // animation + alpha
+    vp8x.extend(u24(w - 1));
+    vp8x.extend(u24(h - 1));
+    let mut body = b"WEBP".to_vec();
+    body.extend(riff_chunk(b"VP8X", &vp8x));
+    body.extend(riff_chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    for (seed, ms) in [(0u8, 80u32), (100, 150)] {
+        let mut anmf = Vec::new();
+        anmf.extend(u24(0)); // x / 2
+        anmf.extend(u24(0)); // y / 2
+        anmf.extend(u24(w - 1));
+        anmf.extend(u24(h - 1));
+        anmf.extend(u24(ms));
+        anmf.push(0); // alpha-blend, no dispose
+        anmf.extend(riff_chunk(b"VP8L", &frame(seed)));
+        body.extend(riff_chunk(b"ANMF", &anmf));
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend((body.len() as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+/// CRC-32 (ISO-HDLC) as PNG chunks use it.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn png_chunk(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut body = typ.to_vec();
+    body.extend_from_slice(payload);
+    let mut c = (payload.len() as u32).to_be_bytes().to_vec();
+    c.extend_from_slice(&body);
+    c.extend(crc32(&body).to_be_bytes());
+    c
+}
+
+/// A two-frame APNG: the PNG encoder's `IDAT` as the default image and first frame, and
+/// the same data again as an `fdAT` second frame.
+fn apng(w: u32, h: u32) -> Vec<u8> {
+    let still = png(w, h);
+    let mut at = 8;
+    let (mut ihdr, mut idat) = (Vec::new(), Vec::new());
+    while at + 8 <= still.len() {
+        let len = u32::from_be_bytes(still[at..at + 4].try_into().unwrap()) as usize;
+        let payload = &still[at + 8..at + 8 + len];
+        match &still[at + 4..at + 8] {
+            b"IHDR" => ihdr = payload.to_vec(),
+            b"IDAT" => idat.extend_from_slice(payload),
+            _ => {}
+        }
+        at += 12 + len;
+    }
+    let fctl = |seq: u32, delay: u16| {
+        let mut p = seq.to_be_bytes().to_vec();
+        p.extend(w.to_be_bytes());
+        p.extend(h.to_be_bytes());
+        p.extend([0u8; 8]); // x and y offsets
+        p.extend(delay.to_be_bytes());
+        p.extend(10u16.to_be_bytes()); // delay in tenths of a second
+        p.extend([0, 0]); // dispose none, blend source
+        png_chunk(b"fcTL", &p)
+    };
+    let mut out = still[..8].to_vec();
+    out.extend(png_chunk(b"IHDR", &ihdr));
+    let mut actl = 2u32.to_be_bytes().to_vec();
+    actl.extend(0u32.to_be_bytes()); // loop forever
+    out.extend(png_chunk(b"acTL", &actl));
+    out.extend(fctl(0, 1));
+    out.extend(png_chunk(b"IDAT", &idat));
+    out.extend(fctl(1, 3));
+    let mut fdat = 2u32.to_be_bytes().to_vec();
+    fdat.extend(&idat);
+    out.extend(png_chunk(b"fdAT", &fdat));
+    out.extend(png_chunk(b"IEND", &[]));
     out
 }
 
@@ -441,6 +622,15 @@ fn exif_item(id: u16, o: u16) -> HeifItem {
     }
 }
 
+/// [`heif_plain`] with a `mif1` major brand, so sniffing reads the compatible brands.
+fn heif_mif1() -> Vec<u8> {
+    let plain = heif_plain();
+    let ftyp_len = u32::from_be_bytes(plain[..4].try_into().unwrap()) as usize;
+    let mut out = bx(b"ftyp", b"mif1\0\0\0\0mif1heic");
+    out.extend_from_slice(&plain[ftyp_len..]);
+    out
+}
+
 fn heif_plain() -> Vec<u8> {
     heif(&[coded(1, vec![1])], &[ispe(64, 48)], &[])
 }
@@ -480,6 +670,14 @@ fn format_decode_seeds() -> Seeds {
         ("gif-2frames.gif", gif(6, 4)),
         ("webp-lossless.webp", webp(7, 5)),
         ("bmp-9x4.bmp", bmp(9, 4)),
+        ("jpeg-progressive-16x8.jpg", progressive_jpeg()),
+        // Cut inside the scan data: decoders may fill the rest or refuse it.
+        ("jpeg-truncated.jpg", small[..small.len() * 3 / 5].to_vec()),
+        ("webp-animated.webp", animated_webp(7, 5)),
+        ("png-apng-2frames.png", apng(5, 3)),
+        // Sniffed as HEIF (major brand `mif1`, `heic` among the compatible brands), which
+        // this decoder leaves to the worker.
+        ("heif-sniff-mif1.heic", heif_mif1()),
     ]
 }
 

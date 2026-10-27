@@ -53,6 +53,8 @@ jobs:
           key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: vcpkg-x64-windows-
 
+      # A cache entry is never overwritten, so the key includes the commit: every run saves
+      # its target folder and the next one starts from the newest entry (restore-keys).
       - name: Cache cargo registry and target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -60,8 +62,10 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             target
-          key: cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ env.RUST_TOOLCHAIN }}-
+          key: cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ env.RUST_TOOLCHAIN }}-
 
       # vcpkg at the pinned commit, manifest install, forbidden-codec check, DLLs next to
       # the build outputs.
@@ -69,6 +73,9 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
 
+      # fuzz/ is its own workspace (excluded in Cargo.toml), so `cargo fmt --all`, clippy
+      # and `cargo deny` do not cover it; `cargo audit` checks its lockfile (supply-chain
+      # job) and fuzz.yml builds it weekly.
       - name: Format
         run: cargo fmt --all --check
 
@@ -115,6 +122,61 @@ jobs:
           path: lv-bench-ci.json
           if-no-files-found: ignore
 
+  # Release builds link the C runtime statically (ruling R16, release.yml and
+  # scripts/package.ps1), which the build job above does not. This job builds lv-worker
+  # and lv-app's tests the same way and runs the worker's own tests and lv-app's worker
+  # tests (sandbox, AppContainer, HEIC decode and JPEG rotation through the pool).
+  crt-static:
+    name: Worker tests with the static C runtime (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .vcpkg/archives
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-x64-windows-
+
+      # Its own cache: RUSTFLAGS changes every artifact, so it cannot share the build job's.
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Native dependencies (vcpkg)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
+
+      - name: Build
+        run: |
+          cargo build --locked -p lv-worker
+          cargo test --locked -p lv-worker -p lv-app --no-run
+
+      - name: Test
+        run: |
+          cargo test --locked -p lv-worker
+          cargo test --locked -p lv-app -- worker::
+
   supply-chain:
     name: cargo deny and cargo audit
     runs-on: windows-latest
@@ -144,8 +206,8 @@ jobs:
       - name: Install cargo-deny and cargo-audit
         if: steps.tools.outputs.cache-hit != 'true'
         run: |
-          cargo install --locked cargo-deny --version ${{ env.CARGO_DENY_VERSION }}
-          cargo install --locked cargo-audit --version ${{ env.CARGO_AUDIT_VERSION }}
+          cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+          cargo install --locked cargo-audit --version "$CARGO_AUDIT_VERSION"
 
       # Licenses, bans, sources and RustSec advisories (deny.toml).
       - name: cargo deny
