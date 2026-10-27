@@ -43,11 +43,39 @@ pub fn read_orientation(jpeg: &[u8]) -> u16 {
 /// `jpeg` with EXIF orientation `value` (1..=8). Without EXIF a minimal APP1 is inserted
 /// after SOI (after a leading APP0, which JFIF wants first); with EXIF the Orientation in
 /// IFD0 is patched in place, or added as the module documentation describes. Errs when
-/// the APP1 would outgrow a JPEG segment.
+/// the APP1 would outgrow a JPEG segment, and when the viewer ([`read_orientation`]) would
+/// not read `value` back from the result (EXIF the patcher can edit but kamadak-exif
+/// cannot parse), so a save never silently fails to stick.
+///
+/// This is the tag-only save. After a pixel rotation use [`after_pixel_rotation`] instead.
 pub fn set_orientation(jpeg: &[u8], value: u16) -> Result<Vec<u8>, String> {
-    if !(1..=8).contains(&value) {
-        return Err(format!("EXIF orientation {value} is not 1..=8"));
+    check_orientation(value)?;
+    let out = patch_orientation(jpeg, value)?;
+    reads_back(out, value)
+}
+
+fn check_orientation(value: u16) -> Result<(), String> {
+    if (1..=8).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("EXIF orientation {value} is not 1..=8"))
     }
+}
+
+/// The post-condition of every edit: the viewer reads `value` from `out`.
+fn reads_back(out: Vec<u8>, value: u16) -> Result<Vec<u8>, String> {
+    let read = read_orientation(&out);
+    if read == value {
+        Ok(out)
+    } else {
+        Err(format!(
+            "EXIF orientation {value} was written but reads back as {read}"
+        ))
+    }
+}
+
+/// [`set_orientation`] without the read-back check; `value` is already in 1..=8.
+fn patch_orientation(jpeg: &[u8], value: u16) -> Result<Vec<u8>, String> {
     let Some(app1) = find_exif(jpeg)? else {
         if value == 1 {
             return Ok(jpeg.to_vec());
@@ -114,13 +142,27 @@ pub fn set_orientation(jpeg: &[u8], value: u16) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Fixes the EXIF of a JPEG whose pixels were just rotated: Orientation becomes 1 (when
-/// present), the Exif IFD's PixelX/YDimension become `new_w`/`new_h` (when present, in
-/// their own type) and the thumbnail is dropped by setting IFD0's next-IFD offset to 0
-/// (its bytes stay). Without EXIF the JPEG is returned unchanged.
-pub fn after_pixel_rotation(jpeg: &[u8], new_w: u32, new_h: u32) -> Result<Vec<u8>, String> {
+/// Fixes the EXIF of a JPEG whose pixels were just rotated: Orientation becomes
+/// `orientation` (1..=8), the Exif IFD's PixelX/YDimension become `new_w`/`new_h` (when
+/// present, in their own type) and the thumbnail is dropped by setting IFD0's next-IFD
+/// offset to 0 (its bytes stay). Orientation is patched in place, or added as
+/// [`set_orientation`] adds it when the tag (or the whole EXIF) is missing and
+/// `orientation` is not 1. Errs, like [`set_orientation`], when the viewer would not read
+/// `orientation` back.
+///
+/// The rotation save: `(o2, p) = compose(stored, user_quarters)`, turn the pixels `p`
+/// quarter turns clockwise, then `after_pixel_rotation(rotated, new_w, new_h, o2)`. For a
+/// mirrored orientation `o2` is 2, so passing 1 here would lose the mirror.
+pub fn after_pixel_rotation(
+    jpeg: &[u8],
+    new_w: u32,
+    new_h: u32,
+    orientation: u16,
+) -> Result<Vec<u8>, String> {
+    check_orientation(orientation)?;
     let Some(app1) = find_exif(jpeg)? else {
-        return Ok(jpeg.to_vec());
+        let out = patch_orientation(jpeg, orientation)?;
+        return reads_back(out, orientation);
     };
     let tiff = Tiff::new(&jpeg[app1.tiff_start..app1.end])?;
     let ifd0 = tiff.ifd(tiff.u32(4)?)?;
@@ -130,9 +172,13 @@ pub fn after_pixel_rotation(jpeg: &[u8], new_w: u32, new_h: u32) -> Result<Vec<u
         base: app1.tiff_start,
         be: tiff.be,
     };
+    let mut found = false;
     for entry in ifd0.entries() {
         match entry.tag {
-            TAG_ORIENTATION => patch.short(&entry, 1)?,
+            TAG_ORIENTATION => {
+                patch.short(&entry, orientation)?;
+                found = true;
+            }
             TAG_EXIF_IFD => {
                 if !matches!(entry.typ, TYPE_LONG | TYPE_IFD) || entry.count != 1 {
                     return Err("malformed Exif IFD pointer".into());
@@ -150,7 +196,11 @@ pub fn after_pixel_rotation(jpeg: &[u8], new_w: u32, new_h: u32) -> Result<Vec<u
         }
     }
     patch.u32_at(ifd0.next_at, 0);
-    Ok(out)
+    if !found && orientation != 1 {
+        // The appended IFD0 copies the next-IFD link just cleared.
+        out = patch_orientation(&out, orientation)?;
+    }
+    reads_back(out, orientation)
 }
 
 /// An EXIF orientation as a mirror flag and clockwise quarter turns: the viewer shows the
@@ -180,7 +230,9 @@ fn join(mirror: bool, quarters: u8) -> u16 {
 /// Splits a stored orientation plus a user rotation into `(o', p)`: turning the stored
 /// pixels `p` quarter turns clockwise and then showing them with orientation `o'` gives
 /// exactly what was on screen (the stored pixels shown with `orientation`) turned
-/// `user_quarters` times clockwise.
+/// `user_quarters` times clockwise. The save turns the pixels by `p` and then writes the
+/// new orientation with [`after_pixel_rotation`] (never a fixed 1: it is 2 for mirrored
+/// inputs).
 ///
 /// Write `orientation` as "mirror left-right if `m`, then turn `r` quarters clockwise".
 /// The target is mirror-if-`m` followed by `r + q` turns. Only the mirror stays in the
@@ -448,6 +500,7 @@ mod tests {
         pixel_x_at: Option<usize>,
         pixel_y_at: Option<usize>,
         ifd0_next_at: usize,
+        exif_ptr_at: usize,
     }
 
     struct Builder {
@@ -513,7 +566,7 @@ mod tests {
         b.u16(n0 as u16);
         b.entry(0x010F, 2, 6, make_off);
         let orientation_at = orientation.map(|o| b.entry(0x0112, SHORT, 1, u32::from(o)));
-        b.entry(0x8769, LONG, 1, exif_off);
+        let exif_ptr_at = b.entry(0x8769, LONG, 1, exif_off);
         let ifd0_next_at = b.out.len();
         b.u32(if thumbnail { ifd1_off } else { 0 });
         b.out.extend_from_slice(b"Canon\0");
@@ -540,6 +593,7 @@ mod tests {
             pixel_x_at,
             pixel_y_at,
             ifd0_next_at,
+            exif_ptr_at,
         }
     }
 
@@ -680,7 +734,7 @@ mod tests {
                 assert!(exif_of(&j)
                     .get_field(Tag::Compression, In::THUMBNAIL)
                     .is_some());
-                let out = after_pixel_rotation(&j, 32, 64).unwrap();
+                let out = after_pixel_rotation(&j, 32, 64, 1).unwrap();
                 assert_eq!(read_orientation(&out), 1);
                 let exif = exif_of(&out);
                 let dim = |tag| format!("{:?}", exif.get_field(tag, In::PRIMARY).unwrap().value);
@@ -714,16 +768,17 @@ mod tests {
         }
         // No dimension tags: they stay absent.
         let t = tiff(true, Some(8), None, false);
-        let out = after_pixel_rotation(&with_exif(&base, &t.bytes), 32, 64).unwrap();
+        let out = after_pixel_rotation(&with_exif(&base, &t.bytes), 32, 64, 1).unwrap();
         assert_eq!(read_orientation(&out), 1);
         assert!(exif_of(&out)
             .get_field(Tag::PixelXDimension, In::PRIMARY)
             .is_none());
         // A SHORT field cannot hold the new size.
         let t = tiff(false, Some(6), Some((SHORT, 64, 32)), false);
-        assert!(after_pixel_rotation(&with_exif(&base, &t.bytes), 70_000, 64).is_err());
+        assert!(after_pixel_rotation(&with_exif(&base, &t.bytes), 70_000, 64, 1).is_err());
         // No EXIF: nothing to fix.
-        assert_eq!(after_pixel_rotation(&base, 32, 64).unwrap(), base);
+        assert_eq!(after_pixel_rotation(&base, 32, 64, 1).unwrap(), base);
+        assert!(after_pixel_rotation(&base, 32, 64, 0).is_err());
     }
 
     /// A 3x2 grid of distinct pixels: no rotation or mirror maps it onto itself.
@@ -784,6 +839,60 @@ mod tests {
         assert_eq!(compose_tag_only(42, 1), 6);
     }
 
+    #[test]
+    fn mirrored_rotation_save_keeps_the_mirror() {
+        // compose -> turn the pixels -> after_pixel_rotation(new orientation) shows the
+        // target for every stored orientation (mirrored ones included), with or without
+        // the tag.
+        let base = sample("gradient-64x32.jpg");
+        let stored = grid();
+        for o in 1..=8u16 {
+            for q in 0..4u8 {
+                let target = rotate_cw(&display(&stored, o), q);
+                let (new_o, p) = compose(o, q);
+                let rotated = rotate_cw(&stored, p);
+                let (w, h) = rotated.dimensions();
+                for with_tag in [true, false] {
+                    let t = tiff(o % 2 == 0, with_tag.then_some(o), Some((LONG, 3, 2)), true);
+                    let j = with_exif(&base, &t.bytes);
+                    let out = after_pixel_rotation(&j, w, h, new_o).unwrap();
+                    let written = read_orientation(&out);
+                    assert_eq!(written, new_o, "({o}, {q}, tag {with_tag})");
+                    assert_eq!(display(&rotated, written), target, "({o}, {q})");
+                    let exif = exif_of(&out);
+                    assert!(exif.get_field(Tag::Compression, In::THUMBNAIL).is_none());
+                    let x = exif.get_field(Tag::PixelXDimension, In::PRIMARY).unwrap();
+                    assert_eq!(x.value.get_uint(0), Some(w));
+                }
+            }
+        }
+        // No EXIF at all: the mirror still gets written.
+        let out = after_pixel_rotation(&base, 32, 64, 2).unwrap();
+        assert_eq!(read_orientation(&out), 2);
+    }
+
+    #[test]
+    fn edits_the_viewer_cannot_read_back_are_errors() {
+        // An Exif IFD pointer past the block: the patcher can still edit IFD0, but
+        // kamadak-exif rejects the whole EXIF and the viewer would show orientation 1.
+        let base = sample("gradient-64x32.jpg");
+        for be in [false, true] {
+            let mut t = tiff(be, Some(1), None, false);
+            let bad = if be {
+                [0, 0, 0xFF, 0xF0]
+            } else {
+                [0xF0, 0xFF, 0, 0]
+            };
+            t.bytes[t.exif_ptr_at..t.exif_ptr_at + 4].copy_from_slice(&bad);
+            let j = with_exif(&base, &t.bytes);
+            assert_eq!(read_orientation(&j), 1);
+            assert!(set_orientation(&j, 6).is_err(), "be {be}");
+            assert!(after_pixel_rotation(&j, 32, 64, 2).is_err(), "be {be}");
+            // 1 is what the viewer reads anyway.
+            assert_eq!(read_orientation(&set_orientation(&j, 1).unwrap()), 1);
+        }
+    }
+
     /// A small EXIF JPEG for mutation: SOI, APP1 (LE TIFF with a thumbnail), SOF, SOS,
     /// entropy data, EOI.
     fn small_exif_jpeg() -> Vec<u8> {
@@ -803,7 +912,7 @@ mod tests {
         let valid = small_exif_jpeg();
         let after_app1 = 2 + u16::from_be_bytes([valid[4], valid[5]]) as usize + 2;
         assert_eq!(read_orientation(&valid), 6);
-        assert!(after_pixel_rotation(&valid, 8, 16).is_ok());
+        assert!(after_pixel_rotation(&valid, 8, 16, 1).is_ok());
         // xorshift32 with a fixed seed: fast and the same every run.
         let mut state = 0x9E37_79B9u32;
         let mut next = move || {
@@ -849,7 +958,12 @@ mod tests {
             }
             let _ = read_orientation(&j);
             let _ = set_orientation(&j, 1 + (next() % 8) as u16);
-            let _ = after_pixel_rotation(&j, next() % 70_000, next() % 70_000);
+            let _ = after_pixel_rotation(
+                &j,
+                next() % 70_000,
+                next() % 70_000,
+                1 + (next() % 8) as u16,
+            );
             let _ = crate::jpeg_check::inspect(&j);
         }
     }
