@@ -23,32 +23,35 @@
 //!
 //! Only a worker that was already dead or stuck *before it took its request* (it had exited
 //! before we sent, or left the request unread in its stdin pipe) makes the slot drop the
-//! best-effort creation mitigations for later workers, in case they are what kills it. A
-//! worker that dies after reading its first request may have been killed by the file, and a
-//! hostile file must not be able to weaken the sandbox for the next one (ruling R11a).
+//! best-effort creation layers (the AppContainer, win32k lockdown, the child process policy)
+//! for later workers, in case they are what kills it. A worker that dies after reading its
+//! first request may have been killed by the file, and a hostile file must not be able to
+//! weaken the sandbox for the next one (ruling R11a).
 //!
 //! When the app exits, [`WorkerPool::shutdown`] ends every worker, busy ones included, so
 //! no prefetch thread is left waiting out a hung worker's timeout.
 
+mod appcontainer;
+mod process;
 mod protocol;
 mod sandbox;
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::os::windows::io::OwnedHandle;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use lv_core::decode::DecodeError;
-use lv_ipc::{read_response, write_request, IpcError, Request, Response};
+use lv_ipc::Request;
 
-use protocol::{request_data_cap, response_cap, to_request, Expect};
+use appcontainer::OwnedSid;
+use process::{took_request, Event, Worker, WriteOutcome};
+use protocol::{request_data_cap, to_request, Expect};
 pub use protocol::{PoolError, PoolRequest, Reply};
-use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
+use sandbox::{log, terminate_job};
 
 /// How long a worker may take to decode one file (ruling R4), and a caller may wait for a
 /// free slot.
@@ -56,8 +59,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
 const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
-/// Longest worker stderr line copied into the log, in bytes.
-const MAX_LOG_LINE: usize = 4096;
 /// How long a failed first request waits for the writer thread to report its write.
 const WRITE_SETTLE: Duration = Duration::from_secs(1);
 
@@ -77,6 +78,11 @@ pub struct WorkerPool {
     /// Single-use workers start without the best-effort mitigations (sticky; set only
     /// when one was dead before it took its request).
     single_use_degraded: AtomicBool,
+    /// The AppContainer workers start in, looked up by the first start ([`Self::container`]).
+    container: OnceLock<Option<OwnedSid>>,
+    /// AppContainer profile to use (tests inject a bad one).
+    #[cfg(test)]
+    profile_name: &'static str,
     /// Pid of every single-use worker started (tests).
     #[cfg(test)]
     single_use_pids: Mutex<Vec<u32>>,
@@ -101,34 +107,6 @@ struct Slot {
     /// Workers start without the best-effort mitigations (sticky; set only when a worker
     /// was dead before it took its request).
     degraded: bool,
-}
-
-struct Worker {
-    sandboxed: Sandboxed,
-    /// Has given at least one valid answer, so it counts as started.
-    answered: bool,
-    requests: Sender<Request>,
-    /// What the writer and reader threads report, in one channel so a call waits on both.
-    events: Receiver<Event>,
-    stdin_monitor: StdinMonitor,
-}
-
-enum Event {
-    /// The writer's outcome for request `id`.
-    Written { id: u64, outcome: WriteOutcome },
-    /// The next message from the worker, or the end of its output.
-    Response(Result<Option<Response>, IpcError>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WriteOutcome {
-    /// Written and flushed.
-    Sent,
-    /// The request could not be encoded. Nothing was written and the worker saw nothing:
-    /// the app's mistake, not the worker's.
-    Rejected,
-    /// The pipe failed (the worker is gone or stopped reading); the writer has ended.
-    Failed,
 }
 
 impl WorkerPool {
@@ -201,6 +179,9 @@ impl WorkerPool {
             slot_freed: Condvar::new(),
             next_id: AtomicU64::new(1),
             single_use_degraded: AtomicBool::new(false),
+            container: OnceLock::new(),
+            #[cfg(test)]
+            profile_name: appcontainer::PROFILE_NAME,
             #[cfg(test)]
             single_use_pids: Mutex::new(Vec::new()),
         }
@@ -282,7 +263,9 @@ impl WorkerPool {
         }
         let mitigations = !self.single_use_degraded.load(Ordering::Relaxed);
         let args: Vec<&str> = self.every_args.iter().map(String::as_str).collect();
-        let worker = match Worker::start(&self.exe, self.max_pixels, &args, mitigations) {
+        let container = if mitigations { self.container() } else { None };
+        let worker = match Worker::start(&self.exe, self.max_pixels, &args, mitigations, container)
+        {
             Ok(worker) => worker,
             Err(e) => {
                 log(&format!("cannot start {}: {e}", self.exe.display()));
@@ -348,6 +331,20 @@ impl WorkerPool {
                 terminate_job(&job, pid);
             }
         }
+    }
+
+    /// The AppContainer for this pool's workers, if they can run in one (ruling R2). Looked
+    /// up and logged once, by the first worker start (normally on the pool's start thread).
+    fn container(&self) -> Option<&OwnedSid> {
+        self.container
+            .get_or_init(|| {
+                #[cfg(test)]
+                let sid = appcontainer::profile_sid_named(self.profile_name);
+                #[cfg(not(test))]
+                let sid = appcontainer::profile_sid();
+                appcontainer::for_worker(&self.exe, sid)
+            })
+            .as_ref()
     }
 
     fn is_closed(&self) -> bool {
@@ -419,7 +416,12 @@ impl WorkerPool {
             .chain(&self.every_args)
             .map(String::as_str)
             .collect();
-        match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded) {
+        let container = if slot.degraded {
+            None
+        } else {
+            self.container()
+        };
+        match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded, container) {
             Ok(worker) => {
                 let mut state = self.lock();
                 if state.closed {
@@ -567,26 +569,6 @@ impl WorkerPool {
     }
 }
 
-/// Whether a worker that failed its first request (`id`) had read that request in full.
-/// `wrote` is the writer's report if it already came. False when the bytes are still in its
-/// stdin pipe, or the writer could not put them there (failed, or is still blocked on a full
-/// pipe). If the pipe cannot be inspected, assume the worker read it: wrongly keeping the
-/// mitigations only costs a start failure, wrongly dropping them weakens the sandbox.
-fn took_request(worker: &Worker, id: u64, mut wrote: Option<bool>) -> bool {
-    let deadline = Instant::now() + WRITE_SETTLE;
-    while wrote.is_none() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match worker.events.recv_timeout(left) {
-            Ok(Event::Written { id: got, outcome }) if got == id => {
-                wrote = Some(outcome == WriteOutcome::Sent)
-            }
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-    }
-    wrote == Some(true) && !matches!(worker.stdin_monitor.unread(), Ok(n) if n > 0)
-}
-
 /// Records a failed start. With `degrade`, the slot's next workers go without the
 /// best-effort mitigations.
 fn start_failed(slot: &mut Slot, why: &str, degrade: bool) {
@@ -597,7 +579,7 @@ fn start_failed(slot: &mut Slot, why: &str, degrade: bool) {
     ));
     if degrade && !slot.degraded {
         slot.degraded = true;
-        log("this slot now starts workers without win32k lockdown and the child process policy");
+        log("this slot now starts workers without the AppContainer, win32k lockdown and the child process policy");
     }
 }
 
@@ -632,123 +614,6 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
-impl Worker {
-    /// Spawns a sandboxed worker with its stderr, reader and writer threads. The threads end
-    /// when the process does (its pipes close) or the `Worker` is dropped.
-    fn start(
-        exe: &Path,
-        max_pixels: u64,
-        args: &[&str],
-        mitigations: bool,
-    ) -> Result<Worker, String> {
-        let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args, mitigations)?;
-        let pid = sandboxed.pid;
-        let named = |what: &str| thread::Builder::new().name(format!("lv-worker {pid} {what}"));
-
-        let stderr = pipes.stderr;
-        named("stderr")
-            .spawn(move || drain_stderr(pid, stderr))
-            .map_err(|e| format!("stderr thread: {e}"))?;
-
-        let (events_tx, events) = mpsc::channel();
-        let cap = response_cap(max_pixels);
-        let mut stdout = BufReader::with_capacity(64 * 1024, pipes.stdout);
-        let response_tx = events_tx.clone();
-        named("reader")
-            .spawn(move || loop {
-                let message = read_response(&mut stdout, cap);
-                let last = !matches!(message, Ok(Some(_)));
-                if response_tx.send(Event::Response(message)).is_err() || last {
-                    break;
-                }
-            })
-            .map_err(|e| format!("reader thread: {e}"))?;
-
-        let (requests, request_rx) = mpsc::channel::<Request>();
-        let mut stdin = BufWriter::new(pipes.stdin);
-        named("writer")
-            .spawn(move || {
-                for request in request_rx {
-                    let id = request.id();
-                    // lv-ipc validates a message before writing any of it, so InvalidInput
-                    // leaves the pipe untouched and the writer can go on.
-                    let outcome = match write_request(&mut stdin, &request) {
-                        Err(e) if e.kind() == ErrorKind::InvalidInput => WriteOutcome::Rejected,
-                        Err(_) => WriteOutcome::Failed,
-                        Ok(()) if stdin.flush().is_ok() => WriteOutcome::Sent,
-                        Ok(()) => WriteOutcome::Failed,
-                    };
-                    let _ = events_tx.send(Event::Written { id, outcome });
-                    if outcome == WriteOutcome::Failed {
-                        break;
-                    }
-                }
-            })
-            .map_err(|e| format!("writer thread: {e}"))?;
-
-        Ok(Worker {
-            sandboxed,
-            answered: false,
-            requests,
-            events,
-            stdin_monitor: pipes.stdin_monitor,
-        })
-    }
-}
-
-/// Copies the worker's diagnostics into the app's log so the pipe never fills up.
-fn drain_stderr(pid: u32, stderr: File) {
-    for_each_log_line(stderr, |line| log(&format!("lv-worker {pid}: {line}")));
-}
-
-/// Splits untrusted `input` into log lines with bounded memory: each line keeps at most
-/// [`MAX_LOG_LINE`] bytes (the rest up to the next newline is dropped and the line marked
-/// `[truncated]`), and control characters are escaped so the worker cannot forge log lines.
-fn for_each_log_line(mut input: impl Read, mut emit: impl FnMut(String)) {
-    let mut chunk = [0u8; 4096];
-    let mut line = Vec::with_capacity(MAX_LOG_LINE);
-    let mut truncated = false;
-    loop {
-        let n = match input.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        };
-        for &byte in &chunk[..n] {
-            if byte == b'\n' {
-                emit(log_line(&line, truncated));
-                line.clear();
-                truncated = false;
-            } else if line.len() < MAX_LOG_LINE {
-                line.push(byte);
-            } else {
-                truncated = true;
-            }
-        }
-    }
-    if !line.is_empty() || truncated {
-        emit(log_line(&line, truncated));
-    }
-}
-
-fn log_line(bytes: &[u8], truncated: bool) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let text = text.strip_suffix('\r').unwrap_or(&text);
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    if truncated {
-        out.push_str(" [truncated]");
-    }
-    out
-}
-
 #[cfg(test)]
 struct WorkerInfo {
     pid: u32,
@@ -758,6 +623,8 @@ struct WorkerInfo {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    use std::path::Path;
 
     use lv_core::decode::DecodeLimits;
 
@@ -801,13 +668,13 @@ pub(crate) mod tests {
         exe
     }
 
-    fn sample() -> Vec<u8> {
+    pub(crate) fn sample() -> Vec<u8> {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/heif/rainbow-451x461.heic");
         std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 
-    fn assert_decodes(pool: &WorkerPool) {
+    pub(crate) fn assert_decodes(pool: &WorkerPool) {
         let (width, height, bgra) = pool.decode_heif(sample()).expect("sample decodes");
         assert_eq!((width, height), (451, 461));
         assert_eq!(bgra.len(), 451 * 461 * 4);
@@ -822,10 +689,10 @@ pub(crate) mod tests {
     }
 
     /// An owned process handle for `pid`, closed on drop.
-    struct Process(HANDLE);
+    pub(crate) struct Process(pub(crate) HANDLE);
 
     impl Process {
-        fn open(pid: u32) -> Process {
+        pub(crate) fn open(pid: u32) -> Process {
             // SAFETY: plain call; the returned handle is owned by `Process` and closed on drop.
             let handle =
                 unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }
@@ -833,7 +700,7 @@ pub(crate) mod tests {
             Process(handle)
         }
 
-        fn wait_for_exit(&self, timeout: Duration) -> bool {
+        pub(crate) fn wait_for_exit(&self, timeout: Duration) -> bool {
             let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
             // SAFETY: `self.0` is a valid process handle with SYNCHRONIZE access.
             unsafe { WaitForSingleObject(self.0, ms) == WAIT_OBJECT_0 }
@@ -847,7 +714,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn single_worker(pool: &WorkerPool) -> WorkerInfo {
+    pub(super) fn single_worker(pool: &WorkerPool) -> WorkerInfo {
         let mut workers = pool.workers();
         assert_eq!(workers.len(), 1, "expected one live worker");
         workers.remove(0)
@@ -1249,7 +1116,7 @@ pub(crate) mod tests {
     }
 
     /// Whether the pool's only worker runs with win32k system calls disabled.
-    fn win32k_lockdown(pool: &WorkerPool) -> bool {
+    pub(super) fn win32k_lockdown(pool: &WorkerPool) -> bool {
         let process = Process::open(single_worker(pool).pid);
         let mut flags = 0u32;
         // SAFETY: ProcessSystemCallDisablePolicy is a single flags DWORD.
@@ -1265,7 +1132,7 @@ pub(crate) mod tests {
         flags & 1 == 1
     }
 
-    fn jpeg_sample(name: &str) -> Vec<u8> {
+    pub(crate) fn jpeg_sample(name: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/jpeg")
             .join(name);
@@ -1279,7 +1146,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn assert_rotated(result: Result<Reply, PoolError>, dims: (u32, u32)) -> Vec<u8> {
+    pub(crate) fn assert_rotated(result: Result<Reply, PoolError>, dims: (u32, u32)) -> Vec<u8> {
         match result {
             Ok(Reply::Bytes { data }) => {
                 let info = lv_core::jpeg_check::inspect(&data).expect("a valid JPEG");
@@ -1550,23 +1417,5 @@ pub(crate) mod tests {
         assert_eq!(rotate_deadline(100_000_000), Duration::from_secs(20));
         assert_eq!(rotate_deadline(250_000_000), Duration::from_secs(35));
         assert_eq!(rotate_deadline(u64::MAX), rotate_deadline(u64::MAX - 1));
-    }
-
-    #[test]
-    fn log_lines_are_bounded_and_escaped() {
-        let mut input = b"a\nb\r\n".to_vec();
-        input.extend(std::iter::repeat_n(b'x', 3 * MAX_LOG_LINE));
-        input.extend(b"\nc\x1b[31m\rforged\nlast");
-        let mut lines = Vec::new();
-        for_each_log_line(&input[..], |line| lines.push(line));
-        assert_eq!(lines.len(), 5, "{lines:?}");
-        assert_eq!(lines[0], "a");
-        assert_eq!(lines[1], "b");
-        assert_eq!(
-            lines[2],
-            format!("{} [truncated]", "x".repeat(MAX_LOG_LINE))
-        );
-        assert_eq!(lines[3], "c\\u{1b}[31m\\rforged");
-        assert_eq!(lines[4], "last");
     }
 }

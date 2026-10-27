@@ -6,7 +6,7 @@
 //! away). The worker never touches the file system or the network: the app sends the bytes.
 //!
 //! Usage: `lv-worker --max-pixels <N>` (debug builds also take
-//! `--test-mode=hang|crash|die-at-start|wrong-kind`).
+//! `--test-mode=hang|crash|die-at-start|wrong-kind` and `--test-mode=probe-read=<path>`).
 
 use std::io::{self, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -25,7 +25,7 @@ const EXIT_ERROR: u8 = 2;
 
 /// Debug-only fault injection for the app's watchdog tests.
 #[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TestMode {
     /// Never answer the first request.
     Hang,
@@ -36,6 +36,10 @@ enum TestMode {
     /// Answer every request with the other kind of answer (`Bytes` for a decode, `Image`
     /// for a rotation).
     WrongKind,
+    /// Answer every request with `Corrupt("probe-read: opened")` if the file at this path
+    /// can be opened for reading, else `Corrupt("probe-read: <error>")`: shows what the
+    /// sandbox lets a taken-over worker read.
+    ProbeRead(std::path::PathBuf),
 }
 
 /// Exit code of `--test-mode=die-at-start`.
@@ -96,6 +100,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
             "--test-mode=die-at-start" => test_mode = Some(TestMode::DieAtStart),
             #[cfg(debug_assertions)]
             "--test-mode=wrong-kind" => test_mode = Some(TestMode::WrongKind),
+            #[cfg(debug_assertions)]
+            probe if probe.starts_with("--test-mode=probe-read=") => {
+                let path = &probe["--test-mode=probe-read=".len()..];
+                test_mode = Some(TestMode::ProbeRead(path.into()));
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -134,7 +143,7 @@ fn serve(config: &Config) -> ExitCode {
         };
 
         #[cfg(debug_assertions)]
-        match config.test_mode {
+        match &config.test_mode {
             Some(TestMode::Hang) => loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             },
@@ -149,6 +158,23 @@ fn serve(config: &Config) -> ExitCode {
                         bgra: vec![0; 4],
                     },
                     _ => Response::Bytes { id, data: vec![] },
+                };
+                if write_response(&mut output, &response)
+                    .and_then(|()| output.flush())
+                    .is_err()
+                {
+                    return ExitCode::from(EXIT_ERROR);
+                }
+                continue;
+            }
+            Some(TestMode::ProbeRead(path)) => {
+                let outcome = match std::fs::File::open(path) {
+                    Ok(_) => "opened".to_string(),
+                    Err(e) => e.to_string(),
+                };
+                let response = Response::Failed {
+                    id: request.id(),
+                    kind: FailKind::Corrupt(format!("probe-read: {outcome}")),
                 };
                 if write_response(&mut output, &response)
                     .and_then(|()| output.flush())

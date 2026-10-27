@@ -3,10 +3,13 @@
 //! Mandatory layers (a worker that misses one is not used): a restricted token at low
 //! integrity, and a Job (kill on close, one active process, a memory cap) that the process
 //! joins while still suspended, so it never runs outside the Job. Best-effort layers (logged
-//! when they fail): win32k system call lockdown and the no-child-process policy at creation,
-//! and the Job's UI restrictions. Only the three pipe ends are inherited, the working
-//! directory is the worker's folder and the environment holds `SystemRoot` alone, so neither
-//! the DLL search nor anything environment-driven reaches other folders.
+//! when they fail): the worker's AppContainer with no capabilities (ruling R2, see
+//! [`appcontainer`](super::appcontainer)), win32k system call lockdown and the
+//! no-child-process policy at creation, and the Job's UI restrictions. Only the three pipe
+//! ends are inherited, the working directory is the worker's folder and the environment
+//! holds `SystemRoot` alone (plus `LOCALAPPDATA` in an AppContainer, which Windows points at
+//! the container's own folder), so neither the DLL search nor anything environment-driven
+//! reaches other folders.
 
 use std::ffi::{c_void, OsStr};
 use std::fs::File;
@@ -15,15 +18,17 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::sync::Arc;
 
+use super::appcontainer::OwnedSid;
+
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     SetHandleInformation, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
-    TokenIntegrityLevel, WinLowLabelSid, DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
-    TOKEN_QUERY,
+    TokenIntegrityLevel, WinLowLabelSid, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_CAPABILITIES,
+    SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
@@ -44,7 +49,7 @@ use windows::Win32::System::Threading::{
     DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 /// Pipe buffer for requests and responses; responses are tens of MB.
@@ -121,14 +126,16 @@ pub fn log(msg: &str) {
     eprintln!("light-view: worker: {msg}");
 }
 
-/// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox. With `mitigations`
-/// false the best-effort creation attributes (win32k lockdown, child process policy) are
-/// left out; the mandatory layers are always applied.
+/// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox, inside `container`
+/// when given. With `mitigations` false the best-effort creation attributes (AppContainer,
+/// win32k lockdown, child process policy) are left out; the mandatory layers are always
+/// applied.
 pub fn spawn(
     exe: &Path,
     max_pixels: u64,
     extra_args: &[&str],
     mitigations: bool,
+    container: Option<&OwnedSid>,
 ) -> Result<(Sandboxed, Pipes), String> {
     let token = low_integrity_token().map_err(|e| format!("low integrity token: {e}"))?;
     let job = create_job(max_pixels).map_err(|e| format!("job object: {e}"))?;
@@ -144,13 +151,14 @@ pub fn spawn(
     let child_ends = [raw(&stdin_child), raw(&stdout_child), raw(&stderr_child)];
 
     let launch = Launch::new(exe, max_pixels, extra_args)?;
-    let info = match launch.create(&token, child_ends, mitigations) {
+    let container = container.filter(|_| mitigations);
+    let info = match launch.create(&token, child_ends, mitigations, container) {
         Ok(info) => info,
         Err(e) if mitigations => {
             log(&format!(
                 "start with mitigation attributes failed ({e}); retrying without"
             ));
-            launch.create(&token, child_ends, false)?
+            launch.create(&token, child_ends, false, None)?
         }
         Err(e) => return Err(e),
     };
@@ -334,11 +342,35 @@ struct Launch {
     application: Vec<u16>,
     command_line: Vec<u16>,
     directory: Vec<u16>,
+    /// `SystemRoot` alone.
     environment: Vec<u16>,
+    /// For an AppContainer start: `SystemRoot` and `LOCALAPPDATA`. Windows points
+    /// `LOCALAPPDATA`, `TEMP` and `TMP` at the container's own folder and refuses the start
+    /// (ERROR_ENVVAR_NOT_FOUND) when `LOCALAPPDATA` is missing.
+    container_environment: Vec<u16>,
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
+}
+
+/// An environment block (`NAME=value` strings, then an empty one) of these variables of
+/// ours that are set.
+fn environment_block(names: &[&str]) -> Vec<u16> {
+    let mut block = Vec::new();
+    for name in names {
+        let value = match std::env::var_os(name) {
+            Some(value) => value,
+            None if *name == "SystemRoot" => r"C:\Windows".into(),
+            None => continue,
+        };
+        block.extend(OsStr::new(name).encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    block
 }
 
 impl Launch {
@@ -351,29 +383,34 @@ impl Launch {
             command_line.push(' ');
             command_line.push_str(arg);
         }
-        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-        let mut environment = wide(OsStr::new("SystemRoot="));
-        environment.pop();
-        environment.extend(system_root.encode_wide());
-        environment.extend([0, 0]);
         Ok(Launch {
             application: wide(exe.as_os_str()),
             command_line: wide(OsStr::new(&command_line)),
             directory: wide(directory.as_os_str()),
-            environment,
+            environment: environment_block(&["SystemRoot"]),
+            container_environment: environment_block(&["SystemRoot", "LOCALAPPDATA"]),
         })
     }
 
-    /// Creates the process suspended, inheriting only `child_ends` (stdin, stdout, stderr).
+    /// Creates the process suspended, inheriting only `child_ends` (stdin, stdout, stderr),
+    /// in AppContainer `container` (with no capabilities) when given.
     fn create(
         &self,
         token: &OwnedHandle,
         child_ends: [HANDLE; 3],
         mitigations: bool,
+        container: Option<&OwnedSid>,
     ) -> Result<PROCESS_INFORMATION, String> {
         let win32k = WIN32K_SYSTEM_CALL_DISABLE;
         let child_policy = CHILD_PROCESS_RESTRICTED;
-        let mut attributes = AttributeList::new(if mitigations { 3 } else { 1 })?;
+        let capabilities = container.map(|sid| SECURITY_CAPABILITIES {
+            AppContainerSid: sid.as_psid(),
+            Capabilities: std::ptr::null_mut(),
+            CapabilityCount: 0,
+            Reserved: 0,
+        });
+        let count = 1 + if mitigations { 2 } else { 0 } + u32::from(capabilities.is_some());
+        let mut attributes = AttributeList::new(count)?;
         attributes.set(
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             child_ends.as_ptr().cast(),
@@ -395,6 +432,15 @@ impl Launch {
                 log(&format!("child process policy not applied: {e}"));
             }
         }
+        if let Some(capabilities) = &capabilities {
+            // Not best-effort once asked for: a failure here fails the start, and `spawn`
+            // retries without it.
+            attributes.set(
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                std::ptr::from_ref(capabilities).cast(),
+                std::mem::size_of_val(capabilities),
+            )?;
+        }
 
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
@@ -411,9 +457,15 @@ impl Launch {
         // STATUS_DLL_INIT_FAILED). The standard handles are the pipes either way.
         // CreateProcessAsUserW may write into the command line buffer.
         let mut command_line = self.command_line.clone();
+        let environment = if capabilities.is_some() {
+            &self.container_environment
+        } else {
+            &self.environment
+        };
         let mut info = PROCESS_INFORMATION::default();
         // SAFETY: every string is NUL-terminated (the environment double-NUL-terminated)
-        // and, like the attribute list and the handle array it points to, outlives the call.
+        // and, like the attribute list and what it points to (the handle array, the
+        // policies, the capabilities and their SID), outlives the call.
         unsafe {
             CreateProcessAsUserW(
                 raw(token),
@@ -426,7 +478,7 @@ impl Launch {
                     | CREATE_SUSPENDED
                     | DETACHED_PROCESS
                     | CREATE_UNICODE_ENVIRONMENT,
-                Some(self.environment.as_ptr().cast::<c_void>()),
+                Some(environment.as_ptr().cast::<c_void>()),
                 PCWSTR(self.directory.as_ptr()),
                 &startup.StartupInfo,
                 &mut info,
