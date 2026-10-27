@@ -141,6 +141,12 @@ impl FolderList {
         let file = std::path::absolute(file)?;
         let file = file.as_path();
         let dir = file.parent().unwrap_or(file);
+        Ok(Self::from_paths(Self::read_files(dir)?, file))
+    }
+
+    /// The files (not sub-folders) of `dir`, unsorted and unfiltered: the input of
+    /// `from_paths` and `refresh`.
+    pub fn read_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -148,7 +154,12 @@ impl FolderList {
                 paths.push(entry.path());
             }
         }
-        Ok(Self::from_paths(paths, file))
+        Ok(paths)
+    }
+
+    /// The listed folder.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     pub fn current(&self) -> Option<&Path> {
@@ -186,8 +197,9 @@ impl FolderList {
     }
 
     /// Replaces the listing, keeping the current file by path; if it is gone,
-    /// moves to the same index (or the last entry). Hidden files stay hidden.
-    pub fn refresh(&mut self, paths: Vec<PathBuf>) {
+    /// moves to the same index (or the last entry). Hidden files stay hidden. `keep` is
+    /// listed even without a supported extension (the current file, opened as such).
+    pub fn refresh(&mut self, paths: Vec<PathBuf>, keep: Option<&Path>) {
         let old_path = self.current().map(Path::to_path_buf);
         let old_index = self.current.unwrap_or(0);
         let hidden = &self.hidden;
@@ -195,7 +207,7 @@ impl FolderList {
             .into_iter()
             .filter(|p| !hidden.iter().any(|h| same_path(p, h)))
             .collect();
-        self.entries = Self::build(paths, None);
+        self.entries = Self::build(paths, keep);
         self.current = if self.entries.is_empty() {
             None
         } else {
@@ -309,20 +321,30 @@ mod tests {
     #[test]
     fn refresh_keeps_current_by_path() {
         let mut l = FolderList::from_paths(vec![p("b.jpg"), p("c.jpg")], &p("c.jpg"));
-        l.refresh(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")]);
+        l.refresh(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], None);
         assert_eq!(l.current(), Some(p("c.jpg").as_path()));
         assert_eq!(l.position(), Some((3, 3)));
     }
     #[test]
+    fn refresh_keeps_an_unsupported_current_file() {
+        let mut l = FolderList::from_paths(vec![p("a.jpg"), p("notes.xyz")], &p("notes.xyz"));
+        l.refresh(
+            vec![p("a.jpg"), p("notes.xyz"), p("b.txt")],
+            Some(&p("notes.xyz")),
+        );
+        assert_eq!(l.current(), Some(p("notes.xyz").as_path()));
+        assert_eq!(l.position(), Some((2, 2)));
+    }
+    #[test]
     fn refresh_when_current_removed_moves_to_neighbor() {
         let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("b.jpg"));
-        l.refresh(vec![p("a.jpg"), p("c.jpg")]);
+        l.refresh(vec![p("a.jpg"), p("c.jpg")], None);
         assert_eq!(l.current(), Some(p("c.jpg").as_path()));
     }
     #[test]
     fn refresh_to_empty_is_empty() {
         let mut l = FolderList::from_paths(vec![p("a.jpg")], &p("a.jpg"));
-        l.refresh(vec![]);
+        l.refresh(vec![], None);
         assert_eq!(l.current(), None);
         assert_eq!(l.position(), None);
         assert!(!l.go_next());
@@ -389,7 +411,7 @@ mod tests {
         assert_eq!(l.current(), None);
         assert!(!l.hide(&p("x.jpg")));
         assert_eq!(l.hidden().len(), 4);
-        l.refresh(vec![p("x.jpg"), p("y.jpg")]);
+        l.refresh(vec![p("x.jpg"), p("y.jpg")], None);
         assert_eq!(l.current(), Some(p("y.jpg").as_path()));
     }
     #[test]
@@ -426,12 +448,12 @@ mod tests {
     fn refresh_keeps_hidden_files_out() {
         let mut l = FolderList::from_paths(vec![p("a.jpg"), p("b.jpg"), p("c.jpg")], &p("a.jpg"));
         l.hide(&p("b.jpg"));
-        l.refresh(vec![p("a.jpg"), p("B.JPG"), p("c.jpg"), p("d.jpg")]);
+        l.refresh(vec![p("a.jpg"), p("B.JPG"), p("c.jpg"), p("d.jpg")], None);
         assert_eq!(l.position(), Some((1, 3)));
         assert_eq!(l.neighbor(1), Some(p("c.jpg").as_path()));
         assert!(l.forget(&p("b.jpg")));
         assert!(!l.unhide(&p("b.jpg")));
-        l.refresh(vec![p("a.jpg"), p("b.jpg")]);
+        l.refresh(vec![p("a.jpg"), p("b.jpg")], None);
         assert_eq!(l.position(), Some((1, 2)));
     }
 }

@@ -16,6 +16,7 @@ mod timing;
 mod toolbar;
 mod tooltip;
 mod viewer;
+mod watch;
 mod window;
 mod worker;
 

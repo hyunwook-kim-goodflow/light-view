@@ -35,6 +35,10 @@ pub const TOAST_NOT_A_FILE: &str = "이 항목은 삭제할 수 없어요";
 pub const TOAST_DELETE_FAILED: &str = "삭제하지 못했어요";
 /// Followed by the file name.
 pub const TOAST_RECYCLE_FAILED: &str = "휴지통으로 옮기지 못했어요: ";
+/// The photo on screen left its folder (its unsaved rotation is gone with it).
+pub const TOAST_PHOTO_VANISHED: &str = "보던 사진이 폴더에서 사라졌어요";
+/// The photo on screen was changed by another program (its unsaved rotation dropped).
+pub const TOAST_PHOTO_RELOADED: &str = "사진이 바깥에서 바뀌어 다시 불러왔어요";
 
 // Dialog layout (DIPs).
 const CARD_MAX_W: f32 = 420.0;
