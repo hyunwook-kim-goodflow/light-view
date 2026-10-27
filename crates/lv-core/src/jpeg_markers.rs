@@ -122,7 +122,7 @@ impl<'a> Iterator for Markers<'a> {
 
 /// From the start of a scan's entropy-coded data, the offset of the next real marker (its
 /// `0xFF`), or `None` if the data ends first.
-fn skip_entropy_data(data: &[u8], mut i: usize) -> Option<usize> {
+pub(crate) fn skip_entropy_data(data: &[u8], mut i: usize) -> Option<usize> {
     loop {
         i += data.get(i..)?.iter().position(|&b| b == 0xFF)?;
         match *data.get(i + 1)? {
