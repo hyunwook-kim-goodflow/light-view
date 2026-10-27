@@ -16,23 +16,32 @@
 //! auxiliary image (`auxl`), and the two no longer line up. Other decoders may instead
 //! apply the primary item's transforms to the composed image, so giving the alpha item its
 //! own `irot` is not safe either. A primary item with an alpha image is refused. Other
-//! auxiliary images (depth, gain maps) are not shown and are left as they are.
+//! auxiliary images (depth, gain maps) get the new `irot` too, as described below.
 //!
-//! **Editing.** Changing an existing `irot` rewrites one byte. Adding one appends a 9-byte
-//! `irot` box at the end of `ipco` and an essential association (1 or 2 bytes, following
-//! `ipma`'s flags) to the primary item's first `ipma` entry, or a new entry when it has
-//! none. The size fields of `ipco`, `ipma`, `iprp` and `meta` (32-bit or `largesize`) grow
+//! **Editing.** Changing an existing `irot` rewrites one byte. That is refused when the
+//! primary item has more than one `irot`, when a transformative property (`clap`, `imir`,
+//! `irot`) follows its `irot` in `ipma` (a non-conforming order whose meaning would change),
+//! and when the same property is also associated with one of the grid's tiles (`dimg`).
+//! Adding one appends a 9-byte `irot` box at the end of `ipco` and an essential
+//! association (1 or 2 bytes, following `ipma`'s flags) to the first `ipma` entry of the
+//! primary item and of the items that must turn with it: its thumbnails (`thmb`) and its
+//! non-alpha auxiliary images (`auxl`, e.g. depth or gain maps), as iPhone files share one
+//! `irot`. Such an item that already has its own `irot` or `imir` is refused. An item
+//! without an entry gets a new one, inserted in item id order. The size fields of `ipco`, `ipma`, `iprp` and `meta` (32-bit or `largesize`) grow
 //! accordingly, and every `iloc` extent stored at a file offset (construction method 0,
 //! data reference 0) that lies after an inserted byte is moved by the number of bytes
 //! inserted before it: through `base_offset` when the item has a nonzero base and all its
 //! extents move alike, else through each extent's offset. An offset that would not fit
 //! its field is an error. `idat` (method 1) and item-offset (method 2) extents are relative
-//! and stay as they are. Because only `iloc` offsets are adjusted, a size change is refused
-//! when the file has top-level boxes other than `ftyp`, `meta`, `mdat`, `free` and `skip`
+//! and stay as they are. A size change is refused when an item is stored at file offsets in
+//! another data reference (a `url ` with the same-file flag still means this file, so it
+//! would move unadjusted) or uses a reserved construction method, and, because only `iloc`
+//! offsets are adjusted, when the file has top-level boxes other than `ftyp`, `meta`, `mdat`, `free` and `skip`
 //! (a `moov`, for example, holds its own absolute offsets).
 //!
-//! Every result is re-parsed and checked before it is returned: the primary item has the
-//! requested `irot`, and every in-file extent's bytes are identical at their new place.
+//! Every result is re-parsed and checked before it is returned: every item's property list
+//! is unchanged except for the intended `irot` additions, the primary item's `irot` reads
+//! back, and every in-file extent's bytes are identical at their new place.
 //!
 //! The input is untrusted: every length is checked, box walking is bounded, nothing
 //! panics, and allocations are bounded by the input size.
@@ -49,6 +58,7 @@ const MAX_EXTENTS: usize = 1 << 20;
 const SHIFTABLE_TOP_LEVEL: [&[u8; 4]; 5] = [b"ftyp", b"meta", b"mdat", b"free", b"skip"];
 
 const MIRRORED: &str = "mirrored HEIF not supported for rotation save";
+const SEVERAL_IROT: &str = "HEIF primary item has more than one irot";
 const WITH_ALPHA: &str = "HEIF with an alpha plane not supported for rotation save";
 /// `aux_type` values of an alpha plane (ISO/IEC 23008-12 and MIAF).
 const ALPHA_URNS: [&[u8]; 2] = [
@@ -67,10 +77,20 @@ pub fn compose(stored_ccw: u8, user_cw: u8) -> u8 {
 /// item, 0 when it has none.
 pub fn read_rotation(heif: &[u8]) -> Result<u8, String> {
     let file = parse(heif)?;
-    match file.primary_props()?.iter().find(|p| &p.typ == b"irot") {
-        Some(irot) => irot_angle(heif, irot),
+    match primary_irot(&file.primary_props()?)? {
+        Some(irot) => irot_angle(heif, &irot),
         None => Ok(0),
     }
+}
+
+/// The primary item's only `irot`; more than one is an error (libheif applies them all).
+fn primary_irot(props: &[BoxRef]) -> Result<Option<BoxRef>, String> {
+    let mut irots = props.iter().filter(|p| &p.typ == b"irot");
+    let first = irots.next().copied();
+    if irots.next().is_some() {
+        return Err(SEVERAL_IROT.into());
+    }
+    Ok(first)
 }
 
 /// `heif` with the primary item's `irot` set to `quarters_ccw` (0..=3) anti-clockwise
@@ -85,21 +105,26 @@ pub fn set_rotation(heif: &[u8], quarters_ccw: u8) -> Result<Vec<u8>, String> {
     if props.iter().any(|p| &p.typ == b"imir") {
         return Err(MIRRORED.into());
     }
-    if has_alpha(heif, &file)? {
+    let refs = references(heif, &file)?;
+    if has_alpha(heif, &file, &refs)? {
         return Err(WITH_ALPHA.into());
     }
-    let (out, added) = match props.iter().find(|p| &p.typ == b"irot") {
+    let (out, added_to) = match primary_irot(&props)? {
         Some(irot) => {
-            irot_angle(heif, irot)?;
+            check_in_place(&file, &refs, &props)?;
+            irot_angle(heif, &irot)?;
             let mut out = heif.to_vec();
             // `irot_angle` checked that the byte exists. Keep its six reserved bits.
             out[irot.body] = (out[irot.body] & !3) | quarters_ccw;
-            (out, false)
+            (out, Vec::new())
         }
         None if quarters_ccw == 0 => return Ok(heif.to_vec()),
-        None => (add_irot(heif, &file, quarters_ccw)?, true),
+        None => {
+            let targets = rotation_targets(heif, &file, &refs)?;
+            (add_irot(heif, &file, &targets, quarters_ccw)?, targets)
+        }
     };
-    verify(heif, &file, &out, quarters_ccw, added)
+    verify(heif, &file, &out, quarters_ccw, &added_to)
         .map_err(|e| format!("HEIF rotation self-check failed: {e}"))?;
     Ok(out)
 }
@@ -197,6 +222,8 @@ struct Iloc {
 #[derive(Debug)]
 struct IpmaEntry {
     item: u32,
+    /// Offset of the entry.
+    start: usize,
     /// Offset of the association count byte.
     count_at: usize,
     /// Property indices (1-based, 0 = none); the essential bit is not needed here.
@@ -236,6 +263,16 @@ impl Heif {
     /// The properties associated with the primary item, in `ipma` order.
     fn primary_props(&self) -> Result<Vec<BoxRef>, String> {
         self.props_of(self.primary)
+    }
+
+    /// The nonzero property indices associated with `item`, in `ipma` order.
+    fn indices_of(&self, item: u32) -> impl Iterator<Item = u16> + '_ {
+        self.ipma
+            .entries
+            .iter()
+            .filter(move |e| e.item == item)
+            .flat_map(|e| e.indices.iter().copied())
+            .filter(|&i| i != 0)
     }
 
     /// The properties associated with `item`, in `ipma` order.
@@ -496,6 +533,7 @@ fn parse_ipma(data: &[u8], b: &BoxRef) -> Result<Ipma, String> {
     let mut entries = Vec::new();
     // Every entry takes at least 3 bytes.
     for _ in 0..entry_count {
+        let start = r.pos;
         let item = if version < 1 {
             u32::from(r.u16()?)
         } else {
@@ -513,6 +551,7 @@ fn parse_ipma(data: &[u8], b: &BoxRef) -> Result<Ipma, String> {
         }
         entries.push(IpmaEntry {
             item,
+            start,
             count_at,
             indices,
             end: r.pos,
@@ -557,11 +596,23 @@ fn item_ids_of_type(data: &[u8], iinf: &BoxRef, typ: &[u8; 4]) -> Result<Vec<u32
     Ok(ids)
 }
 
-/// Whether an alpha auxiliary image (an `auxl` reference to the primary item from an item
-/// whose `auxC` names an alpha plane) belongs to the primary item.
-fn has_alpha(data: &[u8], file: &Heif) -> Result<bool, String> {
+/// One `iref` entry: `from` refers to `to` with `typ`.
+struct Reference {
+    typ: [u8; 4],
+    from: u32,
+    to: Vec<u32>,
+}
+
+impl Reference {
+    fn to_item(&self, typ: &[u8; 4], item: u32) -> bool {
+        &self.typ == typ && self.to.contains(&item)
+    }
+}
+
+/// The entries of `iref` (none without one).
+fn references(data: &[u8], file: &Heif) -> Result<Vec<Reference>, String> {
     let Some(iref) = file.iref else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
     let (version, _, r) = full_box(data, &iref)?;
     let id = |r: &mut Reader| {
@@ -571,29 +622,108 @@ fn has_alpha(data: &[u8], file: &Heif) -> Result<bool, String> {
             r.u32()
         }
     };
+    let mut out = Vec::new();
     for reference in children(data, r.pos..iref.end, false)? {
-        if &reference.typ != b"auxl" {
-            continue;
-        }
         let mut r = Reader::new(data, reference.body..reference.end)?;
         let from = id(&mut r)?;
-        let mut to_primary = false;
+        let mut to = Vec::new();
+        // Every id takes at least 2 bytes of the (bounded) box.
         for _ in 0..r.u16()? {
-            to_primary |= id(&mut r)? == file.primary;
+            to.push(id(&mut r)?);
         }
-        if !to_primary {
-            continue;
-        }
-        for auxc in file.props_of(from)?.iter().filter(|p| &p.typ == b"auxC") {
-            let (_, _, mut r) = full_box(data, auxc)?;
-            let rest = r.take(r.end - r.pos)?;
-            let aux_type = rest.split(|&b| b == 0).next().unwrap_or_default();
-            if ALPHA_URNS.contains(&aux_type) {
-                return Ok(true);
-            }
+        out.push(Reference {
+            typ: reference.typ,
+            from,
+            to,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether one of `item`'s `auxC` properties names an alpha plane.
+fn is_alpha(data: &[u8], file: &Heif, item: u32) -> Result<bool, String> {
+    for auxc in file.props_of(item)?.iter().filter(|p| &p.typ == b"auxC") {
+        let (_, _, mut r) = full_box(data, auxc)?;
+        let rest = r.take(r.end - r.pos)?;
+        let aux_type = rest.split(|&b| b == 0).next().unwrap_or_default();
+        if ALPHA_URNS.contains(&aux_type) {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether an alpha auxiliary image (an `auxl` reference to the primary item from an item
+/// whose `auxC` names an alpha plane) belongs to the primary item.
+fn has_alpha(data: &[u8], file: &Heif, refs: &[Reference]) -> Result<bool, String> {
+    for r in refs.iter().filter(|r| r.to_item(b"auxl", file.primary)) {
+        if is_alpha(data, file, r.from)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The items a new `irot` goes on, in increasing id order: the primary item, its
+/// thumbnails and its (non-alpha) auxiliary images. Errs when one of the others already
+/// has its own `irot` or `imir`.
+fn rotation_targets(data: &[u8], file: &Heif, refs: &[Reference]) -> Result<Vec<u32>, String> {
+    let mut targets = vec![file.primary];
+    for r in refs {
+        if r.from == file.primary {
+            continue;
+        }
+        let follows = r.to_item(b"thmb", file.primary)
+            || (r.to_item(b"auxl", file.primary) && !is_alpha(data, file, r.from)?);
+        if !follows {
+            continue;
+        }
+        if file
+            .props_of(r.from)?
+            .iter()
+            .any(|p| &p.typ == b"irot" || &p.typ == b"imir")
+        {
+            return Err(format!(
+                "HEIF item {} already has its own rotation or mirror",
+                r.from
+            ));
+        }
+        targets.push(r.from);
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    Ok(targets)
+}
+
+/// Refuses an in-place `irot` change whose meaning would not be a plain rotation of the
+/// primary image: a transformative property after the `irot`, or the `irot` shared with a
+/// tile of the grid.
+fn check_in_place(file: &Heif, refs: &[Reference], props: &[BoxRef]) -> Result<(), String> {
+    let at = props
+        .iter()
+        .position(|p| &p.typ == b"irot")
+        .ok_or("no irot")?;
+    if props[at + 1..]
+        .iter()
+        .any(|p| [b"clap", b"imir", b"irot"].contains(&&p.typ))
+    {
+        return Err("HEIF transformative properties after irot are not supported".into());
+    }
+    let index = file
+        .indices_of(file.primary)
+        .find(|&i| file.props.get(usize::from(i) - 1).map(|p| &p.typ) == Some(b"irot"))
+        .ok_or("no irot")?;
+    for r in refs
+        .iter()
+        .filter(|r| &r.typ == b"dimg" && r.from == file.primary)
+    {
+        for &tile in &r.to {
+            if tile != file.primary && file.indices_of(tile).any(|i| i == index) {
+                return Err("HEIF irot shared with a grid tile is not supported".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn irot_angle(data: &[u8], irot: &BoxRef) -> Result<u8, String> {
@@ -689,8 +819,8 @@ impl Edit {
     }
 }
 
-/// `heif` with a new `irot` of `angle` associated with the primary item.
-fn add_irot(heif: &[u8], file: &Heif, angle: u8) -> Result<Vec<u8>, String> {
+/// `heif` with a new `irot` of `angle` associated with `targets` (increasing ids).
+fn add_irot(heif: &[u8], file: &Heif, targets: &[u32], angle: u8) -> Result<Vec<u8>, String> {
     if let Some(b) = file
         .top
         .iter()
@@ -699,6 +829,17 @@ fn add_irot(heif: &[u8], file: &Heif, angle: u8) -> Result<Vec<u8>, String> {
         return Err(format!(
             "HEIF with a top-level {} box cannot grow",
             name(&b.typ)
+        ));
+    }
+    if let Some(item) = file
+        .iloc
+        .items
+        .iter()
+        .find(|i| (i.method == 0 && i.dref != 0) || i.method > 2)
+    {
+        return Err(format!(
+            "HEIF item {} is stored in a way a size change cannot follow",
+            item.id
         ));
     }
     let index = file.props.len() + 1;
@@ -721,34 +862,49 @@ fn add_irot(heif: &[u8], file: &Heif, angle: u8) -> Result<Vec<u8>, String> {
     let irot = vec![0, 0, 0, 9, b'i', b'r', b'o', b't', angle];
     let irot_len = irot.len();
     edit.inserts.push((file.ipco.end, irot));
-    let ipma_growth = match ipma.entries.iter().find(|e| e.item == file.primary) {
-        Some(entry) => {
-            let count = u8::try_from(entry.indices.len() + 1)
-                .map_err(|_| "the primary item has too many properties")?;
-            edit.patches.push((entry.count_at, vec![count]));
-            let len = association.len();
-            edit.inserts.push((entry.end, association));
-            len
+    let mut ipma_growth = 0;
+    let mut new_entries = 0u32;
+    // `targets` is in increasing id order, so new entries at the same place stay sorted.
+    for &item in targets {
+        match ipma.entries.iter().find(|e| e.item == item) {
+            Some(entry) => {
+                let count = u8::try_from(entry.indices.len() + 1)
+                    .map_err(|_| format!("HEIF item {item} has too many properties"))?;
+                edit.patches.push((entry.count_at, vec![count]));
+                ipma_growth += association.len();
+                edit.inserts.push((entry.end, association.clone()));
+            }
+            None => {
+                let mut new_entry = if ipma.version < 1 {
+                    u16::try_from(item)
+                        .map_err(|_| "item id does not fit ipma")?
+                        .to_be_bytes()
+                        .to_vec()
+                } else {
+                    item.to_be_bytes().to_vec()
+                };
+                new_entry.push(1);
+                new_entry.extend_from_slice(&association);
+                // Before the first entry of a larger id, keeping the entries sorted.
+                let at = ipma
+                    .entries
+                    .iter()
+                    .find(|e| e.item > item)
+                    .map_or(file.ipma_box.end, |e| e.start);
+                ipma_growth += new_entry.len();
+                edit.inserts.push((at, new_entry));
+                new_entries += 1;
+            }
         }
-        None => {
-            let mut new_entry = if ipma.version < 1 {
-                u16::try_from(file.primary)
-                    .map_err(|_| "primary item id does not fit ipma")?
-                    .to_be_bytes()
-                    .to_vec()
-            } else {
-                file.primary.to_be_bytes().to_vec()
-            };
-            new_entry.push(1);
-            new_entry.extend_from_slice(&association);
-            let count = ipma.entry_count.checked_add(1).ok_or("ipma is full")?;
-            edit.patches
-                .push((ipma.entry_count_at, count.to_be_bytes().to_vec()));
-            let len = new_entry.len();
-            edit.inserts.push((file.ipma_box.end, new_entry));
-            len
-        }
-    };
+    }
+    if new_entries > 0 {
+        let count = ipma
+            .entry_count
+            .checked_add(new_entries)
+            .ok_or("ipma is full")?;
+        edit.patches
+            .push((ipma.entry_count_at, count.to_be_bytes().to_vec()));
+    }
     edit.grow(&file.ipco, irot_len)?;
     edit.grow(&file.ipma_box, ipma_growth)?;
     edit.grow(&file.iprp, irot_len + ipma_growth)?;
@@ -804,26 +960,48 @@ fn add_irot(heif: &[u8], file: &Heif, angle: u8) -> Result<Vec<u8>, String> {
     edit.apply(heif)
 }
 
-/// Re-parses `out` and checks it against the original: the primary item's properties are
-/// unchanged except for `irot` (now `angle`, appended when `added`), and every in-file
-/// extent holds the same bytes as before.
-fn verify(src: &[u8], old: &Heif, out: &[u8], angle: u8, added: bool) -> Result<(), String> {
+/// Re-parses `out` and checks it against the original: every item's properties are
+/// unchanged except for a new `irot` appended to the items in `added_to`, the primary item's
+/// only `irot` reads `angle`, and every in-file extent holds the same bytes as before.
+fn verify(src: &[u8], old: &Heif, out: &[u8], angle: u8, added_to: &[u32]) -> Result<(), String> {
     let new = parse(out)?;
     if new.primary != old.primary {
         return Err("primary item changed".into());
     }
-    let mut want: Vec<[u8; 4]> = old.primary_props()?.iter().map(|p| p.typ).collect();
-    if added {
-        want.push(*b"irot");
+    let types = |f: &Heif, item: u32| -> Result<Vec<[u8; 4]>, String> {
+        Ok(f.props_of(item)?.iter().map(|p| p.typ).collect())
+    };
+    let mut items: Vec<u32> = old
+        .ipma
+        .entries
+        .iter()
+        .chain(&new.ipma.entries)
+        .map(|e| e.item)
+        .collect();
+    items.sort_unstable();
+    items.dedup();
+    for item in items {
+        let mut want = types(old, item)?;
+        if added_to.contains(&item) {
+            want.push(*b"irot");
+        }
+        if types(&new, item)? != want {
+            return Err(format!("properties of item {item} changed"));
+        }
     }
-    let new_props = new.primary_props()?;
-    let got: Vec<[u8; 4]> = new_props.iter().map(|p| p.typ).collect();
-    if got != want {
-        return Err("primary item properties changed".into());
-    }
-    match new_props.iter().find(|p| &p.typ == b"irot") {
-        Some(irot) if irot_angle(out, irot)? == angle => {}
+    match primary_irot(&new.primary_props()?)? {
+        Some(irot) if irot_angle(out, &irot)? == angle => {}
         _ => return Err("irot does not read back".into()),
+    }
+    for &item in added_to {
+        let irot = new
+            .props_of(item)?
+            .into_iter()
+            .rfind(|p| &p.typ == b"irot")
+            .ok_or("irot missing")?;
+        if irot_angle(out, &irot)? != angle {
+            return Err(format!("irot of item {item} does not read back"));
+        }
     }
     if new.iloc.items.len() != old.iloc.items.len() {
         return Err("iloc item count changed".into());
@@ -832,6 +1010,8 @@ fn verify(src: &[u8], old: &Heif, out: &[u8], angle: u8, added: bool) -> Result<
         if (a.id, a.method, a.dref, a.extents.len()) != (b.id, b.method, b.dref, b.extents.len()) {
             return Err(format!("iloc item {} changed", a.id));
         }
+        // A size change refuses items in other data references and reserved methods; the
+        // in-place edit moves nothing.
         if a.method != 0 || a.dref != 0 {
             if a.base.value != b.base.value
                 || a.extents
@@ -877,8 +1057,9 @@ mod tests {
         (0..a.len()).filter(|&i| a[i] != b[i]).collect()
     }
 
-    /// The bytes of every in-file extent, per item, in `iloc` order.
-    fn item_data(heif: &[u8]) -> Vec<(u32, Vec<Vec<u8>>)> {
+    /// The bytes of every file-offset extent (None outside the file), per item, in `iloc`
+    /// order.
+    fn item_data(heif: &[u8]) -> Vec<(u32, Vec<Option<Vec<u8>>>)> {
         let file = parse(heif).unwrap();
         file.iloc
             .items
@@ -888,10 +1069,10 @@ mod tests {
                     .extents
                     .iter()
                     .map(|e| {
-                        if item.method == 0 {
-                            heif[extent_range(heif.len(), item.base.value, e).unwrap()].to_vec()
+                        if item.method == 0 && item.dref == 0 {
+                            extent_range(heif.len(), item.base.value, e).map(|r| heif[r].to_vec())
                         } else {
-                            vec![]
+                            Some(vec![])
                         }
                     })
                     .collect();
@@ -953,6 +1134,8 @@ mod tests {
         primary: u32,
         large_meta: bool,
         extra_top: Vec<u8>,
+        /// `iref` entries (type, from, to), written as a version 0 `iref` when not empty.
+        refs: Vec<([u8; 4], u32, Vec<u32>)>,
     }
 
     fn spec() -> Spec {
@@ -976,6 +1159,7 @@ mod tests {
             primary: 1,
             large_meta: false,
             extra_top: vec![],
+            refs: vec![],
         }
     }
 
@@ -1079,6 +1263,18 @@ mod tests {
         meta.extend(full(b"iloc", v, 0, &iloc));
         meta.extend(full(b"iinf", 0, 0, &iinf));
         meta.extend(bx(b"iprp", &iprp));
+        if !s.refs.is_empty() {
+            let mut iref = Vec::new();
+            for (typ, from, to) in &s.refs {
+                let mut r = (*from as u16).to_be_bytes().to_vec();
+                r.extend((to.len() as u16).to_be_bytes());
+                for &t in to {
+                    r.extend((t as u16).to_be_bytes());
+                }
+                iref.extend(bx(typ, &r));
+            }
+            meta.extend(full(b"iref", 0, 0, &iref));
+        }
         if !idat.is_empty() {
             meta.extend(bx(b"idat", &idat));
         }
@@ -1350,7 +1546,10 @@ mod tests {
         assert_eq!(primary_types(&out), vec![*b"irot"]);
         let ipma = parse(&out).unwrap().ipma;
         assert_eq!(ipma.entry_count, 2);
-        assert_eq!(ipma.entries[0].indices, vec![1]);
+        // Inserted before item 2's entry, keeping item id order.
+        let ids: Vec<u32> = ipma.entries.iter().map(|e| e.item).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(ipma.entries[1].indices, vec![1]);
     }
 
     #[test]
@@ -1380,6 +1579,7 @@ mod tests {
             },
         ];
         s.assocs = vec![(1, vec![2]), (2, vec![1]), (3, vec![1])];
+        s.refs = vec![(*b"dimg", 1, vec![2, 3])];
         let out = add_and_check(&s);
         let file = parse(&out).unwrap();
         assert_eq!(primary_types(&out), vec![*b"ispe", *b"irot"]);
@@ -1415,41 +1615,187 @@ mod tests {
         assert_eq!(read_rotation(&out).unwrap(), 2);
     }
 
+    fn item(id: u32, data: &[u8]) -> Item {
+        Item {
+            id,
+            typ: *b"hvc1",
+            method: 0,
+            chunks: vec![data.to_vec()],
+        }
+    }
+
+    fn auxc(aux_type: &[u8]) -> Vec<u8> {
+        let mut p = aux_type.to_vec();
+        p.push(0);
+        full(b"auxC", 0, 0, &p)
+    }
+
+    const DEPTH: &[u8] = b"urn:mpeg:hevc:2015:auxid:2";
+
     #[test]
     fn only_alpha_auxiliary_images_are_refused() {
         // Item 2 is an auxiliary image of item 1 (iref auxl 2 -> 1) with auxC property 2.
         let with_aux = |aux_type: &[u8]| {
             let mut s = spec();
-            let mut auxc = aux_type.to_vec();
-            auxc.push(0);
-            s.props.push(full(b"auxC", 0, 0, &auxc));
-            s.items.push(Item {
-                id: 2,
-                typ: *b"hvc1",
-                method: 0,
-                chunks: vec![b"aux".to_vec()],
-            });
+            s.props.push(auxc(aux_type));
+            s.items.push(item(2, b"aux"));
             s.assocs = vec![(1, vec![1]), (2, vec![2])];
-            let mut file = build(&s);
-            let iref = full(b"iref", 0, 0, &bx(b"auxl", &[0, 2, 0, 1, 0, 1]));
-            // Put iref at the end of meta and redo the sizes and offsets by hand.
-            let meta = parse(&file).unwrap().meta;
-            file.splice(meta.end..meta.end, iref.iter().copied());
-            let grown = (meta.end - meta.start + iref.len()) as u32;
-            file[meta.start..meta.start + 4].copy_from_slice(&grown.to_be_bytes());
-            let shift = iref.len() as u64;
-            let mut edit = Edit::default();
-            for item in &parse(&file).unwrap().iloc.items {
-                edit.add_to(&item.extents[0].offset, shift).unwrap();
-            }
-            edit.apply(&file).unwrap()
+            s.refs = vec![(*b"auxl", 2, vec![1])];
+            build(&s)
         };
         let alpha = with_aux(b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha");
         assert_eq!(set_rotation(&alpha, 1).unwrap_err(), WITH_ALPHA);
-        let depth = with_aux(b"urn:mpeg:hevc:2015:auxid:2");
+        let depth = with_aux(DEPTH);
         let out = set_rotation(&depth, 1).unwrap();
         assert_eq!(item_data(&out), item_data(&depth));
-        assert_eq!(item_data(&depth)[1].1, vec![b"aux".to_vec()]);
+        assert_eq!(item_data(&depth)[1].1, vec![Some(b"aux".to_vec())]);
+        // The depth map turns with the primary image.
+        let file = parse(&out).unwrap();
+        let types: Vec<_> = file.props_of(2).unwrap().iter().map(|p| p.typ).collect();
+        assert_eq!(types, vec![*b"auxC", *b"irot"]);
+    }
+
+    #[test]
+    fn thumbnail_and_depth_share_the_new_irot() {
+        // 1 primary; 2 thumbnail (thmb 2 -> 1) without an ipma entry; 3 depth (auxl 3 -> 1);
+        // 4 an unrelated item. Properties: 1 ispe, 2 auxC(depth).
+        let mut s = spec();
+        s.props.push(auxc(DEPTH));
+        s.items
+            .extend([item(2, b"thumb"), item(3, b"depth"), item(4, b"other")]);
+        s.assocs = vec![(1, vec![1]), (3, vec![2]), (4, vec![1])];
+        s.refs = vec![(*b"thmb", 2, vec![1]), (*b"auxl", 3, vec![1])];
+        let src = build(&s);
+        let out = add_and_check(&s);
+        let file = parse(&out).unwrap();
+        let types =
+            |item| -> Vec<[u8; 4]> { file.props_of(item).unwrap().iter().map(|p| p.typ).collect() };
+        assert_eq!(types(1), vec![*b"ispe", *b"irot"]);
+        assert_eq!(types(2), vec![*b"irot"]);
+        assert_eq!(types(3), vec![*b"auxC", *b"irot"]);
+        assert_eq!(types(4), vec![*b"ispe"]);
+        // One shared property, and the new entry for item 2 sits between 1 and 3.
+        let ids: Vec<u32> = file.ipma.entries.iter().map(|e| e.item).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        assert_eq!(file.ipma.entry_count, 4);
+        assert_eq!(file.ipma.entries[1].indices, vec![3]);
+        assert_eq!(file.props.len(), 3);
+        // irot 9 + three 1-byte associations + new entry (2 id + 1 count).
+        assert_eq!(out.len(), src.len() + 9 + 3 + 3);
+        assert_eq!(read_rotation(&out).unwrap(), 1);
+    }
+
+    #[test]
+    fn follower_with_own_rotation_or_mirror_is_refused() {
+        for own in [bx(b"irot", &[2]), bx(b"imir", &[0])] {
+            let mut s = spec();
+            s.props.push(own);
+            s.items.push(item(2, b"thumb"));
+            s.assocs = vec![(1, vec![1]), (2, vec![2])];
+            s.refs = vec![(*b"thmb", 2, vec![1])];
+            let err = set_rotation(&build(&s), 1).unwrap_err();
+            assert!(err.contains("own rotation"), "{err}");
+        }
+    }
+
+    #[test]
+    fn new_primary_entry_is_inserted_in_id_order() {
+        let mut s = spec();
+        s.items = vec![item(1, b"a"), item(2, b"primary"), item(3, b"c")];
+        s.primary = 2;
+        s.assocs = vec![(1, vec![1]), (3, vec![1])];
+        let out = add_and_check(&s);
+        let ids: Vec<u32> = parse(&out)
+            .unwrap()
+            .ipma
+            .entries
+            .iter()
+            .map(|e| e.item)
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(primary_types(&out), vec![*b"irot"]);
+    }
+
+    /// `s` built, then item `index`'s data reference or construction method overwritten
+    /// (iloc version 1, no base_offset field: they are the 4 bytes before the extent count).
+    fn with_location(s: &Spec, index: usize, method: u16, dref: u16) -> Vec<u8> {
+        assert_eq!((s.iloc_version, s.base_size), (1, 0));
+        let mut f = build(s);
+        let at = parse(&f).unwrap().iloc.items[index].base.at;
+        f[at - 4..at - 2].copy_from_slice(&method.to_be_bytes());
+        f[at - 2..at].copy_from_slice(&dref.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn other_data_references_and_reserved_methods_refuse_growth() {
+        let mut s = spec();
+        s.items.push(item(2, b"elsewhere"));
+        for (method, dref) in [(0, 1), (3, 0), (15, 0)] {
+            let f = with_location(&s, 1, method, dref);
+            let err = set_rotation(&f, 1).unwrap_err();
+            assert!(err.contains("size change"), "{err}");
+        }
+        // An in-place change moves nothing and is still allowed.
+        s.props.push(bx(b"irot", &[1]));
+        s.assocs = vec![(1, vec![1, 2])];
+        let f = with_location(&s, 1, 0, 1);
+        let out = set_rotation(&f, 3).unwrap();
+        assert_eq!(differing(&f, &out).len(), 1);
+    }
+
+    #[test]
+    fn transformative_property_after_irot_refuses_in_place_change() {
+        let mut s = spec();
+        s.props.push(bx(b"irot", &[1]));
+        s.props.push(bx(b"clap", &[0; 32]));
+        // Conforming order: clap then irot.
+        s.assocs = vec![(1, vec![1, 3, 2])];
+        assert_eq!(
+            read_rotation(&set_rotation(&build(&s), 2).unwrap()).unwrap(),
+            2
+        );
+        // irot then clap.
+        s.assocs = vec![(1, vec![1, 2, 3])];
+        let err = set_rotation(&build(&s), 2).unwrap_err();
+        assert!(err.contains("after irot"), "{err}");
+    }
+
+    #[test]
+    fn several_irots_are_refused() {
+        let mut s = spec();
+        s.props.push(bx(b"irot", &[1]));
+        s.props.push(bx(b"irot", &[1]));
+        s.assocs = vec![(1, vec![1, 2, 3])];
+        let f = build(&s);
+        assert_eq!(read_rotation(&f).unwrap_err(), SEVERAL_IROT);
+        assert_eq!(set_rotation(&f, 0).unwrap_err(), SEVERAL_IROT);
+    }
+
+    #[test]
+    fn irot_shared_with_a_tile_refuses_in_place_change() {
+        // Grid 1 (idat) with tiles 2 and 3; property 2 is an irot.
+        let mut s = spec();
+        s.props = vec![bx(b"ispe", &[0; 12]), bx(b"irot", &[1])];
+        s.items = vec![
+            Item {
+                id: 1,
+                typ: *b"grid",
+                method: 1,
+                chunks: vec![vec![0, 0, 0, 1, 0, 64, 0, 32]],
+            },
+            item(2, b"tile-a"),
+            item(3, b"tile-b"),
+        ];
+        s.refs = vec![(*b"dimg", 1, vec![2, 3])];
+        s.assocs = vec![(1, vec![1, 2]), (2, vec![1]), (3, vec![1])];
+        assert_eq!(
+            read_rotation(&set_rotation(&build(&s), 3).unwrap()).unwrap(),
+            3
+        );
+        s.assocs = vec![(1, vec![1, 2]), (2, vec![1]), (3, vec![1, 2])];
+        let err = set_rotation(&build(&s), 3).unwrap_err();
+        assert!(err.contains("tile"), "{err}");
     }
 
     #[test]
@@ -1554,7 +1900,15 @@ mod tests {
         grid.base_size = 8;
         grid.use_base = true;
         grid.ipma_flags = 1;
+        let mut followers = spec();
+        followers.props.push(auxc(DEPTH));
+        followers
+            .items
+            .extend([item(2, b"thumb"), item(3, b"depth")]);
+        followers.assocs = vec![(1, vec![1]), (3, vec![2])];
+        followers.refs = vec![(*b"thmb", 2, vec![1]), (*b"auxl", 3, vec![1])];
         let seeds = [
+            build(&followers),
             sample(PLAIN),
             sample(IROT90),
             sample(ALPHA),
@@ -1596,8 +1950,10 @@ mod tests {
             }
             let _ = read_rotation(&f);
             if let Ok(out) = set_rotation(&f, (next() % 4) as u8) {
-                // Whatever is returned passed the self-check; it must parse again.
+                // Whatever is returned passed the self-check: it parses again and every
+                // item keeps its bytes.
                 assert!(parse(&out).is_ok());
+                assert_eq!(item_data(&out), item_data(&f), "round {round}");
             }
             let _ = normalize_exif_orientation(&f);
         }
