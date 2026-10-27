@@ -31,10 +31,27 @@ pub fn phase<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
 /// Runs `f` and returns the phases it recorded on this thread, in order. A phase that
 /// runs more than once is listed each time. Nested `collect` calls keep their own list.
 pub fn collect<T>(f: impl FnOnce() -> T) -> (T, Vec<Phase>) {
-    let outer = PHASES.with(|p| p.borrow_mut().replace(Vec::new()));
+    /// Puts the outer list back when dropped, so a panic in `f` (decoders run under
+    /// `catch_unwind`) cannot leave recording switched on for the thread.
+    struct Restore(Option<Option<Vec<Phase>>>);
+    impl Restore {
+        fn finish(mut self) -> Vec<Phase> {
+            let outer = self.0.take().unwrap_or_default();
+            PHASES
+                .with(|p| std::mem::replace(&mut *p.borrow_mut(), outer))
+                .unwrap_or_default()
+        }
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(outer) = self.0.take() {
+                PHASES.with(|p| *p.borrow_mut() = outer);
+            }
+        }
+    }
+    let restore = Restore(Some(PHASES.with(|p| p.borrow_mut().replace(Vec::new()))));
     let out = f();
-    let phases = PHASES.with(|p| std::mem::replace(&mut *p.borrow_mut(), outer));
-    (out, phases.unwrap_or_default())
+    (out, restore.finish())
 }
 
 #[cfg(test)]
@@ -57,5 +74,25 @@ mod tests {
         // Nothing is left switched on.
         assert!(collect(|| ()).1.is_empty());
         assert!(PHASES.with(|p| p.borrow().is_none()));
+    }
+
+    #[test]
+    fn a_panic_inside_collect_switches_recording_off() {
+        let caught = std::panic::catch_unwind(|| {
+            collect(|| {
+                phase("before", || ());
+                panic!("decoder failed");
+            })
+        });
+        assert!(caught.is_err());
+        assert!(PHASES.with(|p| p.borrow().is_none()));
+        // A panic in a nested collect restores the outer list.
+        let ((), phases) = collect(|| {
+            phase("outer", || ());
+            let _ = std::panic::catch_unwind(|| collect(|| panic!("inner")));
+            phase("after", || ());
+        });
+        let names: Vec<_> = phases.iter().map(|p| p.0).collect();
+        assert_eq!(names, ["outer", "after"]);
     }
 }

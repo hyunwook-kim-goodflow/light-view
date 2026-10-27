@@ -101,7 +101,7 @@ cargo build --release -p lv-app -p lv-worker -p lv-bench
 target\release\lv-bench.exe [--runs 5] [--case jpeg12mp]... [--heic 12MP.heic] [-v] [--check crates\lv-bench\baseline.json]
 ```
 
-`first_pixel_ms`는 프로세스 시작부터 첫 사진이 그려질 때까지, `decode_ms`는 그 사진의 디코딩, `private_mb`는 메모리가 가라앉은 뒤(이웃 사진 미리 읽기까지 끝난 뒤) 앱과 작업자의 개인 메모리 합이에요. `-v`는 매 실행의 구간별 시간(`d2d-ms`, `decode.decode` 등)을 함께 찍어요. `--check`는 기준 파일 값의 1.5배를 넘는 값이 있으면 종료 코드 1이에요. `heic12mp`는 12 MP HEIC 파일을 `--heic`로 줘야 돌아요(저장소에 넣을 수 있는 샘플이 없어요).
+`first_pixel_ms`는 프로세스 시작부터 첫 사진이 그려질 때까지(`--bench`는 단일 창 확인을 건너뛰므로 그 시간은 빠져요. 평소 실행에서는 `--timing` 줄의 `instance-ms`로 볼 수 있어요), `decode_ms`는 그 사진의 디코딩, `private_mb`는 메모리가 가라앉은 뒤(이웃 사진 미리 읽기까지 끝난 뒤) 앱과 작업자의 개인 메모리 합이에요. `-v`는 매 실행의 구간별 시간(`d2d-ms`, `decode.decode` 등)을 함께 찍어요. `--check`는 기준 파일 값의 1.5배와 기준 + 50 ms(시간)·+ 30 MB(메모리) 중 큰 쪽을 넘는 값이 있거나, 기준에 있는 경우를 돌렸는데 결과가 없으면 종료 코드 1이에요(여기서 돌릴 수 없어 건너뛴 경우는 건너뛰었다고 찍고 넘어가요). `heic12mp`는 12 MP HEIC 파일을 `--heic`로 줘야 돌아요(저장소에 넣을 수 있는 샘플이 없어요).
 
 측정 환경: i7-1360P, Windows 11, release 빌드, **AC 전원**(배터리 22%, 충전 중), 2026-10-27.
 

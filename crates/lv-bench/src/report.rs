@@ -73,23 +73,39 @@ pub fn parse_baseline(text: &str) -> Result<Vec<CaseResult>, String> {
         .collect()
 }
 
-/// What in `current` is over `CHECK_FACTOR` times `baseline`, one message per value. A
-/// case missing from either side is not compared.
-pub fn check(baseline: &[CaseResult], current: &[CaseResult]) -> Vec<String> {
+/// Allowed on top of a small baseline: times may grow by this many ms, …
+pub const SLACK_MS: f64 = 50.0;
+/// … and memory by this many MB, even where that is more than `CHECK_FACTOR`.
+pub const SLACK_MB: f64 = 30.0;
+
+/// What in `current` is over its limit, one message per value: the limit is the larger
+/// of `CHECK_FACTOR` times the baseline and the baseline plus the slack. A baseline case
+/// with no result fails unless it is in `skipped` (it could not run here, e.g. no HEIC
+/// sample); a result with no baseline case is not compared.
+pub fn check(baseline: &[CaseResult], current: &[CaseResult], skipped: &[String]) -> Vec<String> {
     let mut failures = Vec::new();
-    for now in current {
-        let Some(base) = baseline.iter().find(|b| b.case == now.case) else {
+    for base in baseline {
+        let Some(now) = current.iter().find(|r| r.case == base.case) else {
+            if !skipped.contains(&base.case) {
+                failures.push(format!("{} has a baseline but no result", base.case));
+            }
             continue;
         };
-        let pairs = [
-            ("first_pixel_ms", base.first_pixel_ms, now.first_pixel_ms),
-            ("decode_ms", base.decode_ms, now.decode_ms),
-            ("private_mb", base.private_mb, now.private_mb),
+        let values = [
+            (
+                "first_pixel_ms",
+                base.first_pixel_ms,
+                now.first_pixel_ms,
+                SLACK_MS,
+            ),
+            ("decode_ms", base.decode_ms, now.decode_ms, SLACK_MS),
+            ("private_mb", base.private_mb, now.private_mb, SLACK_MB),
         ];
-        for (name, base, now_value) in pairs {
-            if now_value > base * CHECK_FACTOR {
+        for (name, base_value, now_value, slack) in values {
+            let limit = (base_value * CHECK_FACTOR).max(base_value + slack);
+            if now_value > limit {
                 failures.push(format!(
-                    "{} {name} {now_value:.0} is over {CHECK_FACTOR}x the baseline {base:.0}",
+                    "{} {name} {now_value:.0} is over its limit {limit:.0} (baseline {base_value:.0})",
                     now.case
                 ));
             }
@@ -140,20 +156,47 @@ mod tests {
     #[test]
     fn check_fails_only_past_one_and_a_half_times_the_baseline() {
         let baseline = vec![
-            result("jpeg12mp", 200.0, 100.0, 300.0),
+            result("jpeg12mp", 200.0, 120.0, 300.0),
             result("png_large", 1000.0, 800.0, 900.0),
         ];
+        let all = |r: Vec<CaseResult>| {
+            let mut r = r;
+            r.push(result("png_large", 1000.0, 800.0, 900.0));
+            r
+        };
         // Exactly 1.5x passes; anything over fails, per value.
-        let ok = vec![result("jpeg12mp", 300.0, 150.0, 450.0)];
-        assert!(check(&baseline, &ok).is_empty());
-        let slow = vec![
-            result("jpeg12mp", 301.0, 100.0, 451.0),
+        let ok = all(vec![result("jpeg12mp", 300.0, 180.0, 450.0)]);
+        assert!(check(&baseline, &ok, &[]).is_empty());
+        let slow = all(vec![
+            result("jpeg12mp", 301.0, 120.0, 451.0),
             result("heic12mp", 9999.0, 9999.0, 9999.0), // not in the baseline
-        ];
-        let failures = check(&baseline, &slow);
+        ]);
+        let failures = check(&baseline, &slow, &[]);
         assert_eq!(failures.len(), 2, "{failures:?}");
         assert!(failures[0].contains("jpeg12mp") && failures[0].contains("first_pixel_ms"));
         assert!(failures[1].contains("private_mb"));
+    }
+
+    #[test]
+    fn small_baselines_get_a_fixed_slack() {
+        // 1.5x of 20 ms is 30 ms, but +50 ms is allowed; memory gets +30 MB.
+        let baseline = vec![result("tiny", 20.0, 10.0, 40.0)];
+        assert!(check(&baseline, &[result("tiny", 70.0, 60.0, 70.0)], &[]).is_empty());
+        let failures = check(&baseline, &[result("tiny", 71.0, 61.0, 71.0)], &[]);
+        assert_eq!(failures.len(), 3, "{failures:?}");
+    }
+
+    #[test]
+    fn a_baseline_case_without_a_result_fails_unless_skipped() {
+        let baseline = vec![
+            result("jpeg12mp", 200.0, 100.0, 300.0),
+            result("heic12mp", 300.0, 200.0, 300.0),
+        ];
+        let current = vec![result("jpeg12mp", 200.0, 100.0, 300.0)];
+        let failures = check(&baseline, &current, &[]);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("heic12mp") && failures[0].contains("no result"));
+        assert!(check(&baseline, &current, &["heic12mp".to_string()]).is_empty());
     }
 
     #[test]
