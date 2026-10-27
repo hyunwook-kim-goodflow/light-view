@@ -25,6 +25,7 @@
 //! When the app exits, [`WorkerPool::shutdown`] ends every worker, busy ones included, so
 //! no prefetch thread is left waiting out a hung worker's timeout.
 
+mod protocol;
 mod sandbox;
 
 use std::fs::File;
@@ -37,19 +38,16 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
-use lv_ipc::{
-    max_bytes_response, max_request_data, read_response, write_request, FailKind, IpcError,
-    Request, Response, BYTES_FIXED_LEN,
-};
+use lv_core::decode::DecodeError;
+use lv_ipc::{read_response, write_request, IpcError, Request, Response};
 
+use protocol::{request_data_cap, response_cap, to_request, Expect};
+pub use protocol::{PoolError, PoolRequest, Reply};
 use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
 
 /// How long a worker may take to decode one file (ruling R4), and a caller may wait for a
 /// free slot.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-/// A rotation's deadline grows by 10 s per 100 MP (ruling R4): 100 ns per pixel.
-const ROTATE_NANOS_PER_PIXEL: u64 = 100;
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
 const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
@@ -57,74 +55,6 @@ const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
 const MAX_LOG_LINE: usize = 4096;
 /// How long a failed first request waits for the writer thread to report its write.
 const WRITE_SETTLE: Duration = Duration::from_secs(1);
-
-type Decoded = (u32, u32, Vec<u8>);
-
-/// What a worker is asked to do.
-#[derive(Debug)]
-pub enum PoolRequest {
-    /// Decode a HEIF file to premultiplied sRGB BGRA8; answered by [`Reply::Image`].
-    DecodeHeif { data: Vec<u8> },
-    /// Rotate a JPEG losslessly by `quarters` (`1..=3`) clockwise quarter turns; answered
-    /// by [`Reply::Bytes`].
-    RotateJpeg { quarters: u8, data: Vec<u8> },
-}
-
-/// A worker's answer, always the kind the request asked for.
-#[derive(Debug)]
-pub enum Reply {
-    Image {
-        width: u32,
-        height: u32,
-        bgra: Vec<u8>,
-    },
-    /// The rotated JPEG, at most `lv_ipc::max_bytes_response(input)` bytes. Not yet
-    /// checked beyond that: the caller verifies it before using it.
-    Bytes {
-        #[allow(dead_code, reason = "the rotation save pipeline (M3 task 6) reads it")]
-        data: Vec<u8>,
-    },
-}
-
-#[derive(Debug)]
-pub enum PoolError {
-    /// As for any decode: `Unsupported` when no worker can run, `TooLarge`, `FileTooLarge`,
-    /// and `Corrupt` for bad input or a worker that failed ("작업자가 응답하지 않아요").
-    Failed(DecodeError),
-    /// `RotateJpeg` only: the JPEG's size is not a multiple of its MCU, so its pixels cannot
-    /// be rotated losslessly (the save falls back to the EXIF orientation).
-    NotPerfect,
-    /// `RotateJpeg` only (ruling R7): data after EOI, an MPF segment, or no EOI found. The
-    /// rotation would lose what follows the first image (MPF images, gain maps, motion-photo
-    /// video), so the save must fall back to the EXIF orientation and keep the bytes.
-    HasTrailingData,
-}
-
-impl From<DecodeError> for PoolError {
-    fn from(e: DecodeError) -> Self {
-        PoolError::Failed(e)
-    }
-}
-
-impl std::fmt::Display for PoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PoolError::Failed(e) => e.fmt(f),
-            PoolError::NotPerfect => write!(f, "the JPEG cannot be rotated losslessly"),
-            PoolError::HasTrailingData => write!(f, "the JPEG holds more than one image"),
-        }
-    }
-}
-
-/// The kind of answer a request expects.
-#[derive(Clone, Copy)]
-enum Expect {
-    Image,
-    /// A rotated JPEG for an input of this many bytes.
-    Bytes {
-        input_len: u64,
-    },
-}
 
 pub struct WorkerPool {
     exe: PathBuf,
@@ -233,7 +163,7 @@ impl WorkerPool {
     }
 
     /// Sends one request to a worker and waits at most `deadline` for its answer (ruling
-    /// R4 gives the deadlines: [`DEFAULT_TIMEOUT`] for a decode, [`rotate_deadline`] for a
+    /// R4 gives the deadlines: [`DEFAULT_TIMEOUT`] for a decode, [`rotate_deadline`](protocol::rotate_deadline) for a
     /// rotation). A file larger than the worker accepts ([`request_data_cap`]) is
     /// `FileTooLarge` and a rotation by other than 1 to 3 quarter turns is `Corrupt`, both
     /// without being sent: the worker would refuse the request unread and die, which would
@@ -248,30 +178,7 @@ impl WorkerPool {
             return Err(DecodeError::FileTooLarge { bytes }.into());
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let max_pixels = self.max_pixels;
-        let (request, expect) = match req {
-            PoolRequest::DecodeHeif { data } => (
-                Request::DecodeHeif {
-                    id,
-                    max_pixels,
-                    data,
-                },
-                Expect::Image,
-            ),
-            PoolRequest::RotateJpeg { quarters, data } => {
-                if !(1..=3).contains(&quarters) {
-                    let msg = format!("{quarters} quarter turns");
-                    return Err(DecodeError::Corrupt(msg).into());
-                }
-                let request = Request::RotateJpeg {
-                    id,
-                    quarters,
-                    max_pixels,
-                    data,
-                };
-                (request, Expect::Bytes { input_len: bytes })
-            }
-        };
+        let (request, expect) = to_request(req, id, self.max_pixels)?;
         loop {
             let mut guard = self.acquire()?;
             if self.ensure_worker(guard.slot()) {
@@ -282,53 +189,6 @@ impl WorkerPool {
             }
             log("a worker slot gave up after repeated start failures");
             guard.give_up();
-        }
-    }
-
-    /// Decodes a HEIF file in a worker to premultiplied sRGB BGRA8 (width, height, pixels).
-    pub fn decode_heif(&self, data: Vec<u8>) -> Result<Decoded, DecodeError> {
-        match self.request(PoolRequest::DecodeHeif { data }, self.timeout) {
-            Ok(Reply::Image {
-                width,
-                height,
-                bgra,
-            }) => Ok((width, height, bgra)),
-            Err(PoolError::Failed(e)) => Err(e),
-            // `check` only lets an `Image` answer or a decode failure through for a decode.
-            Ok(Reply::Bytes { .. })
-            | Err(PoolError::NotPerfect)
-            | Err(PoolError::HasTrailingData) => Err(DecodeError::Corrupt(NOT_RESPONDING.into())),
-        }
-    }
-
-    /// Rotates a JPEG losslessly by `quarters` clockwise quarter turns in a worker, with
-    /// the deadline its size calls for. The size comes from the JPEG's own frame header:
-    /// a file without one is `Corrupt` and one over the pixel limit is `TooLarge`, both
-    /// without being sent.
-    ///
-    /// Contract (ruling R7): input with data after EOI or an MPF APP2 (`"MPF\0"`) segment
-    /// must not be pixel-rotated, since the rotation keeps only the first image. Such input
-    /// (and input whose EOI cannot be found) is refused with
-    /// [`PoolError::HasTrailingData`] before being sent; the worker checks again.
-    #[allow(dead_code, reason = "the rotation save pipeline (M3 task 6) calls it")]
-    pub fn rotate_jpeg(&self, quarters: u8, data: Vec<u8>) -> Result<Reply, PoolError> {
-        let Some((width, height)) = jpeg_dimensions(&data) else {
-            return Err(DecodeError::Corrupt("JPEG 헤더를 읽을 수 없어요".into()).into());
-        };
-        let pixels = u64::from(width) * u64::from(height);
-        if pixels > self.max_pixels {
-            return Err(DecodeError::TooLarge { width, height }.into());
-        }
-        if lv_core::jpeg_extent::check_single_image(&data).is_err() {
-            return Err(PoolError::HasTrailingData);
-        }
-        let request = PoolRequest::RotateJpeg { quarters, data };
-        match self.request(request, rotate_deadline(pixels)) {
-            // The worker reports no size with TooLarge; the header gives it.
-            Err(PoolError::Failed(DecodeError::TooLarge { .. })) => {
-                Err(DecodeError::TooLarge { width, height }.into())
-            }
-            other => other,
         }
     }
 
@@ -540,79 +400,6 @@ impl WorkerPool {
         }
     }
 
-    /// Maps the answer to request `id`; `Err` means the worker broke the protocol: another
-    /// request's id, an answer of the wrong kind, or one over its limits.
-    fn check(
-        &self,
-        id: u64,
-        expect: Expect,
-        response: Response,
-    ) -> Result<Result<Reply, PoolError>, String> {
-        let got = match &response {
-            Response::Image { id, .. }
-            | Response::Failed { id, .. }
-            | Response::Bytes { id, .. } => *id,
-        };
-        if got != id {
-            return Err(format!("answer for request {got}, expected {id}"));
-        }
-        match (expect, response) {
-            (
-                Expect::Image,
-                Response::Image {
-                    width,
-                    height,
-                    bgra,
-                    ..
-                },
-            ) => {
-                if u64::from(width) * u64::from(height) > self.max_pixels {
-                    Err(format!("{width}x{height} image is over the pixel limit"))
-                } else {
-                    Ok(Ok(Reply::Image {
-                        width,
-                        height,
-                        bgra,
-                    }))
-                }
-            }
-            (Expect::Bytes { input_len }, Response::Bytes { data, .. }) => {
-                let limit = max_bytes_response(input_len);
-                if data.len() as u64 > limit {
-                    Err(format!("{} bytes for a {input_len}-byte JPEG", data.len()))
-                } else {
-                    Ok(Ok(Reply::Bytes { data }))
-                }
-            }
-            (
-                Expect::Bytes { .. },
-                Response::Failed {
-                    kind: FailKind::NotPerfect,
-                    ..
-                },
-            ) => Ok(Err(PoolError::NotPerfect)),
-            (
-                Expect::Bytes { .. },
-                Response::Failed {
-                    kind: FailKind::HasTrailingData,
-                    ..
-                },
-            ) => Ok(Err(PoolError::HasTrailingData)),
-            (_, Response::Failed { kind, .. }) => Ok(Err(PoolError::Failed(match kind {
-                FailKind::TooLarge { width, height } => DecodeError::TooLarge { width, height },
-                FailKind::Corrupt(msg) => DecodeError::Corrupt(msg),
-                FailKind::Unsupported => DecodeError::Unsupported,
-                FailKind::NotPerfect | FailKind::HasTrailingData => {
-                    return Err(format!("{kind:?} answer to a decode"))
-                }
-            }))),
-            (Expect::Image, Response::Bytes { .. }) => Err("a JPEG answer to a decode".to_string()),
-            (Expect::Bytes { .. }, Response::Image { .. }) => {
-                Err("an image answer to a rotation".to_string())
-            }
-        }
-    }
-
     #[cfg(test)]
     fn workers(&self) -> Vec<WorkerInfo> {
         use std::os::windows::io::AsRawHandle;
@@ -700,68 +487,6 @@ impl Drop for SlotGuard<'_> {
             self.pool.lock().idle.push(slot);
             self.pool.slot_freed.notify_one();
         }
-    }
-}
-
-/// Largest file a worker accepts in a request: lv-core's file size limit (ruling R10),
-/// clamped to what one frame carries. The worker derives its own cap from the same rule.
-fn request_data_cap(max_pixels: u64) -> u64 {
-    max_request_data(max_file_bytes(&DecodeLimits { max_pixels }))
-}
-
-/// Largest response the app reads from a worker: an `N`-pixel BGRA image plus room for the
-/// fixed fields (ruling R10), or a rotated JPEG of the largest file a request can carry,
-/// whichever is larger. The reader thread reads ahead of any request, so this is one cap per
-/// worker; [`WorkerPool::check`] then holds a rotated JPEG to its own input's
-/// `max_bytes_response`.
-fn response_cap(max_pixels: u64) -> u64 {
-    let image = max_pixels.saturating_mul(4).saturating_add(64 * 1024);
-    let jpeg = BYTES_FIXED_LEN + max_bytes_response(request_data_cap(max_pixels));
-    image.max(jpeg)
-}
-
-/// Ruling R4: a rotation of a `pixels`-pixel JPEG gets 10 s plus 10 s per 100 MP.
-pub fn rotate_deadline(pixels: u64) -> Duration {
-    DEFAULT_TIMEOUT + Duration::from_nanos(pixels.saturating_mul(ROTATE_NANOS_PER_PIXEL))
-}
-
-/// (width, height) from a JPEG's frame header (SOFn), or `None` if there is none before the
-/// first scan or it says 0. Only for the rotation deadline and the pixel limit: the file is
-/// untrusted and the worker reads it again.
-// TODO(M3 task 3): use lv_core::jpeg_check::inspect instead.
-fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    if data.get(..2)? != [0xFF, 0xD8] {
-        return None;
-    }
-    let mut i = 2;
-    loop {
-        if *data.get(i)? != 0xFF {
-            return None;
-        }
-        // Any number of 0xFF fill bytes may come before the marker code.
-        while *data.get(i + 1)? == 0xFF {
-            i += 1;
-        }
-        let code = *data.get(i + 1)?;
-        i += 2;
-        // Markers without a length: TEM and RST0..7.
-        if code == 0x01 || (0xD0..=0xD7).contains(&code) {
-            continue;
-        }
-        if code == 0xDA || code == 0xD9 {
-            return None;
-        }
-        let len = usize::from(u16::from_be_bytes([*data.get(i)?, *data.get(i + 1)?]));
-        let is_frame = (0xC0..=0xCF).contains(&code) && ![0xC4, 0xC8, 0xCC].contains(&code);
-        if is_frame {
-            let field = |at: usize| Some(u16::from_be_bytes([*data.get(at)?, *data.get(at + 1)?]));
-            let (height, width) = (field(i + 3)?, field(i + 5)?);
-            return (width > 0 && height > 0).then(|| (u32::from(width), u32::from(height)));
-        }
-        if len < 2 {
-            return None;
-        }
-        i += len;
     }
 }
 
@@ -891,6 +616,10 @@ struct WorkerInfo {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    use lv_core::decode::DecodeLimits;
+
+    use super::protocol::rotate_deadline;
 
     use std::time::Instant;
 
@@ -1389,7 +1118,8 @@ pub(crate) mod tests {
     fn assert_rotated(result: Result<Reply, PoolError>, dims: (u32, u32)) -> Vec<u8> {
         match result {
             Ok(Reply::Bytes { data }) => {
-                assert_eq!(jpeg_dimensions(&data), Some(dims));
+                let info = lv_core::jpeg_check::inspect(&data).expect("a valid JPEG");
+                assert_eq!((u32::from(info.width), u32::from(info.height)), dims);
                 data
             }
             Ok(Reply::Image { width, height, .. }) => {
@@ -1603,26 +1333,6 @@ pub(crate) mod tests {
         assert_eq!(rotate_deadline(100_000_000), Duration::from_secs(20));
         assert_eq!(rotate_deadline(250_000_000), Duration::from_secs(35));
         assert_eq!(rotate_deadline(u64::MAX), rotate_deadline(u64::MAX - 1));
-    }
-
-    #[test]
-    fn jpeg_dimensions_reads_the_frame_header() {
-        let jpeg = jpeg_sample("gradient-65x33.jpg");
-        assert_eq!(jpeg_dimensions(&jpeg), Some((65, 33)));
-        // SOI, fill bytes, a COM segment, then a progressive SOF2.
-        let mut j = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFE, 0, 4, b'h', b'i'];
-        j.extend_from_slice(&[0xFF, 0xC2, 0, 11, 8, 0x01, 0x02, 0x03, 0x04, 1, 1, 0x11, 0]);
-        assert_eq!(jpeg_dimensions(&j), Some((0x0304, 0x0102)));
-        // DHT (C4) is not a frame header; nothing after it.
-        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF, 0xC4, 0, 2]), None);
-        // Zero height, scan before frame, truncation, not a JPEG.
-        let mut zero = j.clone();
-        zero[14..16].copy_from_slice(&[0, 0]);
-        assert_eq!(jpeg_dimensions(&zero), None);
-        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8, 0xFF, 0xDA, 0, 2]), None);
-        assert_eq!(jpeg_dimensions(&j[..14]), None);
-        assert_eq!(jpeg_dimensions(b"GIF89a"), None);
-        assert_eq!(jpeg_dimensions(&[]), None);
     }
 
     #[test]
