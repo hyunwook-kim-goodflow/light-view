@@ -75,6 +75,30 @@ pub fn save_settings(path: &Path, s: &Settings) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Changes only what `change` sets: reads the file as it is now (another window in
+/// another process may have saved since this one started), applies `change`, and
+/// writes it back atomically. Returns what was written.
+pub fn update_settings(
+    path: &Path,
+    change: impl FnOnce(&mut Settings),
+) -> std::io::Result<Settings> {
+    let mut s = load_settings(path);
+    change(&mut s);
+    save_settings(path, &s)?;
+    Ok(s)
+}
+
+impl Settings {
+    /// Takes the fields this process does not apply while it runs (the new-window
+    /// choice, the memory limit and the placement) from `written`. The language, the
+    /// pin and auto-save stay as this window applied them.
+    pub fn sync_from(&mut self, written: &Settings) {
+        self.open_in_new_window = written.open_in_new_window;
+        self.memory_budget_mb = written.memory_budget_mb;
+        self.window = written.window.clone();
+    }
+}
+
 /// 파일 이름 끝에 `suffix`를 붙인 경로를 만든다 (`settings.toml` + `.bak` → `settings.toml.bak`).
 fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -109,6 +133,37 @@ mod tests {
         let path = dir.path().join("settings.toml");
         save_settings(&path, &sample()).unwrap();
         assert_eq!(load_settings(&path), sample());
+    }
+
+    /// Two windows in separate processes ("새 창") each keep their own Settings: a
+    /// save writes only its own fields, so neither undoes the other's change.
+    #[test]
+    fn field_saves_keep_another_writers_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        save_settings(&path, &Settings::default()).unwrap();
+        // Window A starts; window B (another process) changes the language.
+        let mut a = load_settings(&path);
+        update_settings(&path, |s| s.language = LangSetting::En).unwrap();
+        // A saves its placement: B's language stays.
+        let place = sample().window;
+        let written = update_settings(&path, |s| s.window = place.clone()).unwrap();
+        assert_eq!(written.language, LangSetting::En);
+        assert_eq!(written.window, place);
+        assert_eq!(load_settings(&path), written);
+        // And the other way: B saves a placement after A changed the memory limit.
+        update_settings(&path, |s| s.memory_budget_mb = Some(1024)).unwrap();
+        let written = update_settings(&path, |s| s.window = None).unwrap();
+        assert_eq!(written.memory_budget_mb, Some(1024));
+        assert_eq!(written.language, LangSetting::En);
+        // A refreshes the fields it does not apply live from what was written; the
+        // live ones stay as A has them.
+        a.toolbar_pinned = true;
+        a.sync_from(&written);
+        assert_eq!(a.memory_budget_mb, Some(1024));
+        assert_eq!(a.window, None);
+        assert_eq!(a.language, LangSetting::Auto);
+        assert!(a.toolbar_pinned);
     }
 
     #[test]

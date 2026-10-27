@@ -642,17 +642,34 @@ fn on_button(app: &RefCell<App>, hwnd: HWND, b: ToolButton) {
     if let Some(c) = b.command() {
         commands::run(app, hwnd, c, None);
     }
+    if b == ToolButton::Pin {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        a.toggle_pin(hwnd);
+        drop(a);
+        pin_changed(app, hwnd);
+        return;
+    }
+    let Ok(timer) = app.try_borrow_mut().map(|mut a| a.start_timer()) else {
+        return;
+    };
+    sync_tooltips(app, hwnd);
+    after_change(hwnd, timer, true);
+}
+
+/// After the toolbar was pinned or unpinned (by its button or in the settings window):
+/// the floating pill stays up after unpinning and then auto-hides, the tooltips follow
+/// the new layout, and the window repaints.
+pub fn pin_changed(app: &RefCell<App>, hwnd: HWND) {
     let timer = {
         let Ok(mut a) = app.try_borrow_mut() else {
             return;
         };
-        if b == ToolButton::Pin {
-            a.toggle_pin(hwnd);
-            // Keep the floating pill up after unpinning, then let it auto-hide.
-            let now = a.pointer.now_ms();
-            a.pointer.autohide.on_mouse_move(now);
-            a.refresh_toolbar();
-        }
+        // Keep the floating pill up after unpinning, then let it auto-hide.
+        let now = a.pointer.now_ms();
+        a.pointer.autohide.on_mouse_move(now);
+        a.refresh_toolbar();
         a.start_timer()
     };
     sync_tooltips(app, hwnd);

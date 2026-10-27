@@ -4,8 +4,10 @@
 //! button).
 //!
 //! Keys: Tab and Shift+Tab move the focus (wrapping), ← → pick an option of the
-//! focused choice, Space and Enter toggle the checkbox or press the button, Esc closes
-//! the window. Alt combinations go on to `DefWindowProc` (Alt+F4).
+//! focused choice, Space and Enter toggle the checkbox or press the button (once while
+//! held), Esc closes the window. Alt combinations go on to `DefWindowProc` (Alt+F4).
+//! A click acts on release over the part it pressed (the mouse is captured meanwhile);
+//! the second click of a double-click does nothing.
 //!
 //! The window lives in `App::settings_win`; its procedure reaches the main `App` the
 //! same way the main window's does and holds no borrow across calls that dispatch
@@ -26,14 +28,15 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
     GetWindowRect, IsWindow, LoadCursorW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, CREATESTRUCTW, CS_DBLCLKS, GWLP_USERDATA, IDC_ARROW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION,
-    WS_OVERLAPPED, WS_SYSMENU,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::about;
@@ -239,10 +242,14 @@ pub struct Model {
 }
 
 impl Model {
-    /// A key; `None` for Alt combinations (they go on to `DefWindowProc`).
-    pub fn on_key(&mut self, vk: u16, mods: Mods, s: &Settings) -> Option<Action> {
+    /// A key; `None` for Alt combinations (they go on to `DefWindowProc`). `repeat`:
+    /// an auto-repeat of a held key, which toggles or presses nothing.
+    pub fn on_key(&mut self, vk: u16, mods: Mods, repeat: bool, s: &Settings) -> Option<Action> {
         if mods.alt {
             return None;
+        }
+        if repeat && matches!(vk, VK_SPACE | VK_RETURN) {
+            return Some(Action::Nothing);
         }
         let n = CONTROLS.len();
         let control = CONTROLS[self.focused];
@@ -285,6 +292,11 @@ impl Model {
             self.focused = c;
         }
         self.pressed.is_some()
+    }
+
+    /// The mouse capture ended without a release (another window took it).
+    pub fn cancel_press(&mut self) {
+        self.pressed = None;
     }
 
     /// Mouse up: acts only when released on the part that was pressed.
@@ -335,8 +347,8 @@ const LABEL_H: f32 = 20.0;
 const LABEL_GAP: f32 = 2.0;
 const ROW_H: f32 = 44.0;
 const OPTION_GAP: f32 = 6.0;
-const SECTION_GAP: f32 = 10.0;
-const NOTE_H: f32 = 18.0;
+const SECTION_GAP: f32 = 8.0;
+const NOTE_H: f32 = 16.0;
 const VERSION_H: f32 = 18.0;
 const BOTTOM: f32 = 12.0;
 
@@ -355,6 +367,8 @@ pub struct Layout {
     pub controls: Vec<ControlRects>,
     /// "다음 실행부터 적용돼요", under the memory options.
     pub note: Rect,
+    /// "다음에 사진을 열 때부터 적용돼요", under the open-in options.
+    pub open_note: Rect,
     pub version: Rect,
 }
 
@@ -376,6 +390,7 @@ pub fn layout((w, h): (f32, f32)) -> Layout {
         w: inner,
         h: NOTE_H,
     };
+    let mut open_note = note;
     let mut controls = Vec::with_capacity(CONTROLS.len());
     for c in CONTROLS {
         let rects = match c.kind() {
@@ -410,9 +425,16 @@ pub fn layout((w, h): (f32, f32)) -> Layout {
             },
         };
         y += ROW_H;
-        if c == Control::Memory {
-            note.y = y;
-            y += NOTE_H;
+        match c {
+            Control::Memory => {
+                note.y = y;
+                y += NOTE_H;
+            }
+            Control::OpenIn => {
+                open_note.y = y;
+                y += NOTE_H;
+            }
+            _ => {}
         }
         y += SECTION_GAP;
         controls.push(rects);
@@ -420,6 +442,7 @@ pub fn layout((w, h): (f32, f32)) -> Layout {
     Layout {
         controls,
         note,
+        open_note,
         version: Rect {
             x,
             y: h - BOTTOM - VERSION_H,
@@ -514,8 +537,13 @@ fn draw(r: &mut Renderer, m: &Model, s: &Settings, p: &Palette, icon_family: &st
             r.stroke_round_rect(ring, RADIUS + FOCUS_OUTSET, p.ink, 1.5);
         }
     }
-    let note = [run(t(S::SettingsMemoryNote), p.ink2, SMALL_SIZE, false)];
-    r.draw_runs_ellipsis(tuple(l.note), &note, Align::Leading);
+    for (rect, key) in [
+        (l.open_note, S::SettingsOpenOtherNote),
+        (l.note, S::SettingsMemoryNote),
+    ] {
+        let note = [run(t(key), p.ink2, SMALL_SIZE, false)];
+        r.draw_runs_ellipsis(tuple(rect), &note, Align::Leading);
+    }
     let version = about::version_line();
     let version = [run(&version, p.ink2, SMALL_SIZE, false)];
     r.draw_runs(tuple(l.version), &version, Align::Leading);
@@ -793,21 +821,28 @@ fn handle(
                 let a = &mut *a;
                 let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
                 let vk = wparam.0 as u16;
-                w.model.on_key(vk, commands::mods(), &a.settings)?
+                let repeat = lparam.0 & (1 << 30) != 0;
+                w.model.on_key(vk, commands::mods(), repeat, &a.settings)?
             };
             act(app, hwnd, action);
             Some(LRESULT(0))
         }
-        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
-            {
+        WM_LBUTTONDOWN => {
+            let pressed = {
                 let mut a = app.try_borrow_mut().ok()?;
                 let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
                 let (x, y) = to_dips(hwnd, lparam);
-                w.model.press(x, y, &layout(SIZE_DIP));
+                w.model.press(x, y, &layout(SIZE_DIP))
+            };
+            if pressed {
+                // SAFETY: plain call on our window; no App borrow is held.
+                unsafe { SetCapture(hwnd) };
             }
             invalidate(hwnd);
             Some(LRESULT(0))
         }
+        // The second click of a double-click: not another toggle.
+        WM_LBUTTONDBLCLK => Some(LRESULT(0)),
         WM_LBUTTONUP => {
             let action = {
                 let mut a = app.try_borrow_mut().ok()?;
@@ -816,7 +851,17 @@ fn handle(
                 let (x, y) = to_dips(hwnd, lparam);
                 w.model.release(x, y, &layout(SIZE_DIP), &a.settings)
             };
+            // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
+            unsafe {
+                let _ = ReleaseCapture();
+            }
             act(app, hwnd, action);
+            Some(LRESULT(0))
+        }
+        WM_CAPTURECHANGED => {
+            let mut a = app.try_borrow_mut().ok()?;
+            let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
+            w.model.cancel_press();
             Some(LRESULT(0))
         }
         WM_DESTROY => {
@@ -893,14 +938,16 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
         let Some(update) = apply_change(&mut a.settings, change) else {
             return;
         };
-        a.persist_settings();
+        // Only the changed field is written: another process may have saved others.
+        a.persist(|s| {
+            apply_change(s, change);
+        });
         if update.retranslate {
             strings::set(a.settings.language);
             a.overlay.retranslate(strings::current());
         }
         if update.relayout {
             a.on_size(owner);
-            a.refresh_toolbar();
         }
         if let Some(on) = update.auto_save {
             a.viewer.set_auto_save(on);
@@ -916,7 +963,9 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
         }
     }
     if update.relayout {
-        input::sync_tooltips(app, owner);
+        // As the toolbar's own pin button does: the tooltips follow, and after
+        // unpinning the floating toolbar stays up a moment, then hides.
+        input::pin_changed(app, owner);
     }
     invalidate(owner);
     invalidate(hwnd);
@@ -1021,13 +1070,13 @@ mod tests {
         let s = Settings::default();
         let mut m = Model::default();
         assert_eq!(m.focused, 0);
-        assert_eq!(m.on_key(VK_TAB, NONE, &s), Some(Action::Redraw));
+        assert_eq!(m.on_key(VK_TAB, NONE, false, &s), Some(Action::Redraw));
         assert_eq!(m.focused, 1);
         for _ in 0..5 {
-            m.on_key(VK_TAB, NONE, &s);
+            m.on_key(VK_TAB, NONE, false, &s);
         }
         assert_eq!(m.focused, 0);
-        m.on_key(VK_TAB, SHIFT, &s);
+        m.on_key(VK_TAB, SHIFT, false, &s);
         assert_eq!(m.focused, 5);
     }
 
@@ -1037,69 +1086,90 @@ mod tests {
         let mut m = Model::default();
         // Language: → picks the next option, ← the previous; no wrapping.
         assert_eq!(
-            m.on_key(VK_RIGHT, NONE, &s),
+            m.on_key(VK_RIGHT, NONE, false, &s),
             Some(Action::Change(Change::Language(LangSetting::Ko)))
         );
         s.language = LangSetting::En;
-        assert_eq!(m.on_key(VK_RIGHT, NONE, &s), Some(Action::Nothing));
+        assert_eq!(m.on_key(VK_RIGHT, NONE, false, &s), Some(Action::Nothing));
         assert_eq!(
-            m.on_key(VK_LEFT, NONE, &s),
+            m.on_key(VK_LEFT, NONE, false, &s),
             Some(Action::Change(Change::Language(LangSetting::Ko)))
         );
         // Space and Enter do nothing on a choice.
-        assert_eq!(m.on_key(VK_SPACE, NONE, &s), Some(Action::Nothing));
+        assert_eq!(m.on_key(VK_SPACE, NONE, false, &s), Some(Action::Nothing));
         // The checkbox: Space and Enter toggle; arrows do nothing.
         focus(&mut m, Control::PinMenu);
         assert_eq!(
-            m.on_key(VK_SPACE, NONE, &s),
+            m.on_key(VK_SPACE, NONE, false, &s),
             Some(Action::Change(Change::PinMenu(true)))
         );
         s.toolbar_pinned = true;
         assert_eq!(
-            m.on_key(VK_RETURN, NONE, &s),
+            m.on_key(VK_RETURN, NONE, false, &s),
             Some(Action::Change(Change::PinMenu(false)))
         );
-        assert_eq!(m.on_key(VK_RIGHT, NONE, &s), Some(Action::Nothing));
+        assert_eq!(m.on_key(VK_RIGHT, NONE, false, &s), Some(Action::Nothing));
         focus(&mut m, Control::OpenIn);
         assert_eq!(
-            m.on_key(VK_RIGHT, NONE, &s),
+            m.on_key(VK_RIGHT, NONE, false, &s),
             Some(Action::Change(Change::NewWindow(true)))
         );
         focus(&mut m, Control::Rotation);
         assert_eq!(
-            m.on_key(VK_RIGHT, NONE, &s),
+            m.on_key(VK_RIGHT, NONE, false, &s),
             Some(Action::Change(Change::AutoSave(true)))
         );
         focus(&mut m, Control::Memory);
         assert_eq!(
-            m.on_key(VK_RIGHT, NONE, &s),
+            m.on_key(VK_RIGHT, NONE, false, &s),
             Some(Action::Change(Change::Memory(Some(256))))
         );
         s.memory_budget_mb = Some(256);
         assert_eq!(
-            m.on_key(VK_LEFT, NONE, &s),
+            m.on_key(VK_LEFT, NONE, false, &s),
             Some(Action::Change(Change::Memory(None)))
         );
         // A value not offered: → starts from the first option.
         s.memory_budget_mb = Some(300);
         assert_eq!(
-            m.on_key(VK_RIGHT, NONE, &s),
+            m.on_key(VK_RIGHT, NONE, false, &s),
             Some(Action::Change(Change::Memory(None)))
         );
         // The button: Space and Enter open the Windows page.
         focus(&mut m, Control::DefaultApps);
-        assert_eq!(m.on_key(VK_SPACE, NONE, &s), Some(Action::OpenDefaultApps));
-        assert_eq!(m.on_key(VK_RETURN, NONE, &s), Some(Action::OpenDefaultApps));
-        assert_eq!(m.on_key(VK_LEFT, NONE, &s), Some(Action::Nothing));
+        assert_eq!(
+            m.on_key(VK_SPACE, NONE, false, &s),
+            Some(Action::OpenDefaultApps)
+        );
+        assert_eq!(
+            m.on_key(VK_RETURN, NONE, false, &s),
+            Some(Action::OpenDefaultApps)
+        );
+        assert_eq!(m.on_key(VK_LEFT, NONE, false, &s), Some(Action::Nothing));
+    }
+
+    #[test]
+    fn held_space_and_enter_act_once() {
+        let s = Settings::default();
+        let mut m = Model::default();
+        focus(&mut m, Control::PinMenu);
+        assert_eq!(m.on_key(VK_SPACE, NONE, true, &s), Some(Action::Nothing));
+        assert_eq!(m.on_key(VK_RETURN, NONE, true, &s), Some(Action::Nothing));
+        // Held arrows and Tab still repeat.
+        assert_eq!(m.on_key(VK_TAB, NONE, true, &s), Some(Action::Redraw));
+        assert_eq!(
+            m.on_key(VK_RIGHT, NONE, true, &s),
+            Some(Action::Change(Change::NewWindow(true)))
+        );
     }
 
     #[test]
     fn escape_closes_and_alt_combinations_pass() {
         let s = Settings::default();
         let mut m = Model::default();
-        assert_eq!(m.on_key(VK_ESCAPE, NONE, &s), Some(Action::Close));
-        assert_eq!(m.on_key(0x73, ALT, &s), None); // Alt+F4
-        assert_eq!(m.on_key(0x41, NONE, &s), Some(Action::Nothing));
+        assert_eq!(m.on_key(VK_ESCAPE, NONE, false, &s), Some(Action::Close));
+        assert_eq!(m.on_key(0x73, ALT, false, &s), None); // Alt+F4
+        assert_eq!(m.on_key(0x41, NONE, false, &s), Some(Action::Nothing));
     }
 
     #[test]
@@ -1162,10 +1232,20 @@ mod tests {
             }
             bottom = rects.focus.y + rects.focus.h;
         }
-        // The memory note sits under the memory options, the version at the bottom.
-        let memory = &l.controls[4];
-        assert!(l.note.y >= memory.options[0].y + memory.options[0].h - 0.01);
-        assert!(l.note.y + l.note.h <= l.controls[5].options[0].y);
+        // Each note sits under its options, above the next control; the version at
+        // the bottom.
+        let under = |note: Rect, c: usize| {
+            let o = l.controls[c].options[0];
+            note.y >= o.y + o.h - 0.01
+                && note.y + note.h
+                    <= l.controls[c + 1]
+                        .label
+                        .unwrap_or(l.controls[c + 1].options[0])
+                        .y
+        };
+        assert!(under(l.note, 4));
+        assert!(under(l.open_note, 2));
+        assert!(inside(l.open_note));
         assert!(l.version.y >= bottom);
         assert!(inside(l.note) && inside(l.version));
     }
