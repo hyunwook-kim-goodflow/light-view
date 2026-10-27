@@ -1,0 +1,71 @@
+# Fuzz targets for light-view's parsers of untrusted input (ruling R3). Run with
+# cargo-fuzz on nightly, from the repository root:
+#
+#     cargo +nightly fuzz run format_decode fuzz/corpus/format_decode testdata/fuzz/format_decode
+#
+# Each target calls one entry function in `lv_core::fuzzing` or `lv_ipc::fuzzing`; the
+# stable test `fuzz_corpus_replays` (crates/lv-core/tests/fuzz_corpus.rs) replays the seed
+# corpus in testdata/fuzz/<target>/ through the same functions.
+[package]
+name = "lv-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lv-core = { path = "../crates/lv-core" }
+lv-ipc = { path = "../crates/lv-ipc" }
+
+# Its own workspace: not built by `cargo build --workspace` at the root (it needs nightly
+# and libFuzzer).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "format_decode"
+path = "fuzz_targets/format_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exif_info"
+path = "fuzz_targets/exif_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exif_edit"
+path = "fuzz_targets/exif_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "heif_edit"
+path = "fuzz_targets/heif_edit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_markers"
+path = "fuzz_targets/jpeg_markers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_frame"
+path = "fuzz_targets/ipc_frame.rs"
+test = false
+doc = false
+bench = false

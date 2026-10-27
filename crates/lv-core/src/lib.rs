@@ -6,6 +6,8 @@ pub mod decode;
 pub mod exif_edit;
 pub mod exif_info;
 pub mod format;
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod heif_edit;
 #[cfg(windows)]
 pub mod identity;
