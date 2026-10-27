@@ -75,7 +75,7 @@ jobs:
 
       # fuzz/ is its own workspace (excluded in Cargo.toml), so `cargo fmt --all`, clippy
       # and `cargo deny` do not cover it; `cargo audit` checks its lockfile (supply-chain
-      # job) and fuzz.yml builds it weekly.
+      # job) and fuzz.yml builds it twice a week.
       - name: Format
         run: cargo fmt --all --check
 
