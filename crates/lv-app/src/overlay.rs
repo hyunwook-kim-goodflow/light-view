@@ -12,7 +12,7 @@ use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
 use crate::about;
 use crate::render::{Align, Renderer, TextRun};
-use crate::strings::{t, S};
+use crate::strings::{t, text, tf, Lang, S};
 use crate::theme::{Palette, Rgb};
 use crate::toolbar::{pinned_bar_height, Rect};
 
@@ -114,11 +114,12 @@ impl Prompt {
         }
     }
 
-    /// Title lines at body size in the 372 DIP wide card: the delete question wraps.
-    fn title_lines(&self) -> f32 {
+    /// Title lines until the title is measured (`Dialog::title_lines`): the delete
+    /// question wraps.
+    fn estimated_title_lines(&self) -> u32 {
         match self {
-            Prompt::SaveRotation | Prompt::About => 1.0,
-            Prompt::PermanentDelete { .. } => 2.0,
+            Prompt::SaveRotation | Prompt::About => 1,
+            Prompt::PermanentDelete { .. } => 2,
         }
     }
 
@@ -151,6 +152,9 @@ pub struct Dialog {
     /// Index into `prompt.items()`.
     pub focused: usize,
     pub dont_ask: bool,
+    /// The title's line count as last drawn (it depends on the language and the card
+    /// width); `None` until then.
+    pub title_lines: Option<u32>,
 }
 
 impl Dialog {
@@ -166,6 +170,7 @@ impl Dialog {
             prompt,
             focused,
             dont_ask: false,
+            title_lines: None,
         }
     }
 
@@ -217,14 +222,27 @@ pub struct DialogLayout {
     pub items: Vec<Rect>,
 }
 
+fn dialog_card_width(view_w: f32) -> f32 {
+    (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W)
+}
+
+/// The width the title wraps in.
+pub fn dialog_inner_width(view_w: f32) -> f32 {
+    (dialog_card_width(view_w) - 2.0 * CARD_PAD).max(0.0)
+}
+
 /// The card is at most 420 DIP wide (16 DIP from the window edges when narrower) and
 /// centered in the client area. Inside its 24 DIP padding: the title, the detail lines,
 /// the checkbox row, then the buttons in one row of equal widths, all 44 DIP tall.
 pub fn dialog_layout(view_w: f32, view_h: f32, dialog: &Dialog) -> DialogLayout {
     let p = &dialog.prompt;
-    let card_w = (view_w - 2.0 * CARD_MARGIN).clamp(0.0, CARD_MAX_W);
-    let inner_w = card_w - 2.0 * CARD_PAD;
-    let title_h = p.title_lines() * TITLE_LINE_H;
+    let card_w = dialog_card_width(view_w);
+    let inner_w = dialog_inner_width(view_w);
+    let lines = dialog
+        .title_lines
+        .unwrap_or_else(|| p.estimated_title_lines())
+        .max(1);
+    let title_h = lines as f32 * TITLE_LINE_H;
     let detail_count = p.details().len();
     let has_checkbox = p.items().contains(&Item::Checkbox);
     let card_h = CARD_PAD
@@ -319,6 +337,9 @@ pub enum ToastAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     pub text: String,
+    /// What `text` is made of (a string key and a file name after it), so a language
+    /// change can rebuild it.
+    source: (S, String),
     /// The highlighter pill's label and what it does.
     pub action: Option<(String, ToastAction)>,
     pub shown_at_ms: u64,
@@ -328,9 +349,15 @@ pub struct Toast {
 }
 
 impl Toast {
-    pub fn new(text: &str, now_ms: u64) -> Toast {
+    pub fn new(key: S, now_ms: u64) -> Toast {
+        Toast::with_suffix(key, "", now_ms)
+    }
+
+    /// `key`'s text followed by `suffix` (a file name).
+    pub fn with_suffix(key: S, suffix: &str, now_ms: u64) -> Toast {
         Toast {
-            text: text.to_owned(),
+            text: tf(key, &[&suffix]),
+            source: (key, suffix.to_owned()),
             action: None,
             shown_at_ms: now_ms,
             duration_ms: TOAST_MS,
@@ -342,7 +369,18 @@ impl Toast {
     pub fn recycled(now_ms: u64) -> Toast {
         Toast {
             action: Some((t(S::ToastUndo).to_owned(), ToastAction::Undo)),
-            ..Toast::new(t(S::ToastRecycled), now_ms)
+            ..Toast::new(S::ToastRecycled, now_ms)
+        }
+    }
+
+    /// Rebuilds the text and the action's label in `lang`.
+    pub fn retranslate(&mut self, lang: Lang) {
+        let (key, suffix) = &self.source;
+        self.text = format!("{}{suffix}", text(lang, *key));
+        if let Some((label, action)) = &mut self.action {
+            *label = match action {
+                ToastAction::Undo => text(lang, S::ToastUndo).to_owned(),
+            };
         }
     }
 
@@ -504,6 +542,14 @@ impl Overlay {
         self.dialog.is_some()
     }
 
+    /// After a language change: the toast's text in `lang` (a dialog's text is looked
+    /// up as it is drawn).
+    pub fn retranslate(&mut self, lang: Lang) {
+        if let Some(toast) = &mut self.toast {
+            toast.retranslate(lang);
+        }
+    }
+
     /// Drops the toast once its time is up; true if one was dropped.
     pub fn expire(&mut self, now_ms: u64) -> bool {
         let expired = self.toast.as_ref().is_some_and(|t| !t.visible(now_ms));
@@ -654,7 +700,12 @@ pub fn draw(r: &mut Renderer, o: &mut Overlay, v: &OverlayView) {
     if let Some(t) = o.toast.as_mut().filter(|t| t.visible(v.now_ms)) {
         draw_toast(r, t, v);
     }
-    if let Some(d) = &o.dialog {
+    if let Some(d) = &mut o.dialog {
+        // Measured first: the layout (and later hit tests) use the line count.
+        let width = dialog_inner_width(v.client.0);
+        if let Some(n) = r.wrapped_line_count(d.prompt.title(), UI_FAMILY, TITLE_SIZE, width) {
+            d.title_lines = Some(n);
+        }
         draw_dialog(r, d, v);
     }
 }
@@ -995,6 +1046,27 @@ mod tests {
     }
 
     #[test]
+    fn measured_title_lines_grow_the_card() {
+        // The English delete question can take three lines: the card grows and the
+        // buttons stay inside it, under the title.
+        let mut d = delete();
+        assert_eq!(d.title_lines, None);
+        let two = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(two.title.h, 2.0 * 22.0);
+        d.title_lines = Some(3);
+        let three = dialog_layout(VIEW.0, VIEW.1, &d);
+        assert_eq!(three.title.h, 3.0 * 22.0);
+        assert_eq!(three.card.h, two.card.h + 22.0);
+        for r in &three.items {
+            assert!(r.y >= three.title.y + three.title.h);
+            assert!(r.y + r.h <= three.card.y + three.card.h - 24.0 + 0.01);
+        }
+        // The title is measured in the card's inner width.
+        assert_eq!(dialog_inner_width(VIEW.0), 420.0 - 48.0);
+        assert_eq!(dialog_inner_width(300.0), 300.0 - 32.0 - 48.0);
+    }
+
+    #[test]
     fn dialog_card_shrinks_in_a_narrow_window() {
         let l = dialog_layout(400.0, 500.0, &save());
         assert_eq!(l.card.x, 16.0);
@@ -1042,8 +1114,30 @@ mod tests {
     }
 
     #[test]
+    fn toast_text_follows_the_language() {
+        use crate::strings::{text, Lang};
+        let mut o = Overlay::default();
+        o.show_toast(Toast::with_suffix(S::ToastRecycleFailed, "a.jpg", 0));
+        o.retranslate(Lang::En);
+        assert_eq!(
+            o.toast.as_ref().unwrap().text,
+            "Couldn't move to Recycle Bin: a.jpg"
+        );
+        o.show_toast(Toast::recycled(0));
+        o.retranslate(Lang::En);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "Moved to Recycle Bin");
+        assert_eq!(toast.action.as_ref().unwrap().0, "Undo");
+        o.retranslate(Lang::Ko);
+        let toast = o.toast.as_ref().unwrap();
+        assert_eq!(toast.text, text(Lang::Ko, S::ToastRecycled));
+        assert_eq!(toast.action.as_ref().unwrap().0, "실행 취소");
+        assert_eq!(Toast::new(S::ToastCopied, 0).text, t(S::ToastCopied));
+    }
+
+    #[test]
     fn toast_lasts_six_seconds() {
-        let toast = Toast::new(t(S::ToastSaveFailed), 1_000);
+        let toast = Toast::new(S::ToastSaveFailed, 1_000);
         assert_eq!(toast.duration_ms, 6000);
         assert!(toast.visible(1_000));
         assert!(toast.visible(6_999));
@@ -1061,7 +1155,7 @@ mod tests {
     fn a_new_toast_replaces_the_old_one() {
         let mut o = Overlay::default();
         o.show_toast(Toast::recycled(0));
-        o.show_toast(Toast::new(t(S::ToastFileChanged), 5_000));
+        o.show_toast(Toast::new(S::ToastFileChanged, 5_000));
         let toast = o.toast.as_ref().unwrap();
         assert_eq!(toast.text, t(S::ToastFileChanged));
         assert_eq!(toast.action, None);
@@ -1116,7 +1210,7 @@ mod tests {
         assert_eq!(undo.hit_action(x, y), Some(ToastAction::Undo));
         let (x, y) = center(parts.text);
         assert_eq!(undo.hit_action(x, y), None);
-        let mut plain = Toast::new(t(S::ToastSaveFailed), 0);
+        let mut plain = Toast::new(S::ToastSaveFailed, 0);
         plain.place(parts);
         let (x, y) = center(parts.action.unwrap());
         assert_eq!(plain.hit_action(x, y), None);

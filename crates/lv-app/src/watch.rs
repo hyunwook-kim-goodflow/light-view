@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use crate::commands;
 use crate::input;
 use crate::overlay::{Overlay, Toast};
-use crate::strings::{t, S};
+use crate::strings::S;
 use crate::viewer::{RescanFound, RescanNotice};
 use crate::window::App;
 
@@ -484,12 +484,12 @@ pub fn on_rescan_done(app: &RefCell<App>, hwnd: HWND) {
         };
         drop(a);
         commands::after(app, hwnd, redraw);
-        let text = match notice {
-            Some(RescanNotice::Vanished) => t(S::ToastPhotoVanished),
-            Some(RescanNotice::Reloaded) => t(S::ToastPhotoReloaded),
+        let key = match notice {
+            Some(RescanNotice::Vanished) => S::ToastPhotoVanished,
+            Some(RescanNotice::Reloaded) => S::ToastPhotoReloaded,
             None => continue,
         };
-        input::show_toast(app, hwnd, |now| Toast::new(text, now));
+        input::show_toast(app, hwnd, |now| Toast::new(key, now));
     }
     rescan_if_due(app, hwnd);
 }

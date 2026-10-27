@@ -331,6 +331,45 @@ impl Renderer {
         }
     }
 
+    /// How many lines `draw_wrapped` breaks `text` into at `width` DIPs, or `None` on
+    /// failure.
+    pub fn wrapped_line_count(
+        &self,
+        text: &str,
+        family: &str,
+        size: f32,
+        width: f32,
+    ) -> Option<u32> {
+        if width <= 0.0 {
+            return None;
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: plain calls on live COM objects; `wide`, the family string and
+        // `metrics` are live locals that outlive the calls using them.
+        unsafe {
+            let format = self
+                .dwrite
+                .CreateTextFormat(
+                    &HSTRING::from(family),
+                    None,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!("ko-KR"),
+                )
+                .ok()?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP).ok()?;
+            let layout = self
+                .dwrite
+                .CreateTextLayout(&wide, &format, width, f32::MAX)
+                .ok()?;
+            layout.GetMetrics(&mut metrics).ok()?;
+        }
+        Some(metrics.lineCount)
+    }
+
     /// A `width`-DIP outline whose stroke lies inside `rect`.
     pub fn stroke_round_rect(
         &mut self,

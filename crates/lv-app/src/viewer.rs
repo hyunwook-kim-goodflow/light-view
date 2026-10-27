@@ -14,7 +14,7 @@ use lv_core::listing::{same_path, FolderList};
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
 
-use crate::strings::{t, too_large_with_size, S};
+use crate::strings::{self, t, text, Lang, S};
 
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
 const MIN_DELAY_MS: u32 = 20;
@@ -39,14 +39,14 @@ pub enum RescanNotice {
 }
 
 /// What to draw in the image area (the loading pill is drawn on top, see `loading`).
-pub enum Scene<'a> {
+pub enum Scene {
     Empty,
     /// `rect` is the on-screen box of the image turned clockwise by `quarters` × 90°.
     Image {
         rect: (f32, f32, f32, f32),
         quarters: u8,
     },
-    Message(&'a str),
+    Message(String),
 }
 
 enum Content {
@@ -54,7 +54,7 @@ enum Content {
         result: DecodeResult,
         view: Viewport,
     },
-    Message(String),
+    Message(Message),
 }
 
 /// The photo on screen. While the current photo is still decoding this is the
@@ -140,11 +140,30 @@ pub struct Viewer {
     pending_leave: Option<LeaveReason>,
 }
 
-pub fn error_message(e: &DecodeError) -> String {
-    match e {
-        DecodeError::TooLarge { width, height } => too_large_with_size(*width, *height),
-        DecodeError::FileTooLarge { .. } => t(S::TooLarge).to_owned(),
-        _ => t(S::CannotOpen).to_owned(),
+/// What the image area says instead of a photo. Kept as the reason, not its text, so a
+/// language change shows it in the new language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Message {
+    CannotOpen,
+    /// Too large; with the pixel size when it is known.
+    TooLarge(Option<(u32, u32)>),
+}
+
+impl Message {
+    pub fn for_error(e: &DecodeError) -> Message {
+        match e {
+            DecodeError::TooLarge { width, height } => Message::TooLarge(Some((*width, *height))),
+            DecodeError::FileTooLarge { .. } => Message::TooLarge(None),
+            _ => Message::CannotOpen,
+        }
+    }
+
+    pub fn text(self, lang: Lang) -> String {
+        match self {
+            Message::CannotOpen => text(lang, S::CannotOpen).to_owned(),
+            Message::TooLarge(None) => text(lang, S::TooLarge).to_owned(),
+            Message::TooLarge(Some((w, h))) => strings::too_large_text(lang, w, h),
+        }
     }
 }
 
@@ -467,8 +486,8 @@ impl Viewer {
                 view: Viewport::initial(self.view_size, image_dips(img, self.dip, self.quarters)),
                 result: result.clone(),
             },
-            Ok(_) => Content::Message(t(S::CannotOpen).to_owned()),
-            Err(e) => Content::Message(error_message(e)),
+            Ok(_) => Content::Message(Message::CannotOpen),
+            Err(e) => Content::Message(Message::for_error(e)),
         };
         self.shown = Some(Shown {
             path,
@@ -522,7 +541,7 @@ impl Viewer {
             return;
         };
         if let Some(s) = &mut self.shown {
-            s.content = Content::Message(error_message(&DecodeError::TooLarge { width, height }));
+            s.content = Content::Message(Message::TooLarge(Some((width, height))));
         }
     }
 
@@ -879,7 +898,7 @@ impl Viewer {
         title
     }
 
-    pub fn scene(&self) -> Scene<'_> {
+    pub fn scene(&self) -> Scene {
         match &self.shown {
             Some(Shown {
                 content: Content::Image { view, .. },
@@ -890,9 +909,9 @@ impl Viewer {
                 quarters: *quarters,
             },
             Some(Shown {
-                content: Content::Message(text),
+                content: Content::Message(m),
                 ..
-            }) => Scene::Message(text),
+            }) => Scene::Message(m.text(strings::current())),
             None => Scene::Empty,
         }
     }
@@ -1519,11 +1538,29 @@ mod tests {
             width: 30000,
             height: 20000,
         };
-        assert_eq!(error_message(&e), "너무 커서 열 수 없어요 (30000×20000)");
-        assert_eq!(error_message(&DecodeError::Unsupported), t(S::CannotOpen));
+        let ko = |e: &DecodeError| Message::for_error(e).text(Lang::Ko);
+        assert_eq!(ko(&e), "너무 커서 열 수 없어요 (30000×20000)");
+        assert_eq!(ko(&DecodeError::Unsupported), text(Lang::Ko, S::CannotOpen));
         assert_eq!(
-            error_message(&DecodeError::FileTooLarge { bytes: 1 << 40 }),
+            ko(&DecodeError::FileTooLarge { bytes: 1 << 40 }),
             "너무 커서 열 수 없어요"
         );
+    }
+
+    /// The shown message keeps what went wrong, not its text, so a language change
+    /// redraws it in the new language.
+    #[test]
+    fn messages_follow_the_language() {
+        let e = DecodeError::TooLarge {
+            width: 3,
+            height: 4,
+        };
+        let m = Message::for_error(&e);
+        assert_eq!(m.text(Lang::En), "Too large to open (3×4)");
+        assert_eq!(m.text(Lang::Ko), "너무 커서 열 수 없어요 (3×4)");
+        let m = Message::for_error(&DecodeError::Unsupported);
+        assert_eq!(m.text(Lang::En), "Couldn't open this photo");
+        let m = Message::for_error(&DecodeError::FileTooLarge { bytes: 1 << 40 });
+        assert_eq!(m.text(Lang::En), "Too large to open");
     }
 }
