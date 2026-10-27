@@ -43,7 +43,7 @@ use crate::overlay::{
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
-use crate::watch::{self, WM_APP_FOLDER_CHANGED};
+use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
 use crate::window::{self, invalidate, App};
 use crate::worker::WorkerPool;
 
@@ -560,6 +560,10 @@ pub fn handle(
         }
         WM_APP_DELETE_DONE => {
             delete::on_reports(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_RESCAN_DONE => {
+            watch::on_rescan_done(app, hwnd);
             Some(LRESULT(0))
         }
         WM_APP_FOLDER_CHANGED => {

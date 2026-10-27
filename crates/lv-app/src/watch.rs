@@ -1,23 +1,28 @@
-//! Folder change detection (spec §5.x, ruling R19): a [`FolderWatch`] thread waits on
-//! `ReadDirectoryChangesW` for the shown folder and, 200 ms after a burst of changes
-//! settles, posts `WM_APP_FOLDER_CHANGED`. The window then lists the folder again
-//! ([`Viewer::rescan`](crate::viewer::Viewer::rescan)), unless a dialog is open or a save
-//! runs: the rescan then waits for it ([`Watching`], ruling R14).
+//! Folder change detection (spec §5.x, rulings R19/R20): a [`FolderWatch`] thread waits
+//! on `ReadDirectoryChangesW` for the shown folder and, 200 ms after a burst of changes
+//! settles, posts `WM_APP_FOLDER_CHANGED`. The window then lists the folder again,
+//! unless a dialog is open or a save runs: the rescan then waits for it ([`Watching`],
+//! ruling R14).
 //!
-//! Rescans run on the UI thread, like the scan made when a folder is opened, and cost
-//! about the same: one folder read and sort, plus the identity of at most five files
-//! (measured on a local folder of 2000 files: 13–17 ms per rescan in a release build,
-//! 12.5 ms for the scan at open). At most one runs per `DEBOUNCE`, and none while
-//! nothing changes. A slow network folder blocks a rescan as long as it blocks an open.
+//! The UI thread never touches the disk for a rescan: it takes a
+//! [`RescanJob`](crate::viewer::RescanJob) (the folder, the current photo and the
+//! identities to check), a background thread runs it (a slow or stalled network folder
+//! blocks only that thread) and posts `WM_APP_RESCAN_DONE`, and the UI thread applies
+//! the result unless the viewer moved on meanwhile (then it rescans again). One rescan
+//! runs at a time; changes reported meanwhile give exactly one more after it. A slow
+//! rescan stretches the debounce to twice its duration, so a busy network folder is not
+//! listed back to back.
 
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lv_core::identity::to_extended_path;
@@ -37,12 +42,14 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use crate::commands;
 use crate::input;
 use crate::overlay::{Overlay, Toast, TOAST_PHOTO_RELOADED, TOAST_PHOTO_VANISHED};
-use crate::viewer::RescanNotice;
+use crate::viewer::{RescanFound, RescanNotice};
 use crate::window::App;
 
 /// Posted by a [`FolderWatch`] once a burst of changes settled. (`WM_APP + 3` is
 /// `WM_APP_DELETE_DONE`.)
 pub const WM_APP_FOLDER_CHANGED: u32 = WM_APP + 4;
+/// Posted by a rescan thread once its result is in `Watching`'s channel.
+pub const WM_APP_RESCAN_DONE: u32 = WM_APP + 5;
 /// Quiet time after the last change of a burst.
 const DEBOUNCE: Duration = Duration::from_millis(200);
 /// A steady stream of changes (a long copy) still refreshes the list this often.
@@ -56,11 +63,13 @@ const FILTER: FILE_NOTIFY_CHANGE = FILE_NOTIFY_CHANGE(
 const BUFFER_WORDS: usize = 1024;
 
 /// Coalesces a burst of changes into one notice, `DEBOUNCE` after its last change but
-/// no later than `MAX_DELAY` after its first.
+/// no later than `MAX_DELAY` after its first; both stretch to twice the last rescan's
+/// duration (`slow`) when that is longer.
 #[derive(Debug, Default)]
 pub struct Debounce {
     first: Option<Instant>,
     last: Option<Instant>,
+    slow: Duration,
 }
 
 impl Debounce {
@@ -69,15 +78,23 @@ impl Debounce {
         self.last = Some(now);
     }
 
+    /// How long the last rescan took.
+    pub fn set_slow(&mut self, took: Duration) {
+        self.slow = took;
+    }
+
     /// When the pending burst is due; `None` with nothing pending.
     pub fn due(&self) -> Option<Instant> {
-        Some((self.last? + DEBOUNCE).min(self.first? + MAX_DELAY))
+        let quiet = DEBOUNCE.max(self.slow * 2);
+        let cap = MAX_DELAY.max(self.slow * 2);
+        Some((self.last? + quiet).min(self.first? + cap))
     }
 
     /// True, once, when the pending burst is due at `now`.
     pub fn fire(&mut self, now: Instant) -> bool {
         if self.due().is_some_and(|due| now >= due) {
-            *self = Debounce::default();
+            self.first = None;
+            self.last = None;
             return true;
         }
         false
@@ -87,7 +104,8 @@ impl Debounce {
 /// Watches one folder on its own thread until dropped.
 pub struct FolderWatch {
     stop: Arc<OwnedHandle>,
-    thread: Option<JoinHandle<()>>,
+    /// The last rescan's duration in ms, read by the thread's `Debounce`.
+    slow_ms: Arc<AtomicU64>,
 }
 
 /// The overlapped read: the system writes into it until the read completes or is
@@ -104,47 +122,69 @@ impl FolderWatch {
     /// network locations): the caller then runs without a watch.
     pub fn start(dir: &Path, hwnd: HWND) -> io::Result<FolderWatch> {
         let target = hwnd.0 as isize;
-        FolderWatch::start_with(dir, move || {
-            // SAFETY: plain call; posting to a destroyed window just fails.
-            unsafe {
-                let _ = PostMessageW(
-                    HWND(target as *mut _),
-                    WM_APP_FOLDER_CHANGED,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
-        })
+        FolderWatch::start_with(dir, move || post(target, WM_APP_FOLDER_CHANGED))
     }
 
+    /// Like `start`, calling `notify` instead; `notify` is dropped when the thread ends.
     fn start_with(dir: &Path, notify: impl Fn() + Send + 'static) -> io::Result<FolderWatch> {
         let stop = Arc::new(new_event()?);
-        let thread_stop = stop.clone();
+        let slow_ms = Arc::new(AtomicU64::new(0));
+        let (thread_stop, thread_slow) = (stop.clone(), slow_ms.clone());
         let dir = to_extended_path(dir);
         let (started_tx, started) = std::sync::mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
+        // The thread owns everything its pending read touches: the directory handle, the
+        // event and the boxed buffer. It is never joined (a stalled network read could
+        // hold it up), so dropping a watch never blocks.
+        std::thread::Builder::new()
             .name("folder-watch".into())
-            .spawn(move || match start_reading(&dir) {
-                Ok((file, io_done, mut read)) => {
-                    let _ = started_tx.send(Ok(()));
-                    watch_loop(&file, &io_done, &thread_stop, &mut read, &notify);
-                }
-                Err(e) => {
-                    let _ = started_tx.send(Err(e));
+            .spawn(move || {
+                let (file, io_done, mut read) = match start_reading(&dir) {
+                    Ok(started) => started,
+                    Err(e) => {
+                        let _ = started_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let _ = started_tx.send(Ok(()));
+                let run = catch_unwind(AssertUnwindSafe(|| {
+                    watch_loop(
+                        &file,
+                        &io_done,
+                        &thread_stop,
+                        &thread_slow,
+                        &mut read,
+                        &notify,
+                    );
+                }));
+                if run.is_err() {
+                    // A read may still be pending: the system may still write into
+                    // `read` and set `io_done`, and closing `file` under it does not wait.
+                    // Leak all three rather than free memory the kernel writes to.
+                    std::mem::forget(read);
+                    std::mem::forget(io_done);
+                    std::mem::forget(file);
                 }
             })?;
         // The first read tells whether this location reports changes at all.
-        let started = started
+        started
             .recv()
-            .unwrap_or_else(|_| Err(io::Error::other("the folder watch thread ended")));
-        if let Err(e) = started {
-            let _ = thread.join();
-            return Err(e);
-        }
-        Ok(FolderWatch {
-            stop,
-            thread: Some(thread),
-        })
+            .unwrap_or_else(|_| Err(io::Error::other("the folder watch thread ended")))?;
+        Ok(FolderWatch { stop, slow_ms })
+    }
+
+    /// How long the last rescan of this folder took: the debounce stretches to twice it.
+    pub fn set_last_rescan(&self, took: Duration) {
+        let ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
+        self.slow_ms.store(ms, Ordering::Relaxed);
+    }
+}
+
+impl Drop for FolderWatch {
+    /// Tells the thread to stop: it cancels its read (`CancelIoEx`), waits for it and
+    /// ends on its own. Not joined.
+    fn drop(&mut self) {
+        // SAFETY: the event handle is owned by `self.stop` and alive.
+        let _ = unsafe { SetEvent(HANDLE(self.stop.as_raw_handle())) };
     }
 }
 
@@ -168,17 +208,6 @@ fn start_reading(dir: &Path) -> io::Result<(File, OwnedHandle, Box<Read>)> {
     Ok((file, io_done, read))
 }
 
-impl Drop for FolderWatch {
-    /// Stops the thread: it cancels its read (`CancelIoEx`) and ends.
-    fn drop(&mut self) {
-        // SAFETY: the event handle is owned by `self.stop` and alive.
-        let _ = unsafe { SetEvent(HANDLE(self.stop.as_raw_handle())) };
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
 impl Read {
     /// Starts the next overlapped read of `dir`'s changes.
     fn issue(&mut self, dir: &File) -> io::Result<()> {
@@ -189,7 +218,7 @@ impl Read {
         };
         // SAFETY: `dir` is a directory handle opened for overlapped I/O; the buffer and
         // the OVERLAPPED live in this boxed `Read`, which the watch thread keeps until
-        // the read has completed or been cancelled and waited for.
+        // the read has completed or been cancelled and waited for (or leaks on a panic).
         unsafe {
             ReadDirectoryChangesW(
                 HANDLE(dir.as_raw_handle()),
@@ -223,10 +252,18 @@ fn new_event() -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(h.0) })
 }
 
+fn post(target: isize, msg: u32) {
+    // SAFETY: plain call; posting to a destroyed window just fails.
+    unsafe {
+        let _ = PostMessageW(HWND(target as *mut _), msg, WPARAM(0), LPARAM(0));
+    }
+}
+
 fn watch_loop(
     dir: &File,
     io_done: &OwnedHandle,
     stop: &OwnedHandle,
+    slow_ms: &AtomicU64,
     read: &mut Read,
     notify: &dyn Fn(),
 ) {
@@ -237,9 +274,12 @@ fn watch_loop(
     let mut reading = true;
     let mut debounce = Debounce::default();
     loop {
+        debounce.set_slow(Duration::from_millis(slow_ms.load(Ordering::Relaxed)));
         let timeout = debounce.due().map_or(INFINITE, |due| {
             let left = due.saturating_duration_since(Instant::now()).as_millis();
-            u32::try_from(left).unwrap_or(INFINITE - 1) + 1
+            u32::try_from(left)
+                .unwrap_or(INFINITE - 1)
+                .saturating_add(1)
         });
         let waiting = if reading { &handles[..] } else { &handles[..1] };
         // SAFETY: both handles are owned events alive for the whole loop.
@@ -283,17 +323,39 @@ fn watch_loop(
     }
 }
 
-/// The window's folder watch, and a rescan waiting for a dialog or a save to end.
-#[derive(Default)]
+/// The window's folder watch and its rescans: one due (waiting for a dialog or a save
+/// to end, or for the running one) and the one running.
 pub struct Watching {
     watch: Option<FolderWatch>,
     /// The watched folder, or the folder that could not be watched.
     dir: Option<PathBuf>,
     rescan_pending: bool,
+    /// The id of the rescan running for this folder.
+    running: Option<u64>,
+    next_id: u64,
+    results_tx: Sender<(u64, RescanFound)>,
+    results: Receiver<(u64, RescanFound)>,
+}
+
+impl Default for Watching {
+    fn default() -> Watching {
+        let (results_tx, results) = channel();
+        Watching {
+            watch: None,
+            dir: None,
+            rescan_pending: false,
+            running: None,
+            next_id: 0,
+            results_tx,
+            results,
+        }
+    }
 }
 
 impl Watching {
-    /// Watches `dir` from now on (nothing changes if it is already the one).
+    /// Watches `dir` from now on (nothing changes if it is already the one). A rescan
+    /// still running for the old folder no longer holds up rescans of the new one; its
+    /// result is not applied.
     fn follow(&mut self, dir: Option<&Path>, hwnd: HWND) {
         let same = match (dir, &self.dir) {
             (Some(a), Some(b)) => same_path(a, b),
@@ -304,6 +366,7 @@ impl Watching {
             return;
         }
         self.watch = None;
+        self.running = None;
         self.dir = dir.map(Path::to_path_buf);
         let Some(dir) = dir else { return };
         match FolderWatch::start(dir, hwnd) {
@@ -320,14 +383,26 @@ impl Watching {
         self.rescan_pending = true;
     }
 
-    /// Whether to rescan now: one is due and nothing `blocked` it. A blocked rescan
-    /// stays due.
-    pub fn take_rescan(&mut self, blocked: bool) -> bool {
-        if blocked || !self.rescan_pending {
-            return false;
+    /// Starts a rescan if one is due, none runs and nothing `blocked` it; returns its
+    /// id. A rescan held back stays due.
+    pub fn take_rescan(&mut self, blocked: bool) -> Option<u64> {
+        if blocked || !self.rescan_pending || self.running.is_some() {
+            return None;
         }
         self.rescan_pending = false;
-        true
+        self.next_id += 1;
+        self.running = Some(self.next_id);
+        self.running
+    }
+
+    /// Rescan `id` ended after `took`.
+    pub fn finish(&mut self, id: u64, took: Duration) {
+        if self.running == Some(id) {
+            self.running = None;
+            if let Some(w) = &self.watch {
+                w.set_last_rescan(took);
+            }
+        }
     }
 }
 
@@ -355,25 +430,67 @@ pub fn on_changed(app: &RefCell<App>, hwnd: HWND) {
     rescan_if_due(app, hwnd);
 }
 
-/// Rescans if one is due and nothing blocks it. Also called once a dialog closed (after
-/// a forwarded open it deferred, which lists its folder anyway) and once a save ended.
+/// Starts a rescan on a background thread if one is due and nothing blocks it. Also
+/// called once a dialog closed (after a forwarded open it deferred, which lists its
+/// folder anyway), once a save ended and once a rescan ended.
 pub fn rescan_if_due(app: &RefCell<App>, hwnd: HWND) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
     };
     let blocked = rescan_blocked(&a.overlay, a.saving.is_some());
-    if !a.watching.take_rescan(blocked) {
+    let Some(id) = a.watching.take_rescan(blocked) else {
         return;
-    }
-    let (redraw, notice) = a.viewer.rescan();
-    drop(a);
-    commands::after(app, hwnd, redraw);
-    let text = match notice {
-        Some(RescanNotice::Vanished) => TOAST_PHOTO_VANISHED,
-        Some(RescanNotice::Reloaded) => TOAST_PHOTO_RELOADED,
-        None => return,
     };
-    input::show_toast(app, hwnd, |now| Toast::new(text, now));
+    let Some(job) = a.viewer.rescan_job() else {
+        a.watching.finish(id, Duration::ZERO);
+        return;
+    };
+    let tx = a.watching.results_tx.clone();
+    let target = hwnd.0 as isize;
+    let spawned = std::thread::Builder::new()
+        .name("rescan".into())
+        .spawn(move || {
+            let nothing = job.nothing();
+            let found = catch_unwind(AssertUnwindSafe(|| job.run())).unwrap_or(nothing);
+            let _ = tx.send((id, found));
+            post(target, WM_APP_RESCAN_DONE);
+        });
+    if let Err(e) = spawned {
+        eprintln!("light-view: could not rescan the folder: {e}");
+        a.watching.finish(id, Duration::ZERO);
+    }
+}
+
+/// `WM_APP_RESCAN_DONE`: applies finished rescans, then starts the one due meanwhile.
+/// A result that came while a dialog opened or a save started, or that is out of date
+/// (the viewer moved on), is dropped and the folder rescanned again.
+pub fn on_rescan_done(app: &RefCell<App>, hwnd: HWND) {
+    loop {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        let Ok((id, found)) = a.watching.results.try_recv() else {
+            break;
+        };
+        a.watching.finish(id, found.took);
+        if rescan_blocked(&a.overlay, a.saving.is_some()) {
+            a.watching.changed();
+            continue;
+        }
+        let Some((redraw, notice)) = a.viewer.apply_rescan(found) else {
+            a.watching.changed();
+            continue;
+        };
+        drop(a);
+        commands::after(app, hwnd, redraw);
+        let text = match notice {
+            Some(RescanNotice::Vanished) => TOAST_PHOTO_VANISHED,
+            Some(RescanNotice::Reloaded) => TOAST_PHOTO_RELOADED,
+            None => continue,
+        };
+        input::show_toast(app, hwnd, |now| Toast::new(text, now));
+    }
+    rescan_if_due(app, hwnd);
 }
 
 #[cfg(test)]
@@ -385,7 +502,7 @@ mod tests {
     use lv_core::decode::{DecodeError, DecodedImage, Frame};
     use lv_core::format::ImageFormat;
     use lv_core::prefetch::{Decode, Prefetcher};
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::RecvTimeoutError;
 
     const MS: Duration = Duration::from_millis(1);
 
@@ -416,6 +533,28 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_rescan_stretches_the_debounce() {
+        let t0 = Instant::now();
+        let mut d = Debounce::default();
+        d.set_slow(1500 * MS);
+        d.event(t0);
+        assert_eq!(d.due(), Some(t0 + 3000 * MS));
+        // A steady stream: one notice per 3 s instead of per second.
+        let mut fired = 0;
+        for i in 0..60 {
+            let now = t0 + i * 100 * MS;
+            d.event(now);
+            fired += usize::from(d.fire(now));
+        }
+        assert_eq!(fired, 1);
+        // A fast one changes nothing.
+        d.set_slow(20 * MS);
+        let t1 = t0 + 10 * MAX_DELAY;
+        d.event(t1);
+        assert!(d.fire(t1 + DEBOUNCE));
+    }
+
+    #[test]
     fn watch_reports_new_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.jpg"), b"a").unwrap();
@@ -434,17 +573,43 @@ mod tests {
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let _ = rx.recv_timeout(DEBOUNCE * 3);
         std::fs::write(dir.path().join("sub").join("c.jpg"), b"c").unwrap();
-        assert!(rx.recv_timeout(DEBOUNCE * 3).is_err());
-        // Dropping ends the thread promptly.
+        assert_eq!(
+            rx.recv_timeout(DEBOUNCE * 3),
+            Err(RecvTimeoutError::Timeout)
+        );
+        // Dropping returns at once; the thread then ends on its own (dropping `notify`).
         let dropped = Instant::now();
         drop(watch);
-        assert!(dropped.elapsed() < Duration::from_secs(2));
+        assert!(dropped.elapsed() < Duration::from_millis(100));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Err(RecvTimeoutError::Disconnected)
+        );
     }
 
     #[test]
     fn a_missing_folder_is_not_watched() {
         let dir = tempfile::tempdir().unwrap();
         assert!(FolderWatch::start_with(&dir.path().join("gone"), || {}).is_err());
+    }
+
+    #[test]
+    fn changes_during_a_rescan_give_exactly_one_more() {
+        let mut w = Watching::default();
+        assert_eq!(w.take_rescan(false), None);
+        w.changed();
+        let first = w.take_rescan(false).expect("due");
+        // Changes while it runs: no second rescan at the same time.
+        w.changed();
+        w.changed();
+        assert_eq!(w.take_rescan(false), None);
+        // A stale id (an old folder's rescan) does not end the running one.
+        w.finish(first + 100, Duration::ZERO);
+        assert_eq!(w.take_rescan(false), None);
+        w.finish(first, Duration::ZERO);
+        let second = w.take_rescan(false).expect("one follow-up");
+        w.finish(second, Duration::ZERO);
+        assert_eq!(w.take_rescan(false), None);
     }
 
     struct AnyDecoder;
@@ -481,17 +646,18 @@ mod tests {
 
         std::fs::write(dir.path().join("b.jpg"), b"b").unwrap();
         w.changed();
-        assert!(!w.take_rescan(rescan_blocked(&overlay, false)));
+        assert_eq!(w.take_rescan(rescan_blocked(&overlay, false)), None);
         assert_eq!(viewer.position(), (1, 1));
         // Closed: the waiting rescan runs, once.
         assert!(overlay.on_key(VK_ESCAPE, Mods::default()).is_some());
-        assert!(w.take_rescan(rescan_blocked(&overlay, false)));
+        let id = w.take_rescan(rescan_blocked(&overlay, false)).unwrap();
         viewer.rescan();
+        w.finish(id, Duration::ZERO);
         assert_eq!(viewer.position(), (1, 2));
-        assert!(!w.take_rescan(rescan_blocked(&overlay, false)));
+        assert_eq!(w.take_rescan(rescan_blocked(&overlay, false)), None);
         // A running save holds it back too.
         w.changed();
-        assert!(!w.take_rescan(rescan_blocked(&overlay, true)));
-        assert!(w.take_rescan(rescan_blocked(&overlay, false)));
+        assert_eq!(w.take_rescan(rescan_blocked(&overlay, true)), None);
+        assert!(w.take_rescan(rescan_blocked(&overlay, false)).is_some());
     }
 }
