@@ -40,6 +40,8 @@ fn installer_is_per_user_in_the_spec_folder() {
     assert!(setup.contains(&"PrivilegesRequired=lowest".to_owned()));
     assert!(setup.contains(&r"DefaultDirName={localappdata}\Programs\light-view".to_owned()));
     assert!(setup.contains(&"ChangesAssociations=yes".to_owned()));
+    // The folder is fixed: the icacls grant must not reach a folder the user picked.
+    assert!(setup.contains(&"DisableDirPage=yes".to_owned()));
     assert!(
         !setup
             .iter()
@@ -92,6 +94,17 @@ fn installer_registers_every_extension() {
             ),
             ".{ext} default apps capability"
         );
+    }
+    // Uninstalling removes only our value under a shared `.<ext>` key, never the key
+    // (it holds other programs' registrations).
+    for line in &registry {
+        let shared = EXTENSIONS
+            .iter()
+            .any(|ext| line.contains(&format!(r#"Subkey: "Software\Classes\.{ext}"#)));
+        if shared {
+            assert!(!line.contains("uninsdeletekey"), "{line}");
+            assert!(line.contains("uninsdeletevalue"), "{line}");
+        }
     }
     // The default apps page finds light-view under this name (registeredAppUser=light-view).
     assert!(has_line(

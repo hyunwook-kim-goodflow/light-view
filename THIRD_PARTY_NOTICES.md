@@ -35,6 +35,11 @@ JPEG 사진의 무손실 회전은 `lv-worker.exe`가 libjpeg-turbo의 TurboJPEG
 - libspng: Copyright (c) 2018-2023 Randy; libpng 부분은 The PNG Reference Library Authors 외. zlib: (C) 1995-2026 Jean-loup Gailly and Mark Adler. 원문(libspng BSD-2-Clause, libpng-2.0, zlib)은 **부록 E, F, G**에 있어요.
 - 빌드: 위와 같은 vcpkg 커밋의 포트(<https://github.com/microsoft/vcpkg/tree/9eec002df1cd109f8f104cd966a763daf9751489/ports/libjpeg-turbo>, `ports/libspng`, `ports/zlib`)로 `x64-windows`(DLL)에서 빌드했어요. libheif의 `jpeg` 기능은 끄고 빌드해요(`scripts/setup-deps.ps1`이 확인해요).
 
+## Rust 표준 라이브러리
+
+두 실행 파일에는 Rust 표준 라이브러리(`std`, `core`, `alloc`, `compiler_builtins` 등, Rust 1.95.0)가 들어가요. MIT OR Apache-2.0이고, 전문은 아래 Rust 크레이트 부분의 MIT·Apache-2.0 라이선스와 같아요. 소스: <https://github.com/rust-lang/rust/tree/1.95.0/library>
+(The Rust standard library compiled into both executables is MIT OR Apache-2.0.)
+
 ## Microsoft Visual C++ 런타임
 
 `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`은 Microsoft Visual C++ 런타임을 써서, 그 재배포 파일 `vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`을 `lv-worker.exe` 옆에 함께 넣어요. 이 파일들은 Visual Studio 라이선스의 재배포 가능 코드(Distributable Code) 조건으로 배포해요. 저작권은 Microsoft Corporation에 있어요. light-view의 두 실행 파일은 C 런타임을 정적으로 링크해요.

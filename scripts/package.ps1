@@ -25,8 +25,8 @@
     Other modes:
         -NoticesOnly [-NoticesOut <path>]   step 3 alone (default: THIRD_PARTY_NOTICES.md in
                                             the repository root)
-        -ChecksumsOnly                       step 6 alone, over every zip and setup exe in
-                                            dist (the release workflow runs it after ISCC)
+        -Version x.y.z -ChecksumsOnly        step 6 alone, over this version's zip and setup
+                                            exe in dist (the release workflow runs it after ISCC)
 
     The build honours CARGO_TARGET_DIR. Needs cargo-about 0.9 (`cargo install --locked
     cargo-about --features cli`) and the Visual C++ build tools (found with vswhere, or
@@ -94,38 +94,41 @@ function New-Notices {
     param([string]$OutFile)
     $notices = Join-Path $RepoRoot 'notices'
     $crates = Join-Path ([System.IO.Path]::GetTempPath()) ("lv-about-" + [guid]::NewGuid() + '.md')
-    Push-Location $RepoRoot
     try {
-        # Every crate (all targets) present locally, so --frozen (no network, no license
-        # lookups outside the crates' own files) sees the whole graph.
-        Invoke-Native cargo @('fetch', '--locked')
-        Invoke-Native cargo @('about', 'generate', '--workspace', '--frozen', '--fail',
-            '-c', 'about.toml', '-o', $crates, 'about.hbs')
+        Push-Location $RepoRoot
+        try {
+            # Every crate (all targets) present locally, so --frozen (no network, no license
+            # lookups outside the crates' own files) sees the whole graph.
+            Invoke-Native cargo @('fetch', '--locked')
+            Invoke-Native cargo @('about', 'generate', '--workspace', '--frozen', '--fail',
+                '-c', 'about.toml', '-o', $crates, 'about.hbs')
+        } finally {
+            Pop-Location
+        }
+        $appendix = @(
+            @('A', 'GNU Lesser General Public License v3 (libheif, libde265)', 'LGPL-3.0.txt'),
+            @('B', 'GNU General Public License v3 (LGPL-3.0이 참조, referenced by the LGPL)', 'GPL-3.0.txt'),
+            @('C', 'libjpeg-turbo LICENSE.md (IJG, BSD-3-Clause, Zlib)', 'libjpeg-turbo-LICENSE.md'),
+            @('D', 'libjpeg-turbo README.ijg (IJG License)', 'libjpeg-turbo-README.ijg.txt'),
+            @('E', 'libspng (BSD-2-Clause)', 'libspng-LICENSE.txt'),
+            @('F', 'libpng-2.0 (libspng의 libpng 유래 코드)', 'libpng-LICENSE.txt'),
+            @('G', 'zlib', 'zlib-LICENSE.txt')
+        )
+        $parts = New-Object System.Collections.Generic.List[string]
+        $parts.Add((Read-Text (Join-Path $notices 'native.md')))
+        $parts.Add((Read-Text $crates))
+        $parts.Add("## 부록: 라이선스 전문 (Appendix: license texts)")
+        foreach ($entry in $appendix) {
+            $text = Read-Text (Join-Path $notices $entry[2])
+            if ($text.Contains('```')) { throw "$($entry[2]) contains a code fence" }
+            $parts.Add("### 부록 $($entry[0]). $($entry[1])`n`n``````text`n$text`n``````")
+        }
+        $body = ($parts -join "`n`n") + "`n"
+        Write-Utf8NoBom -Path $OutFile -Text ($body -replace "`n", "`r`n")
+        Write-Host "Wrote $OutFile"
     } finally {
-        Pop-Location
+        if (Test-Path $crates) { Remove-Item -Force $crates }
     }
-    $appendix = @(
-        @('A', 'GNU Lesser General Public License v3 (libheif, libde265)', 'LGPL-3.0.txt'),
-        @('B', 'GNU General Public License v3 (LGPL-3.0이 참조, referenced by the LGPL)', 'GPL-3.0.txt'),
-        @('C', 'libjpeg-turbo LICENSE.md (IJG, BSD-3-Clause, Zlib)', 'libjpeg-turbo-LICENSE.md'),
-        @('D', 'libjpeg-turbo README.ijg (IJG License)', 'libjpeg-turbo-README.ijg.txt'),
-        @('E', 'libspng (BSD-2-Clause)', 'libspng-LICENSE.txt'),
-        @('F', 'libpng-2.0 (libspng의 libpng 유래 코드)', 'libpng-LICENSE.txt'),
-        @('G', 'zlib', 'zlib-LICENSE.txt')
-    )
-    $parts = New-Object System.Collections.Generic.List[string]
-    $parts.Add((Read-Text (Join-Path $notices 'native.md')))
-    $parts.Add((Read-Text $crates))
-    $parts.Add("## 부록: 라이선스 전문 (Appendix: license texts)")
-    foreach ($entry in $appendix) {
-        $text = Read-Text (Join-Path $notices $entry[2])
-        if ($text.Contains('```')) { throw "$($entry[2]) contains a code fence" }
-        $parts.Add("### 부록 $($entry[0]). $($entry[1])`n`n``````text`n$text`n``````")
-    }
-    Remove-Item -Force $crates
-    $body = ($parts -join "`n`n") + "`n"
-    Write-Utf8NoBom -Path $OutFile -Text ($body -replace "`n", "`r`n")
-    Write-Host "Wrote $OutFile"
 }
 
 function Find-VcRedist {
@@ -148,18 +151,70 @@ function Find-VcRedist {
     throw "No Visual C++ x64 redistributable folder under $vs\VC\Redist\MSVC; pass -VcRedistDir"
 }
 
-# A Rust exe built with +crt-static names no Visual C++ runtime DLL.
-function Assert-NoVcRuntimeImport {
-    param([string]$Exe)
-    $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($Exe))
-    if ($text -match '(?i)vcruntime140|msvcp140') {
-        throw "$Exe needs the Visual C++ runtime DLLs; it must link the C runtime statically"
+# The DLL names in a PE32+ file's import and delay-import tables.
+function Get-PeImports {
+    param([string]$Path)
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    $pe = [BitConverter]::ToInt32($b, 0x3C)
+    if ([BitConverter]::ToUInt32($b, $pe) -ne 0x4550) { throw "$Path is not a PE file" }
+    $sectionCount = [BitConverter]::ToUInt16($b, $pe + 6)
+    $optSize = [BitConverter]::ToUInt16($b, $pe + 20)
+    $opt = $pe + 24
+    if ([BitConverter]::ToUInt16($b, $opt) -ne 0x20B) { throw "$Path is not PE32+" }
+    $sections = $opt + $optSize
+    $toOffset = {
+        param([uint32]$rva)
+        for ($i = 0; $i -lt $sectionCount; $i++) {
+            $s = $sections + 40 * $i
+            $va = [BitConverter]::ToUInt32($b, $s + 12)
+            $size = [Math]::Max([BitConverter]::ToUInt32($b, $s + 8), [BitConverter]::ToUInt32($b, $s + 16))
+            if ($rva -ge $va -and $rva -lt $va + $size) {
+                return [int64]($rva - $va + [BitConverter]::ToUInt32($b, $s + 20))
+            }
+        }
+        throw "RVA $rva of $Path is in no section"
     }
+    $readName = {
+        param([uint32]$rva)
+        $o = & $toOffset $rva
+        $end = $o
+        while ($b[$end] -ne 0) { $end++ }
+        return [System.Text.Encoding]::ASCII.GetString($b, $o, $end - $o)
+    }
+    $names = New-Object System.Collections.Generic.List[string]
+    # Data directories (PE32+): 1 = imports (20-byte entries, name RVA at +12),
+    # 13 = delay imports (32-byte entries, name RVA at +4).
+    foreach ($dir in @(@(1, 20, 12), @(13, 32, 4))) {
+        $rva = [BitConverter]::ToUInt32($b, $opt + 112 + 8 * $dir[0])
+        if ($rva -eq 0) { continue }
+        $o = & $toOffset $rva
+        while ($true) {
+            $nameRva = [BitConverter]::ToUInt32($b, $o + $dir[2])
+            if ($nameRva -eq 0) { break }
+            $names.Add((& $readName $nameRva))
+            $o += $dir[1]
+        }
+    }
+    return $names
 }
 
+# A Rust exe built with +crt-static imports no Visual C++ runtime DLL.
+function Assert-NoVcRuntimeImport {
+    param([string]$Exe)
+    $imports = @(Get-PeImports $Exe)
+    if ($imports.Count -eq 0) { throw "No imports read from $Exe" }
+    $vc = @($imports | Where-Object { $_ -match '^(?i)(vcruntime|msvcp)\d+' })
+    if ($vc.Count -gt 0) {
+        throw "$Exe imports $($vc -join ', '); it must link the C runtime statically"
+    }
+    Write-Host "$(Split-Path -Leaf $Exe) imports: $($imports -join ', ')"
+}
+
+# This version's zip and, once built, its installer.
 function Write-Checksums {
-    $files = @(Get-ChildItem -Path $DistDir -File | Where-Object { $_.Name -like '*-portable.zip' -or $_.Name -like '*-setup.exe' } | Sort-Object Name)
-    if ($files.Count -eq 0) { throw "Nothing to checksum in $DistDir" }
+    $names = @("light-view-$Version-portable.zip", "light-view-$Version-setup.exe")
+    $files = @($names | ForEach-Object { Join-Path $DistDir $_ } | Where-Object { Test-Path $_ } | ForEach-Object { Get-Item $_ })
+    if ($files.Count -eq 0) { throw "No light-view-$Version files in $DistDir" }
     $lines = foreach ($f in $files) {
         '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant(), $f.Name
     }
@@ -182,13 +237,13 @@ if ($NoticesOnly) {
     New-Notices -OutFile $NoticesOut
     return
 }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Pass -Version x.y.z (got '$Version')" }
 if ($ChecksumsOnly) {
     Write-Checksums
     return
 }
 
 # --- 1. Version --------------------------------------------------------------------------
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Pass -Version x.y.z (got '$Version')" }
 $workspaceVersion = Get-WorkspaceVersion
 if ($Version -ne $workspaceVersion) {
     throw "-Version $Version differs from the workspace version $workspaceVersion in Cargo.toml"
