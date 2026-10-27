@@ -104,9 +104,7 @@ fn main() -> anyhow::Result<()> {
     let _guard = if settings.open_in_new_window || bench {
         None
     } else {
-        let key = std::env::current_exe()
-            .ok()
-            .and_then(|exe| instance::instance_key(exe.parent()?));
+        let key = instance::own_instance_key();
         match timing::step("instance-ms", || {
             acquire_or_forward(initial.as_deref(), key.as_deref())
         }) {

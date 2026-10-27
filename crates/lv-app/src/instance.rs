@@ -18,7 +18,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    CreateMutexW, GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
@@ -197,11 +197,26 @@ fn window_key(hwnd: HWND) -> Option<Option<String>> {
     if pid == 0 {
         return None;
     }
+    Some(instance_key(process_image(pid)?.parent()?))
+}
+
+/// This process's instance key. It is read the same way as `window_key` reads the
+/// primary's (QueryFullProcessImageNameW), so a folder reached through a subst or
+/// mapped drive or an 8.3 name gives the same spelling on both sides.
+pub fn own_instance_key() -> Option<String> {
+    // SAFETY: plain call.
+    let pid = unsafe { GetCurrentProcessId() };
+    let image = process_image(pid).or_else(|| std::env::current_exe().ok())?;
+    instance_key(image.parent()?)
+}
+
+/// The full Win32 path of process `pid`'s exe; `None` when it cannot be asked.
+fn process_image(pid: u32) -> Option<PathBuf> {
     let mut buf = vec![0u16; MAX_PATH_UNITS + 1];
     let mut len = buf.len() as u32;
     // SAFETY: the handle is closed below; `buf` holds `len` units and outlives the call,
     // which writes at most `len` units and sets `len` to the length without the NUL.
-    let image = unsafe {
+    unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let ok = QueryFullProcessImageNameW(
             process,
@@ -211,9 +226,10 @@ fn window_key(hwnd: HWND) -> Option<Option<String>> {
         );
         let _ = CloseHandle(process);
         ok.ok()?;
-        PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]))
-    };
-    Some(instance_key(image.parent()?))
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buf[..len as usize],
+    )))
 }
 
 /// WM_COPYDATA from another launch: opens the path if it is an existing file (or a
@@ -338,6 +354,19 @@ mod tests {
 
     fn bytes(units: &[u16]) -> Vec<u8> {
         units.iter().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn own_key_reads_this_exe_like_a_window_key() {
+        let pid = unsafe { GetCurrentProcessId() };
+        let image = process_image(pid).expect("own image");
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            image.file_name().map(|n| n.to_ascii_lowercase()),
+            exe.file_name().map(|n| n.to_ascii_lowercase())
+        );
+        // The test binary's folder has no portable.txt, so it is the installed name.
+        assert_eq!(own_instance_key(), None);
     }
 
     #[test]
