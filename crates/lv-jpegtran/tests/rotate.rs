@@ -48,11 +48,14 @@ extern "C" {
 struct Options {
     subsamp: c_int,
     progressive: bool,
+    /// Optimized Huffman tables (camera files usually have the standard ones).
+    optimize: bool,
 }
 
 const BASELINE_422: Options = Options {
     subsamp: TJSAMP_422,
     progressive: false,
+    optimize: true,
 };
 
 /// Encodes `pixels` (RGB, or one byte per pixel for grayscale) at quality 90.
@@ -66,7 +69,10 @@ fn encode(pixels: &[u8], width: usize, height: usize, options: Options) -> Vec<u
         assert!(!handle.is_null());
         assert_eq!(tj3Set(handle, TJPARAM_QUALITY, 90), 0);
         assert_eq!(tj3Set(handle, TJPARAM_SUBSAMP, options.subsamp), 0);
-        assert_eq!(tj3Set(handle, TJPARAM_OPTIMIZE, 1), 0);
+        assert_eq!(
+            tj3Set(handle, TJPARAM_OPTIMIZE, c_int::from(options.optimize)),
+            0
+        );
         assert_eq!(
             tj3Set(
                 handle,
@@ -105,6 +111,30 @@ fn jpeg(width: usize, height: usize, options: Options) -> Vec<u8> {
         }
     }
     encode(&rgb, width, height, options)
+}
+
+/// Decodes a JPEG to (width, height, RGB pixels).
+fn decode_rgb(jpeg: &[u8]) -> (usize, usize, Vec<u8>) {
+    let (width, height) = sof_dims(jpeg);
+    let mut pixels = vec![0u8; width * height * 3];
+    // SAFETY: test-only calls; `pixels` holds width * height * 3 bytes, as TJPF_RGB with
+    // an unscaled decode writes.
+    unsafe {
+        let handle = tj3InitVersion(TJINIT_DECOMPRESS, 3002000);
+        assert!(!handle.is_null());
+        assert_eq!(tj3DecompressHeader(handle, jpeg.as_ptr(), jpeg.len()), 0);
+        let rc = tj3Decompress8(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len(),
+            pixels.as_mut_ptr(),
+            0,
+            TJPF_RGB,
+        );
+        tj3Destroy(handle);
+        assert_eq!(rc, 0, "tj3Decompress8 failed");
+    }
+    (width, height, pixels)
 }
 
 /// Decodes a grayscale JPEG to (width, height, one byte per pixel).
@@ -247,6 +277,7 @@ fn quarters_turn_clockwise() {
     let gray = Options {
         subsamp: TJSAMP_GRAY,
         progressive: false,
+        optimize: true,
     };
     let source = encode(&pixels, 16, 8, gray);
     let mean = |p: &[u8]| p.iter().map(|&v| u32::from(v)).sum::<u32>() / p.len() as u32;
@@ -276,6 +307,49 @@ fn four_quarter_turns_restore_bytes() {
     // must match. With an optimized-Huffman source the whole file comes back byte for byte.
     assert_eq!(parts(&turned), parts(&source));
     assert_eq!(turned, source, "four quarter turns are byte-identical");
+}
+
+#[test]
+fn four_saved_quarter_turns_decode_to_the_same_pixels() {
+    // Spec §8: a camera-style file (standard Huffman tables) turned four times, each
+    // turn fed the previous result as four saves would, keeps its DCT coefficients: it
+    // decodes to exactly the same pixels. The bytes may differ, since every rotation
+    // re-optimizes the Huffman tables (TJXOPT_OPTIMIZE).
+    for progressive in [false, true] {
+        let source = with_markers(&jpeg(
+            48,
+            32,
+            Options {
+                subsamp: TJSAMP_422,
+                progressive,
+                optimize: false,
+            },
+        ));
+        let mut turned = source.clone();
+        for turn in 1..=4 {
+            turned = rotate_lossless(&turned, Quarter::Cw90, BIG).unwrap();
+            let dims = if turn % 2 == 1 { (32, 48) } else { (48, 32) };
+            assert_eq!(sof_dims(&turned), dims, "turn {turn}");
+        }
+        assert_eq!(
+            decode_rgb(&turned),
+            decode_rgb(&source),
+            "progressive: {progressive}"
+        );
+        // A baseline source's standard tables come back re-optimized: same pixels, other
+        // bytes. (A progressive one already had optimized tables.)
+        if !progressive {
+            assert!(turned != source, "expected re-optimized Huffman tables");
+        }
+        // The markers came through.
+        let markers = |j: &[u8]| -> Vec<Part> {
+            parts(j)
+                .into_iter()
+                .filter(|(code, _)| (0xE0..=0xEF).contains(code) || *code == 0xFE)
+                .collect()
+        };
+        assert_eq!(markers(&turned), markers(&source));
+    }
 }
 
 #[test]
@@ -309,6 +383,7 @@ fn progressive_stays_progressive() {
     let progressive = Options {
         subsamp: TJSAMP_422,
         progressive: true,
+        optimize: true,
     };
     let source = jpeg(32, 16, progressive);
     assert_eq!(sof_code(&source), 0xC2);
