@@ -17,7 +17,9 @@ use crate::{exif_edit, exif_info, heif_edit, jpeg_check, jpeg_extent};
 /// reduced-size path.
 pub const FUZZ_MAX_PIXELS: u64 = 1 << 16;
 
-/// Most of the input passed on to the edits after the parameter bytes.
+/// The largest TIFF block one JPEG `APP1` segment holds: the 16-bit length counts itself
+/// (2 bytes) and the payload, and the payload starts with `Exif\0\0` (6 bytes), so
+/// 65 535 - 2 - 6. [`exif_info`] cuts its input to this before wrapping it in a segment.
 const EXIF_SEGMENT_MAX: usize = 65_533 - 6;
 
 /// Sniffs and decodes an image of any supported format, as the viewer does (the JPEG
