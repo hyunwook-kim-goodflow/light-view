@@ -475,7 +475,7 @@ fn handle(
         WM_CLOSE => {
             // An open dialog must be answered first: the close is cancelled. (Task 6
             // hooks in here: an unsaved rotation shows the save prompt instead.)
-            if app.try_borrow().ok()?.overlay.dialog_open() {
+            if input::dialog_open(app) {
                 return Some(LRESULT(0));
             }
             // From here on, paths forwarded by later launches open their own window.

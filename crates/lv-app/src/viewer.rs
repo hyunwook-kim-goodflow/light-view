@@ -387,6 +387,12 @@ impl Viewer {
         self.list.current().is_some()
     }
 
+    /// The current photo's path (a dialog's target; Tasks 6 and 7).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub fn current_path(&self) -> Option<&Path> {
+        self.list.current()
+    }
+
     /// (1-based index, count), or (0, 0) with no file.
     pub fn position(&self) -> (usize, usize) {
         self.list.position().unwrap_or((0, 0))
