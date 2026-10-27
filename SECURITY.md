@@ -55,6 +55,8 @@ In scope:
   scope.
 - The update check (when turned on): anything that makes light-view contact a host other
   than `api.github.com` or open a page outside `github.com/goodflow/light-view/releases/`.
+  The check uses Windows' automatic proxy settings, so Windows may also look up a proxy
+  (WPAD, a PAC file) on the local network when it runs; that lookup is expected.
 
 Out of scope:
 
@@ -68,4 +70,7 @@ Out of scope:
 
 취약점은 공개 이슈 대신 GitHub 비공개 취약점 신고(저장소 **Security** 탭 →
 **Report a vulnerability**)로 알려 주세요. 7일 안에 받았다고 답하고, 최신 릴리스만
-보안 수정을 받아요. 범위는 악성 이미지, 작업자 프로세스 탈출, 저장 중 파일 손상이에요.
+보안 수정을 받아요. 범위는 악성 이미지, 작업자 프로세스 탈출, 저장 중 파일 손상, 그리고
+업데이트 확인(켰을 때)이 `api.github.com` 말고 다른 곳에 연결하거나 light-view 릴리스
+페이지 밖을 여는 문제예요. 업데이트 확인은 윈도우의 자동 프록시 설정을 따르므로 프록시
+자동 검색(WPAD, PAC)이 함께 일어날 수 있어요.

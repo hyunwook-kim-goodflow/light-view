@@ -16,8 +16,11 @@
 //! - Unhandled SEH exceptions (an access violation in native code, say), through
 //!   `SetUnhandledExceptionFilter`. The filter runs in the faulting process, so it
 //!   stays small: the folder path is prepared at install time, names and the log are
-//!   built in fixed stack buffers, nothing is pruned there, and then the previous
-//!   filter (or the default handling) takes over.
+//!   built in fixed stack buffers, nothing is pruned there, the small log is written
+//!   before the dump, and then the previous filter (or the default handling) takes over.
+//!
+//! Dumps are serialized (dbghelp is single-threaded): a panic waits for a dump in
+//! progress, the filter only tries and skips its dump if one is being written.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -57,6 +60,44 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 static PREVIOUS_FILTER: AtomicUsize = AtomicUsize::new(0);
 /// The filter writes at most one record.
 static FILTER_RAN: AtomicBool = AtomicBool::new(false);
+/// Held while a dump is written: dbghelp is single-threaded, so two dumps (a panic on
+/// one thread, a native crash on another) must not overlap.
+static DUMPING: AtomicBool = AtomicBool::new(false);
+/// How long a panic waits for another dump to end before writing its log alone.
+const DUMP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Holds `DUMPING`; released on drop.
+struct DumpLock;
+
+impl DumpLock {
+    fn try_take() -> Option<DumpLock> {
+        DUMPING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            // `then`, not `then_some`: a guard built on failure would release on drop.
+            .then(|| DumpLock)
+    }
+
+    /// Waits up to `wait` (the panic hook; the exception filter only tries).
+    fn take(wait: std::time::Duration) -> Option<DumpLock> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(lock) = DumpLock::try_take() {
+                return Some(lock);
+            }
+            if start.elapsed() >= wait {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for DumpLock {
+    fn drop(&mut self) {
+        DUMPING.store(false, Ordering::SeqCst);
+    }
+}
 
 thread_local! {
     /// This thread already left a panic record.
@@ -180,6 +221,9 @@ fn write_record(dir: &Path, log: &str) -> std::io::Result<PathBuf> {
     let stem = new_stem();
     let log_path = dir.join(format!("{stem}.log"));
     std::fs::write(&log_path, log)?;
+    let Some(_lock) = DumpLock::take(DUMP_WAIT) else {
+        return Err(std::io::Error::other("another dump is still being written"));
+    };
     let dump = File::create_new(dir.join(format!("{stem}.dmp")))?;
     // SAFETY: plain call; the process pseudo-handle and the file handle are valid for
     // the call. Without exception information the dump shows every thread as it is.
@@ -317,32 +361,6 @@ unsafe fn write_exception_record(info: *const EXCEPTION_POINTERS) {
         p
     };
 
-    let dump_path = path(".dmp");
-    if !dump_path.overflow {
-        // SAFETY: a NUL-terminated path in a live buffer; the handle is closed below.
-        if let Ok(file) = unsafe { create_new(&dump_path) } {
-            let exception = MINIDUMP_EXCEPTION_INFORMATION {
-                ThreadId: tid,
-                ExceptionPointers: info.cast_mut(),
-                ClientPointers: BOOL(0),
-            };
-            // SAFETY: the exception information points at the filter's argument, which
-            // lives until the filter returns; the handles are valid.
-            unsafe {
-                let _ = MiniDumpWriteDump(
-                    GetCurrentProcess(),
-                    pid,
-                    file,
-                    MiniDumpNormal,
-                    (!info.is_null()).then_some(&exception as *const _),
-                    None,
-                    None,
-                );
-                let _ = CloseHandle(file);
-            }
-        }
-    }
-
     let mut log: Buf<u8, 256> = Buf::new();
     log.str("light-view ");
     log.str(VERSION);
@@ -368,6 +386,36 @@ unsafe fn write_exception_record(info: *const EXCEPTION_POINTERS) {
             }
         }
     }
+
+    // The log first: small and sure to be written; then the dump, unless another one
+    // is being written right now (the filter does not wait).
+    let dump_path = path(".dmp");
+    let lock = DumpLock::try_take();
+    if !dump_path.overflow && lock.is_some() {
+        // SAFETY: a NUL-terminated path in a live buffer; the handle is closed below.
+        if let Ok(file) = unsafe { create_new(&dump_path) } {
+            let exception = MINIDUMP_EXCEPTION_INFORMATION {
+                ThreadId: tid,
+                ExceptionPointers: info.cast_mut(),
+                ClientPointers: BOOL(0),
+            };
+            // SAFETY: the exception information points at the filter's argument, which
+            // lives until the filter returns; the handles are valid.
+            unsafe {
+                let _ = MiniDumpWriteDump(
+                    GetCurrentProcess(),
+                    pid,
+                    file,
+                    MiniDumpNormal,
+                    (!info.is_null()).then_some(&exception as *const _),
+                    None,
+                    None,
+                );
+                let _ = CloseHandle(file);
+            }
+        }
+    }
+    drop(lock);
 }
 
 /// Creates a new file for writing.
@@ -442,6 +490,21 @@ mod tests {
         assert!(!records.contains(&format!("{}.log", made[5])));
         // A missing folder is not an error.
         prune(&dir.path().join("missing"), KEEP);
+    }
+
+    /// Dumps never overlap: while one is written, the filter's try fails and a panic
+    /// waits (here: gives up after its wait).
+    #[test]
+    fn dumps_are_serialized() {
+        // Another test may be writing a dump: wait for it like a panic would.
+        let held = DumpLock::take(DUMP_WAIT).expect("free within the wait");
+        assert!(DumpLock::try_take().is_none());
+        assert!(DumpLock::take(std::time::Duration::from_millis(30)).is_none());
+        let waiter = std::thread::spawn(|| DumpLock::take(DUMP_WAIT).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(held);
+        assert!(waiter.join().unwrap());
+        assert!(DumpLock::take(DUMP_WAIT).is_some());
     }
 
     #[test]

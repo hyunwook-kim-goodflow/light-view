@@ -3,7 +3,7 @@
 //! new versions; nothing is checked until the user says yes. Then at most once a day a
 //! background thread asks GitHub's Releases API (WinHTTP, HTTPS only, no redirects,
 //! 10 s, at most 1 MB) for the latest release and, if it is newer, posts
-//! `WM_APP_UPDATE`; the window shows "새 버전 X가 나왔어요 [보기]", and [보기] opens the
+//! `WM_APP_UPDATE`; the window shows "새 버전(X)이 나왔어요 [보기]", and [보기] opens the
 //! release page in the browser. Every failure (offline, 404 before the first release,
 //! an odd answer) is dropped silently.
 //!
@@ -12,7 +12,9 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::ffi::c_void;
@@ -25,9 +27,9 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
     WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_DISABLE_COOKIES, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE,
-    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
-    WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_REDIRECT_POLICY,
+    WINHTTP_DISABLE_COOKIES, WINHTTP_DISABLE_REDIRECTS, WINHTTP_ENABLE_SSL_REVOCATION,
+    WINHTTP_FLAG_SECURE, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+    WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_OPTION_ENABLE_FEATURE, WINHTTP_OPTION_REDIRECT_POLICY,
     WINHTTP_OPTION_REDIRECT_POLICY_NEVER, WINHTTP_OPTION_SECURE_PROTOCOLS,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
@@ -84,8 +86,11 @@ pub fn parse_latest(json: &[u8], current: Version) -> Result<Option<Release>, Up
     let field = |key: &str| v.get(key).and_then(Value::as_str);
     let tag = field("tag_name").ok_or(UpdateError::BadTag)?;
     let version = parse_version(tag.strip_prefix('v').unwrap_or(tag)).ok_or(UpdateError::BadTag)?;
+    // Exactly this tag's page: `<prefix>tag/<tag_name>`.
     let html_url = field("html_url")
-        .filter(|u| release_url_ok(u))
+        .filter(|u| {
+            release_url_ok(u) && u.strip_prefix(RELEASES_PREFIX) == Some(&format!("tag/{tag}"))
+        })
         .ok_or(UpdateError::BadUrl)?;
     let flagged = |key: &str| v.get(key).and_then(Value::as_bool) == Some(true);
     if flagged("draft") || flagged("prerelease") || version <= current {
@@ -197,8 +202,11 @@ pub fn maybe_ask(app: &RefCell<App>, hwnd: HWND) {
 /// The question was answered: only [알려 주세요] turns checks on (Enter and Esc say no).
 pub fn on_answer(app: &RefCell<App>, hwnd: HWND, result: PromptResult) {
     let yes = result == PromptResult::NotifyMe;
-    if let Ok(mut a) = app.try_borrow_mut() {
-        a.persist(|s| s.update_check = Some(yes));
+    match app.try_borrow_mut() {
+        Ok(mut a) => {
+            a.persist(|s| s.update_check = Some(yes));
+        }
+        Err(_) => eprintln!("light-view: the update answer could not be applied (busy)"),
     }
     if yes {
         check_if_due(app, hwnd);
@@ -206,7 +214,8 @@ pub fn on_answer(app: &RefCell<App>, hwnd: HWND, result: PromptResult) {
 }
 
 /// Starts a check if checks are on and the last one is a day old. The time is saved
-/// first, so a failing check is not retried until tomorrow either.
+/// first, so a failing check is not retried until tomorrow either; if it cannot be
+/// saved, no check is made (the time still counts for this run, so none is retried).
 pub fn check_if_due(app: &RefCell<App>, hwnd: HWND) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
@@ -215,12 +224,18 @@ pub fn check_if_due(app: &RefCell<App>, hwnd: HWND) {
         return;
     };
     let now = unix_now();
-    // The file as it is now: another window may have checked today.
-    let saved = load_settings(&path);
-    if !check_due(a.settings.update_check, saved.last_update_check, now) {
+    // The file as it is now (another window may have checked today), or this run's own
+    // time if it is later (its save failed).
+    let last = load_settings(&path)
+        .last_update_check
+        .max(a.settings.last_update_check);
+    if !check_due(a.settings.update_check, last, now) {
         return;
     }
-    a.persist(|s| s.last_update_check = Some(now));
+    if !a.persist(|s| s.last_update_check = Some(now)) {
+        a.settings.last_update_check = Some(now);
+        return;
+    }
     drop(a);
     spawn_check(hwnd);
 }
@@ -310,64 +325,84 @@ where
 }
 
 /// GETs the latest release over HTTPS from `HOST` with WinHTTP. Blocking: called only
-/// on `spawn_with`'s thread.
+/// on `spawn_with`'s thread. A watchdog closes the handles at `deadline`, which makes a
+/// call still running (proxy lookup, name lookup, connect, TLS, read) fail at once.
 fn fetch_latest(deadline: Instant) -> Result<Vec<u8>, UpdateError> {
+    watched(deadline, close_winhttp, |h| fetch_with(h, deadline))
+}
+
+fn fetch_with(h: &Handles, deadline: Instant) -> Result<Vec<u8>, UpdateError> {
     let agent = HSTRING::from(format!("light-view/{}", env!("CARGO_PKG_VERSION")));
     let host = HSTRING::from(HOST);
     let path = HSTRING::from(LATEST_PATH);
     let headers: Vec<u16> = "Accept: application/vnd.github+json\r\n"
         .encode_utf16()
         .collect();
-    // SAFETY: WinHTTP calls on handles opened here and closed by `Internet`'s drop;
-    // the strings and buffers outlive the calls that use them.
+    // SAFETY: WinHTTP calls on handles kept in `h` (closed once, by `Handles`); the
+    // strings and buffers outlive the calls that use them. A handle the watchdog closed
+    // meanwhile makes the call fail (WinHTTP checks its handles).
     unsafe {
-        let session = Internet::open(WinHttpOpen(
-            &agent,
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        ))?;
+        let session = h.put(
+            SESSION,
+            WinHttpOpen(
+                &agent,
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                0,
+            ),
+        )?;
         // TLS 1.2 or later (older Windows 10 builds refuse the 1.3 flag: 1.2 then).
         let tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
-        if session.set(WINHTTP_OPTION_SECURE_PROTOCOLS, tls).is_err() {
-            session.set(
+        if set(session, WINHTTP_OPTION_SECURE_PROTOCOLS, tls).is_err() {
+            set(
+                session,
                 WINHTTP_OPTION_SECURE_PROTOCOLS,
                 WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2,
             )?;
         }
-        let connect = Internet::open(WinHttpConnect(
-            session.0,
-            &host,
-            INTERNET_DEFAULT_HTTPS_PORT,
-            0,
-        ))?;
-        let request = Internet::open(WinHttpOpenRequest(
-            connect.0,
-            w!("GET"),
-            &path,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        ))?;
-        // Only api.github.com answers: no redirects (to any host), no cookies.
-        request.set(
+        let connect = h.put(
+            CONNECT,
+            WinHttpConnect(session, &host, INTERNET_DEFAULT_HTTPS_PORT, 0),
+        )?;
+        let request = h.put(
+            REQUEST,
+            WinHttpOpenRequest(
+                connect,
+                w!("GET"),
+                &path,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            ),
+        )?;
+        // Only api.github.com answers: no redirects (to any host), no cookies; and a
+        // revoked certificate fails the check.
+        set(
+            request,
             WINHTTP_OPTION_REDIRECT_POLICY,
             WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
         )?;
-        request.set(
+        set(
+            request,
             WINHTTP_OPTION_DISABLE_FEATURE,
             WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS,
         )?;
-        request.limit(deadline)?;
-        WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).map_err(net)?;
-        request.limit(deadline)?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(net)?;
+        set(
+            request,
+            WINHTTP_OPTION_ENABLE_FEATURE,
+            WINHTTP_ENABLE_SSL_REVOCATION,
+        )?;
+        limit(h, request, deadline)?;
+        WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0).map_err(net)?;
+        limit(h, request, deadline)?;
+        WinHttpReceiveResponse(request, std::ptr::null_mut()).map_err(net)?;
+        h.live()?;
         let mut status = 0u32;
         let mut size = std::mem::size_of::<u32>() as u32;
         WinHttpQueryHeaders(
-            request.0,
+            request,
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             PCWSTR::null(),
             Some(std::ptr::from_mut(&mut status).cast()),
@@ -381,10 +416,10 @@ fn fetch_latest(deadline: Instant) -> Result<Vec<u8>, UpdateError> {
         let mut body = Vec::new();
         let mut chunk = vec![0u8; 16 * 1024];
         loop {
-            request.limit(deadline)?;
+            limit(h, request, deadline)?;
             let mut read = 0u32;
             WinHttpReadData(
-                request.0,
+                request,
                 chunk.as_mut_ptr().cast(),
                 chunk.len() as u32,
                 &mut read,
@@ -405,50 +440,124 @@ fn net(e: windows::core::Error) -> UpdateError {
     UpdateError::Network(e.to_string())
 }
 
-/// A WinHTTP handle, closed on drop.
-struct Internet(*mut c_void);
+/// Sets a 4-byte WinHTTP option.
+///
+/// # Safety
+/// `handle` must be a WinHTTP handle (a closed one only makes the call fail).
+unsafe fn set(handle: *mut c_void, option: u32, value: u32) -> Result<(), UpdateError> {
+    // SAFETY: the caller's handle and a 4-byte value, as these options take.
+    unsafe { WinHttpSetOption(Some(handle), option, Some(&value.to_ne_bytes())) }.map_err(net)
+}
 
-impl Internet {
-    fn open(handle: *mut c_void) -> Result<Internet, UpdateError> {
-        if handle.is_null() {
-            Err(net(windows::core::Error::from_win32()))
-        } else {
-            Ok(Internet(handle))
-        }
+/// Lets each step (proxy and name lookup, connect, send, receive) take at most the
+/// time left until `deadline`; an error once it has passed or the check was cancelled.
+/// (The watchdog is what bounds the whole check; this keeps single steps short.)
+///
+/// # Safety
+/// As for `set`.
+unsafe fn limit(h: &Handles, request: *mut c_void, deadline: Instant) -> Result<(), UpdateError> {
+    h.live()?;
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(UpdateError::TimedOut);
     }
+    let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
+    // SAFETY: the caller's handle.
+    unsafe { WinHttpSetTimeouts(request, ms, ms, ms, ms) }.map_err(net)
+}
 
-    fn set(&self, option: u32, value: u32) -> Result<(), UpdateError> {
-        // SAFETY: a live handle and a 4-byte value, as these options take.
-        unsafe { WinHttpSetOption(Some(self.0), option, Some(&value.to_ne_bytes())) }.map_err(net)
-    }
-
-    /// Lets each step (name lookup, connect, send, receive) take at most the time left
-    /// until `deadline`; an error once it has passed. (A slow server can still keep this
-    /// thread a few steps' worth longer; `spawn_with` drops an answer that late.)
-    fn limit(&self, deadline: Instant) -> Result<(), UpdateError> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(UpdateError::TimedOut);
-        }
-        let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
-        // SAFETY: a live handle.
-        unsafe { WinHttpSetTimeouts(self.0, ms, ms, ms, ms) }.map_err(net)
+fn close_winhttp(handle: *mut c_void) {
+    // SAFETY: `Handles` passes each WinHTTP handle here exactly once.
+    unsafe {
+        let _ = WinHttpCloseHandle(handle);
     }
 }
 
-impl Drop for Internet {
-    fn drop(&mut self) {
-        // SAFETY: the handle was opened by WinHTTP and is closed once, here.
-        unsafe {
-            let _ = WinHttpCloseHandle(self.0);
+const SESSION: usize = 0;
+const CONNECT: usize = 1;
+const REQUEST: usize = 2;
+
+/// One check's WinHTTP handles, shared with its watchdog. A handle is closed by whoever
+/// takes it out of its slot (an atomic swap with null), so each is closed exactly once,
+/// whether the watchdog cancels or the check ends first.
+struct Handles {
+    slots: [AtomicPtr<c_void>; 3],
+    cancelled: AtomicBool,
+    close: fn(*mut c_void),
+}
+
+impl Handles {
+    fn new(close: fn(*mut c_void)) -> Handles {
+        Handles {
+            slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
+            cancelled: AtomicBool::new(false),
+            close,
         }
     }
+
+    /// Keeps a newly opened handle in `slot`; null is the open's error. Opened after a
+    /// cancel, it is closed again at once.
+    fn put(&self, slot: usize, handle: *mut c_void) -> Result<*mut c_void, UpdateError> {
+        if handle.is_null() {
+            return Err(net(windows::core::Error::from_win32()));
+        }
+        self.slots[slot].store(handle, Ordering::SeqCst);
+        self.live()?;
+        Ok(handle)
+    }
+
+    /// An error once the watchdog cancelled the check.
+    fn live(&self) -> Result<(), UpdateError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            self.close_all();
+            return Err(UpdateError::TimedOut);
+        }
+        Ok(())
+    }
+
+    /// Closes what is still open, the request first (that ends a call on it).
+    fn close_all(&self) {
+        for slot in [REQUEST, CONNECT, SESSION] {
+            let handle = self.slots[slot].swap(std::ptr::null_mut(), Ordering::SeqCst);
+            if !handle.is_null() {
+                (self.close)(handle);
+            }
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.close_all();
+    }
+}
+
+/// Runs `work` with a watchdog thread that cancels it (closes its handles) at
+/// `deadline`, then closes whatever is left. Without a watchdog nothing is opened.
+fn watched<T>(deadline: Instant, close: fn(*mut c_void), work: impl FnOnce(&Handles) -> T) -> T {
+    let handles = Arc::new(Handles::new(close));
+    let (done_tx, done_rx) = channel::<()>();
+    let dog = Arc::clone(&handles);
+    let spawned = std::thread::Builder::new()
+        .name("update-watchdog".into())
+        .spawn(move || {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // Disconnected: the check ended first.
+            if done_rx.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
+                dog.cancel();
+            }
+        });
+    if spawned.is_err() {
+        handles.cancel();
+    }
+    let result = work(&handles);
+    drop(done_tx);
+    handles.close_all();
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
 
     const CURRENT: Version = (0, 1, 0);
 
@@ -529,6 +638,11 @@ mod tests {
             "https://github.com/goodflow/light-view/releases/tag/v0.2.0?x=\"y\"",
             "https://github.com/goodflow/light-view/releases/tag/v0.2.0 calc.exe",
             "https://github.com/goodflow/light-view/releasesx/tag/v0.2.0",
+            // Not this tag's page.
+            "https://github.com/goodflow/light-view/releases/tag/v0.3.0",
+            "https://github.com/goodflow/light-view/releases/tag/0.2.0",
+            "https://github.com/goodflow/light-view/releases/latest",
+            "https://github.com/goodflow/light-view/releases/tag/v0.2.0/",
             "",
         ] {
             assert_eq!(
@@ -663,6 +777,56 @@ mod tests {
                 assert!(!text.contains(word), "{} mentions {word}", p.display());
             }
         }
+    }
+
+    /// A WinHTTP call that ignores its timeouts (a stuck proxy lookup, say) is ended by
+    /// the watchdog closing the handles at the deadline; every handle is closed exactly
+    /// once, whether the watchdog or the end of the check gets there first.
+    #[test]
+    fn watchdog_closes_handles_at_the_deadline() {
+        static CLOSED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        fn record(h: *mut c_void) {
+            CLOSED.lock().unwrap().push(h as usize);
+        }
+        let closed = || CLOSED.lock().unwrap().clone();
+        // Stand-in handle values: only compared, never used as pointers.
+        let fake = std::ptr::without_provenance_mut::<c_void>;
+        let start = Instant::now();
+        let limit = Duration::from_millis(200);
+        let (stuck_for, live, late) = watched(start + limit, record, |h| {
+            h.put(SESSION, fake(1)).unwrap();
+            h.put(CONNECT, fake(2)).unwrap();
+            h.put(REQUEST, fake(3)).unwrap();
+            // The stub ignores the deadline: it returns once its request is closed.
+            while !closed().contains(&3) && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let stuck_for = start.elapsed();
+            (stuck_for, h.live(), h.put(REQUEST, fake(4)))
+        });
+        assert!(
+            stuck_for >= limit - Duration::from_millis(10),
+            "{stuck_for:?}"
+        );
+        assert!(stuck_for < limit + Duration::from_secs(2), "{stuck_for:?}");
+        assert_eq!(live, Err(UpdateError::TimedOut));
+        assert_eq!(late, Err(UpdateError::TimedOut));
+        // Request first, then connect and session; one opened after the cancel too.
+        assert_eq!(closed(), [3, 2, 1, 4]);
+
+        // A check that ends in time: no cancel, each closed once at the end.
+        CLOSED.lock().unwrap().clear();
+        let ok = watched(Instant::now() + Duration::from_secs(5), record, |h| {
+            h.put(SESSION, fake(5))?;
+            h.put(REQUEST, fake(6))?;
+            h.live()
+        });
+        assert_eq!(ok, Ok(()));
+        assert_eq!(closed(), [6, 5]);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(closed(), [6, 5]);
+        // spawn_check uses the 10 s limit.
+        assert_eq!(TIMEOUT, Duration::from_secs(10));
     }
 
     #[test]

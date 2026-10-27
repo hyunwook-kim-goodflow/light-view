@@ -410,8 +410,8 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         ),
         S::BtnNotifyMe => ("알려 주세요", "Let me know"),
         S::BtnNoThanks => ("괜찮아요", "No thanks"),
-        S::ToastUpdateAvailable => ("새 버전 ", "Version "),
-        S::ToastUpdateAvailableEnd => ("가 나왔어요", " is out"),
+        S::ToastUpdateAvailable => ("새 버전(", "Version "),
+        S::ToastUpdateAvailableEnd => (")이 나왔어요", " is out"),
         S::BtnView => ("보기", "View"),
         S::SettingsUpdateCheck => ("업데이트 확인", "Check for updates"),
     };
@@ -598,7 +598,7 @@ mod tests {
             let (head, tail) = (S::ToastUpdateAvailable, S::ToastUpdateAvailableEnd);
             format!("{}0.2.0{}", text(lang, head), text(lang, tail))
         };
-        assert_eq!(toast(Lang::Ko), "새 버전 0.2.0가 나왔어요");
+        assert_eq!(toast(Lang::Ko), "새 버전(0.2.0)이 나왔어요");
         assert_eq!(toast(Lang::En), "Version 0.2.0 is out");
     }
 
