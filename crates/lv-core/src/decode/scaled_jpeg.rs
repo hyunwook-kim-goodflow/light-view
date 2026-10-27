@@ -6,6 +6,12 @@
 //! so it is scaled only when those fit in the same `max_pixels * 4` bytes the full
 //! decode may allocate; otherwise, like anything over the limit even at 1/8, it is
 //! `TooLarge`.
+//!
+//! `jpeg-decoder` decodes every block of the full-size image (zero-filling what the file
+//! lacks) and cannot be cancelled, so a header claiming a huge image over a few bytes of
+//! data would keep a decoding thread busy for many seconds. A file with fewer bits than
+//! its blocks need at the least (2 per block sequential: a DC code and an EOB; 1 per
+//! block progressive: the first DC scan) is `Corrupt` before decoding starts.
 
 use std::io::Cursor;
 
@@ -44,6 +50,10 @@ pub(super) fn decode(
     limits: &DecodeLimits,
 ) -> Result<Scaled, DecodeError> {
     let too_large = || DecodeError::TooLarge { width, height };
+    // 64 times the limit or more cannot fit even at 1/8.
+    if u64::from(width) * u64::from(height) > limits.max_pixels.saturating_mul(64) {
+        return Err(too_large());
+    }
     let denom = pick_scale(width, height, limits.max_pixels).ok_or_else(too_large)?;
     let alloc_cap = limits.max_pixels.saturating_mul(4);
     check_frame(bytes, alloc_cap).map_err(|e| e.unwrap_or_else(too_large))?;
@@ -53,6 +63,7 @@ pub(super) fn decode(
         return Err(too_large());
     };
     let mut dec = Decoder::new(Cursor::new(bytes));
+    // Bounds only the final output; `check_frame` and `pick_scale` are the real guards.
     dec.set_max_decoding_buffer_size(usize::try_from(alloc_cap).unwrap_or(usize::MAX));
     let (w, h) = dec.scale(want_w, want_h).map_err(corrupt)?;
     let (w, h) = (u32::from(w), u32::from(h));
@@ -71,27 +82,39 @@ pub(super) fn decode(
 }
 
 /// Checks the first frame header: `Err(None)` if it cannot be scaled within
-/// `alloc_cap` bytes, `Err(Some(Corrupt))` if there is none.
+/// `alloc_cap` bytes, `Err(Some(Corrupt))` if there is none, it is malformed, or the
+/// file is too small for its blocks.
 fn check_frame(bytes: &[u8], alloc_cap: u64) -> Result<(), Option<DecodeError>> {
     let frame = Markers::new(bytes)
         .map_while(Result::ok)
         .find(|m| is_frame_header(m.code))
         .ok_or_else(|| Some(corrupt("no frame header")))?;
-    match frame.code {
-        0xC0 | 0xC1 => Ok(()),
-        0xC2 => match coefficient_bytes(frame.payload) {
-            Some(n) if n <= alloc_cap => Ok(()),
-            Some(_) => Err(None),
-            None => Err(Some(corrupt("bad frame header"))),
-        },
-        _ => Err(None),
+    let progressive = match frame.code {
+        0xC0 | 0xC1 => false,
+        0xC2 => true,
+        _ => return Err(None),
+    };
+    let blocks = frame_blocks(frame.payload).ok_or_else(|| Some(corrupt("bad frame header")))?;
+    let min_bits = if progressive {
+        blocks
+    } else {
+        blocks.saturating_mul(2)
+    };
+    if (bytes.len() as u64).saturating_mul(8) < min_bits {
+        return Err(Some(corrupt("too little data for the image size")));
     }
+    if progressive && blocks.saturating_mul(COEFFICIENT_BYTES) > alloc_cap {
+        return Err(None);
+    }
+    Ok(())
 }
 
-/// The bytes a progressive decode holds for the coefficients of the frame whose SOF
-/// payload this is: per component, its blocks over the MCU-padded image, 64 `i16` each.
-/// `None` if the header is malformed.
-fn coefficient_bytes(sof: &[u8]) -> Option<u64> {
+/// The bytes a progressive decode holds per block: 64 `i16` coefficients.
+const COEFFICIENT_BYTES: u64 = 64 * 2;
+
+/// The blocks of the frame whose SOF payload this is: per component, its blocks over the
+/// MCU-padded image. `None` if the header is malformed.
+fn frame_blocks(sof: &[u8]) -> Option<u64> {
     let height = u64::from(u16::from_be_bytes([*sof.get(1)?, *sof.get(2)?]));
     let width = u64::from(u16::from_be_bytes([*sof.get(3)?, *sof.get(4)?]));
     let count = usize::from(*sof.get(5)?);
@@ -107,12 +130,7 @@ fn coefficient_bytes(sof: &[u8]) -> Option<u64> {
     }
     let mcus_x = width.div_ceil(8 * h_max);
     let mcus_y = height.div_ceil(8 * v_max);
-    Some(
-        sampling
-            .iter()
-            .map(|(h, v)| mcus_x * h * mcus_y * v * 64 * 2)
-            .sum(),
-    )
+    Some(sampling.iter().map(|(h, v)| mcus_x * h * mcus_y * v).sum())
 }
 
 /// Expands `jpeg-decoder` output of `pixels` pixels to RGBA8.
@@ -260,6 +278,66 @@ mod tests {
         assert!(diff <= Some(4), "full {full:?} scaled {scaled:?}");
     }
 
+    #[test]
+    fn scaled_grayscale_jpeg_expands_to_gray() {
+        let mut gray = image::GrayImage::new(64, 48);
+        for (x, _, p) in gray.enumerate_pixels_mut() {
+            *p = image::Luma([if x < 32 { 40 } else { 220 }]);
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode_image(&gray)
+            .unwrap();
+        let img = open(&jpeg, 3071).unwrap();
+        assert_eq!(
+            (img.width, img.height, img.scaled_from),
+            (32, 24, Some((64, 48)))
+        );
+        for (x, want) in [(4usize, 40u8), (28, 220)] {
+            let p = &img.frames[0].bgra[(12 * 32 + x) * 4..][..4];
+            assert!(p[..3].iter().all(|&c| c.abs_diff(want) <= 6), "{x}: {p:?}");
+            assert!(p[0] == p[1] && p[1] == p[2], "gray: {p:?}");
+            assert_eq!(p[3], 255);
+        }
+    }
+
+    #[test]
+    fn huge_header_over_little_data_fails_fast() {
+        // A real 64x32 JPEG whose SOF claims 65535x65535 and whose scan data is cut
+        // right after the scan header.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/jpeg/gradient-64x32.jpg"
+        );
+        let mut bytes = std::fs::read(path).unwrap();
+        let (sof_at, sos_end) = {
+            let markers: Vec<_> = Markers::new(&bytes).map_while(Result::ok).collect();
+            let sof = markers.iter().find(|m| is_frame_header(m.code)).unwrap();
+            let sof_at = sof.payload.as_ptr() as usize - bytes.as_ptr() as usize;
+            let sos = markers.iter().find(|m| m.code == crate::jpeg_markers::SOS);
+            (sof_at, sos.unwrap().end)
+        };
+        bytes.truncate(sos_end);
+        bytes.extend([0xFF, 0xD9]);
+        bytes[sof_at + 1..sof_at + 5].copy_from_slice(&[0xFF; 4]);
+        let start = std::time::Instant::now();
+        let result = decode_bytes(&bytes, &DecodeLimits::default());
+        assert!(matches!(result, Err(DecodeError::Corrupt(_))), "{result:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn far_over_the_limit_is_too_large_before_the_frame_is_read() {
+        // Over 64 times the limit cannot fit at 1/8; the bytes are not even looked at.
+        assert!(matches!(
+            decode(b"not a jpeg", 64, 48, &DecodeLimits { max_pixels: 47 }),
+            Err(DecodeError::TooLarge {
+                width: 64,
+                height: 48
+            })
+        ));
+    }
+
     /// SOF payload: 8-bit, `w`x`h`, components with the given (H, V) sampling.
     fn sof(w: u16, h: u16, sampling: &[(u8, u8)]) -> Vec<u8> {
         let mut p = vec![8];
@@ -273,41 +351,60 @@ mod tests {
     }
 
     #[test]
-    fn progressive_coefficients_are_counted_per_component() {
+    fn blocks_are_counted_per_component() {
         // 4:2:0, 64x48: MCUs of 16x16 -> 4x3; Y has 8x6 blocks, Cb and Cr 4x3 each.
-        let bytes = coefficient_bytes(&sof(64, 48, &[(2, 2), (1, 1), (1, 1)]));
-        assert_eq!(bytes, Some((48 + 12 + 12) * 128));
+        let blocks = frame_blocks(&sof(64, 48, &[(2, 2), (1, 1), (1, 1)]));
+        assert_eq!(blocks, Some(48 + 12 + 12));
         // 4:4:4, 9x9 pads to 2x2 blocks per component.
         assert_eq!(
-            coefficient_bytes(&sof(9, 9, &[(1, 1), (1, 1), (1, 1)])),
-            Some(3 * 4 * 128)
+            frame_blocks(&sof(9, 9, &[(1, 1), (1, 1), (1, 1)])),
+            Some(3 * 4)
         );
-        assert_eq!(coefficient_bytes(&sof(9, 9, &[(0, 1)])), None);
-        assert_eq!(coefficient_bytes(&sof(9, 9, &[])), None);
-        assert_eq!(coefficient_bytes(&[8, 0, 9]), None);
+        assert_eq!(frame_blocks(&sof(9, 9, &[(0, 1)])), None);
+        assert_eq!(frame_blocks(&sof(9, 9, &[])), None);
+        assert_eq!(frame_blocks(&[8, 0, 9]), None);
     }
 
     #[test]
     fn only_sequential_or_small_progressive_frames_are_scaled() {
-        let jpeg = |code: u8, payload: &[u8]| {
+        // A frame header followed by `data` bytes standing in for the scans.
+        let jpeg = |code: u8, payload: &[u8], data: usize| {
             let mut b = vec![0xFF, 0xD8];
             b.extend(crate::jpeg_markers::tests::segment(code, payload));
+            b.resize(b.len() + data, 0);
             b.extend([0xFF, 0xD9]);
             b
         };
-        let big = sof(60000, 60000, &[(1, 1), (1, 1), (1, 1)]);
-        let cap = 268_435_456 * 4;
-        assert!(check_frame(&jpeg(0xC0, &big), cap).is_ok());
-        assert!(check_frame(&jpeg(0xC1, &big), cap).is_ok());
-        assert!(matches!(check_frame(&jpeg(0xC2, &big), cap), Err(None)));
+        // 3 * 1250 * 1250 blocks: at least 2 bits each sequential, 1 progressive.
+        let big = sof(10000, 10000, &[(1, 1), (1, 1), (1, 1)]);
+        let blocks = 3 * 1250 * 1250;
+        let cap = 500_000_000;
+        assert!(check_frame(&jpeg(0xC0, &big, blocks / 4), cap).is_ok());
+        assert!(check_frame(&jpeg(0xC1, &big, blocks / 4), cap).is_ok());
+        assert!(matches!(
+            check_frame(&jpeg(0xC0, &big, blocks / 4 - 30), cap),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
+        // Progressive with enough data, but 600 MB of coefficients is over a 500 MB cap.
+        assert!(matches!(
+            check_frame(&jpeg(0xC2, &big, blocks / 8), cap),
+            Err(None)
+        ));
         let small = sof(640, 480, &[(1, 1), (1, 1), (1, 1)]);
-        assert!(check_frame(&jpeg(0xC2, &small), cap).is_ok());
+        assert!(check_frame(&jpeg(0xC2, &small, 3 * 4800 / 8), cap).is_ok());
+        assert!(matches!(
+            check_frame(&jpeg(0xC2, &small, 3 * 4800 / 8 - 30), cap),
+            Err(Some(DecodeError::Corrupt(_)))
+        ));
         // Lossless and arithmetic-coded frames are not scaled.
         for code in [0xC3, 0xC9, 0xCA] {
-            assert!(matches!(check_frame(&jpeg(code, &small), cap), Err(None)));
+            assert!(matches!(
+                check_frame(&jpeg(code, &small, 0), cap),
+                Err(None)
+            ));
         }
         assert!(matches!(
-            check_frame(&jpeg(0xC2, &[8]), cap),
+            check_frame(&jpeg(0xC2, &[8], 0), cap),
             Err(Some(DecodeError::Corrupt(_)))
         ));
         assert!(matches!(
