@@ -56,7 +56,9 @@ In scope:
 - The update check (when turned on): anything that makes light-view contact a host other
   than `api.github.com` or open a page outside `github.com/goodflow/light-view/releases/`.
   The check uses Windows' automatic proxy settings, so Windows may also look up a proxy
-  (WPAD, a PAC file) on the local network when it runs; that lookup is expected.
+  (WPAD, a PAC file) on the local network when it runs, and it checks that GitHub's
+  certificate has not been revoked, which can contact the certificate authority's
+  revocation servers (OCSP, CRL). Those lookups are expected.
 
 Out of scope:
 
@@ -73,4 +75,5 @@ Out of scope:
 보안 수정을 받아요. 범위는 악성 이미지, 작업자 프로세스 탈출, 저장 중 파일 손상, 그리고
 업데이트 확인(켰을 때)이 `api.github.com` 말고 다른 곳에 연결하거나 light-view 릴리스
 페이지 밖을 여는 문제예요. 업데이트 확인은 윈도우의 자동 프록시 설정을 따르므로 프록시
-자동 검색(WPAD, PAC)이 함께 일어날 수 있어요.
+자동 검색(WPAD, PAC)이 함께 일어날 수 있고, GitHub 인증서가 폐기되지 않았는지 확인하느라
+인증 기관의 폐기 확인 서버(OCSP, CRL)에 연결할 수 있어요. 이 둘은 정상 동작이에요.
