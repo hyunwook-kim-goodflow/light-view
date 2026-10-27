@@ -151,7 +151,11 @@ fn installer_grants_appcontainer_read_and_cleans_up() {
     );
     // Review I1: /DIR= or a previous install's folder bypasses DisableDirPage, so the
     // grant runs only when {app} is the spec folder.
-    assert!(run[icacls].ends_with("; Check: IsDefaultAppDir"), "{}", run[icacls]);
+    assert!(
+        run[icacls].ends_with("; Check: IsDefaultAppDir"),
+        "{}",
+        run[icacls]
+    );
     let code = s
         .split_once("\n[Code]")
         .or_else(|| s.split_once("\r\n[Code]"))

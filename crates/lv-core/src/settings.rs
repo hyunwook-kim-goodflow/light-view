@@ -140,7 +140,10 @@ pub fn sweep_stale_temps(path: &Path, now: std::time::SystemTime) -> usize {
 
 /// The process id in `<base>.<pid>.tmp` (the name `temp_path` makes), or `None`.
 fn temp_pid(name: &str, base: &str) -> Option<u32> {
-    let digits = name.strip_prefix(base)?.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let digits = name
+        .strip_prefix(base)?
+        .strip_prefix('.')?
+        .strip_suffix(".tmp")?;
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -199,7 +202,10 @@ mod tests {
             p
         };
         let other = std::process::id().wrapping_add(1);
-        let old_other = make(&format!("settings.toml.{other}.tmp"), Duration::from_secs(120));
+        let old_other = make(
+            &format!("settings.toml.{other}.tmp"),
+            Duration::from_secs(120),
+        );
         let fresh_other = make(&format!("settings.toml.{other}.tmp2"), Duration::ZERO);
         let fresh_live = make(
             &format!("settings.toml.{}.tmp", other.wrapping_add(1)),
