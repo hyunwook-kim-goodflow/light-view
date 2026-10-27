@@ -24,8 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
     CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
     SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell, SaveDone, Saving};
@@ -44,6 +44,8 @@ use crate::strings::{t, S};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
+use crate::uia;
+use crate::uia_provider;
 use crate::viewer::{Scene, Viewer};
 use crate::watch::Watching;
 use crate::worker::WorkerPool;
@@ -442,6 +444,8 @@ impl App {
             Ok(()) => {}
             Err(e) => eprintln!("light-view: EndDraw failed: {e}"),
         }
+        // What was just drawn is what a screen reader sees.
+        uia_provider::publish(hwnd, || uia::main_tree_of(self));
     }
 
     /// Saves the normal-window placement (the one from before fullscreen, if active).
@@ -554,6 +558,16 @@ fn handle(
             unsafe {
                 let _ = EndPaint(hwnd, &ps);
             }
+            uia_provider::flush(hwnd);
+            Some(LRESULT(0))
+        }
+        WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
+            app.try_borrow().ok().map(|a| uia::main_tree_of(&a))
+        }),
+        uia_provider::WM_APP_UIA => {
+            if let Some(act) = uia_provider::action(hwnd, wparam) {
+                uia::run_main(app, hwnd, act);
+            }
             Some(LRESULT(0))
         }
         WM_DPICHANGED => {
@@ -616,6 +630,7 @@ fn handle(
         }
         WM_COPYDATA => Some(instance::on_copy_data(app, hwnd, lparam)),
         WM_DESTROY => {
+            uia_provider::detach(hwnd);
             // SAFETY: plain call.
             unsafe { PostQuitMessage(0) };
             Some(LRESULT(0))

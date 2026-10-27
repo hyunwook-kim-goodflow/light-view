@@ -145,6 +145,12 @@ pub enum S {
     SettingsMegabytes,
     SettingsMemoryNote,
     SettingsOpenOtherNote,
+    // Screen reader names (UI Automation) for parts that show no text of their own.
+    UiaToolbar,
+    UiaMenu,
+    UiaPhotoInfo,
+    UiaExifList,
+    UiaBack,
     // About dialog. `AboutVersion` is followed by the version number.
     AboutTitle,
     AboutVersion,
@@ -155,7 +161,7 @@ pub enum S {
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 81] = [
+const ALL: [S; 86] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -232,6 +238,11 @@ const ALL: [S; 81] = [
     S::SettingsMegabytes,
     S::SettingsMemoryNote,
     S::SettingsOpenOtherNote,
+    S::UiaToolbar,
+    S::UiaMenu,
+    S::UiaPhotoInfo,
+    S::UiaExifList,
+    S::UiaBack,
     S::AboutTitle,
     S::AboutVersion,
     S::AboutLicense,
@@ -360,6 +371,11 @@ pub fn text(lang: Lang, key: S) -> &'static str {
             "다음 실행부터 적용돼요",
             "Applies the next time light-view starts",
         ),
+        S::UiaToolbar => ("도구 모음", "Toolbar"),
+        S::UiaMenu => ("메뉴", "Menu"),
+        S::UiaPhotoInfo => ("사진 정보", "Photo info"),
+        S::UiaExifList => ("EXIF 전체 목록", "All EXIF tags"),
+        S::UiaBack => ("뒤로", "Back"),
         S::AboutTitle => ("light-view", "light-view"),
         S::AboutVersion => ("버전 ", "Version "),
         S::AboutLicense => (
@@ -532,6 +548,21 @@ mod tests {
         // Each language is named in itself, whatever the UI language.
         assert_eq!(text(Lang::En, S::SettingsKorean), "한국어");
         assert_eq!(text(Lang::Ko, S::SettingsEnglish), "English");
+    }
+
+    #[test]
+    fn screen_reader_names() {
+        let ko = [
+            (S::UiaToolbar, "도구 모음"),
+            (S::UiaMenu, "메뉴"),
+            (S::UiaPhotoInfo, "사진 정보"),
+            (S::UiaExifList, "EXIF 전체 목록"),
+            (S::UiaBack, "뒤로"),
+        ];
+        for (key, want) in ko {
+            assert_eq!(text(Lang::Ko, key), want, "{key:?}");
+        }
+        assert_eq!(text(Lang::En, S::UiaBack), "Back");
     }
 
     /// The Korean text the app shipped with through M3, byte for byte (the constants

@@ -23,6 +23,8 @@ mod theme;
 mod timing;
 mod toolbar;
 mod tooltip;
+mod uia;
+mod uia_provider;
 mod viewer;
 mod watch;
 mod window;
