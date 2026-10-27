@@ -36,10 +36,7 @@ pub enum Reply {
     },
     /// The rotated JPEG, at most `lv_ipc::max_bytes_response(input)` bytes. Not yet
     /// checked beyond that: the caller verifies it before using it.
-    Bytes {
-        #[allow(dead_code, reason = "the rotation save pipeline (M3 task 6) reads it")]
-        data: Vec<u8>,
-    },
+    Bytes { data: Vec<u8> },
 }
 
 #[derive(Debug)]
@@ -141,7 +138,6 @@ impl WorkerPool {
     /// must not be pixel-rotated, since the rotation keeps only the first image. Such input
     /// (and input whose EOI cannot be found) is refused with
     /// [`PoolError::HasTrailingData`] before being sent; the worker checks again.
-    #[allow(dead_code, reason = "the rotation save pipeline (M3 task 6) calls it")]
     pub fn rotate_jpeg(&self, quarters: u8, data: Vec<u8>) -> Result<Reply, PoolError> {
         let single = check_single_image(&data);
         let info = match jpeg_check::inspect(&data) {
