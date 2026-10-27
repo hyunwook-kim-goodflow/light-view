@@ -163,7 +163,7 @@ impl App {
         let px = |v: f32| (v / self.dip).round() as i32;
         let tools: Vec<Tool> = self
             .toolbar_input()
-            .filter(|_| !self.overlay.dialog_open())
+            .filter(|_| !self.overlay.dialog_open() && !self.menu.is_open())
             .map(|i| layout(&i))
             .unwrap_or_default()
             .into_iter()

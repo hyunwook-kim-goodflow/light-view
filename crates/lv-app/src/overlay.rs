@@ -1006,15 +1006,20 @@ mod tests {
 
     #[test]
     fn about_shows_version_and_license_with_notices_and_close() {
+        use crate::strings::{text, Lang};
         let mut d = Dialog::new(Prompt::About);
-        assert_eq!(d.prompt.title(), "light-view");
+        assert_eq!(d.prompt.title(), t(S::AboutTitle));
         assert_eq!(
             d.prompt.details(),
             [
-                format!("버전 {}", env!("CARGO_PKG_VERSION")),
-                "MIT 또는 Apache-2.0 라이선스로 배포해요".to_owned()
+                format!("{}{}", t(S::AboutVersion), env!("CARGO_PKG_VERSION")),
+                t(S::AboutLicense).to_owned()
             ]
         );
+        assert_eq!(text(Lang::Ko, S::AboutTitle), "light-view");
+        assert_eq!(text(Lang::Ko, S::AboutVersion), "버전 ");
+        assert_eq!(text(Lang::Ko, S::BtnNotices), "오픈소스 고지");
+        assert_eq!(text(Lang::Ko, S::BtnClose), "닫기");
         assert_eq!(
             d.prompt.items(),
             [
@@ -1022,8 +1027,8 @@ mod tests {
                 Item::Button(PromptResult::Close)
             ]
         );
-        assert_eq!(PromptResult::Notices.label(), "오픈소스 고지");
-        assert_eq!(PromptResult::Close.label(), "닫기");
+        assert_eq!(PromptResult::Notices.label(), t(S::BtnNotices));
+        assert_eq!(PromptResult::Close.label(), t(S::BtnClose));
         // [닫기] is the default: Enter and Esc both close, Space on 고지 opens them.
         assert_eq!(focused_item(&d), Item::Button(PromptResult::Close));
         assert_eq!(d.on_key(VK_RETURN, NONE), Some(PromptResult::Close));

@@ -3,6 +3,8 @@
 //! and no toolbar. Also what a drop opens.
 
 use std::cell::RefCell;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use lv_core::format::{is_supported_extension, EXTENSIONS};
@@ -178,9 +180,10 @@ fn pick_file(hwnd: HWND, folder: Option<&Path>) -> Option<PathBuf> {
                 dialog.Show(hwnd)?;
                 let item = dialog.GetResult()?;
                 let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
-                let path = name.to_string();
+                // Copied as UTF-16 units, so names that are not valid Unicode open too.
+                let path = PathBuf::from(OsString::from_wide(name.as_wide()));
                 CoTaskMemFree(Some(name.0 as *const _));
-                Ok(PathBuf::from(path?))
+                Ok(path)
             })()
         };
         match result {

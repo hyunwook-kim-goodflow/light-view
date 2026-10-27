@@ -62,11 +62,15 @@ mod tests {
 
     #[test]
     fn version_and_license_lines() {
+        use crate::strings::{text, Lang};
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(version_line(), format!("{}{version}", t(S::AboutVersion)));
+        assert_eq!(license_line(), t(S::AboutLicense));
+        assert_eq!(text(Lang::Ko, S::AboutVersion), "버전 ");
         assert_eq!(
-            version_line(),
-            format!("버전 {}", env!("CARGO_PKG_VERSION"))
+            text(Lang::Ko, S::AboutLicense),
+            "MIT 또는 Apache-2.0 라이선스로 배포해요"
         );
-        assert_eq!(license_line(), "MIT 또는 Apache-2.0 라이선스로 배포해요");
         let p = notices_path().unwrap();
         assert!(p.ends_with(NOTICES_FILE));
     }
