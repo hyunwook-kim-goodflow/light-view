@@ -5,6 +5,7 @@ mod commands;
 mod fullscreen;
 mod input;
 mod instance;
+mod overlay;
 mod placement;
 mod render;
 mod routing;
