@@ -335,7 +335,7 @@ pub fn main_tree(i: &MainInput) -> Tree {
         }
     }
     let announce = i.toast.as_ref().map(|ti| {
-        add_toast(&mut b, ti, full);
+        add_toast(&mut b, ti, full, i.dialog.is_some());
         (ti.toast.shown_at_ms, ti.toast.text.clone())
     });
     Tree {
@@ -437,14 +437,19 @@ fn add_dialog(b: &mut Builder, d: &Dialog, client: (f32, f32)) {
     }
 }
 
-fn add_toast(b: &mut Builder, ti: &ToastInput, full: Rect) {
+/// The toast and its action button; under an open dialog (`blocked`, which takes every
+/// click) the button is disabled.
+fn add_toast(b: &mut Builder, ti: &ToastInput, full: Rect, blocked: bool) {
     let anchor = crate::overlay::toast_layout(full.w, full.h, false);
     let bg = ti.parts.map_or(anchor, |p| p.bg);
     let toast = b.add(None, TOAST, Role::Text, &ti.toast.text, bg);
     if let Some((label, _)) = &ti.toast.action {
         let r = ti.parts.and_then(|p| p.action).unwrap_or(bg);
         b.add(Some(toast), TOAST_UNDO, Role::Button, label, r);
-        b.last().act = Some(Act::Undo);
+        let node = b.last();
+        node.act = Some(Act::Undo);
+        node.enabled = !blocked;
+        node.focusable &= !blocked;
     }
 }
 
@@ -796,6 +801,26 @@ mod tests {
         assert_eq!(undo.act, Some(Act::Undo));
         assert_eq!(undo.parent, tree.index(TOAST));
         assert_eq!(tree.announce, Some((1234, t(S::ToastRecycled).to_owned())));
+    }
+
+    /// An open dialog takes every click (ruling R12), so the toast's [실행 취소] under it
+    /// is shown disabled and cannot be invoked or focused.
+    #[test]
+    fn toast_undo_is_disabled_while_a_dialog_is_open() {
+        let mut i = input();
+        let toast = Toast::recycled(1234);
+        i.toast = Some(ToastInput {
+            toast: &toast,
+            parts: None,
+        });
+        assert!(named(&main_tree(&i), t(S::ToastUndo)).enabled);
+        let d = Dialog::new(Prompt::SaveRotation);
+        i.dialog = Some(&d);
+        let tree = main_tree(&i);
+        let undo = named(&tree, t(S::ToastUndo));
+        assert!(!undo.enabled && !undo.focusable);
+        // The toast itself is still read out.
+        assert_eq!(named(&tree, t(S::ToastRecycled)).role, Role::Text);
     }
 
     #[test]

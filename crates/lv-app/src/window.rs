@@ -383,6 +383,7 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_NCDESTROY => {
+            uia_provider::forget(hwnd);
             // SAFETY: clears the App pointer so no later message can reach it.
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
