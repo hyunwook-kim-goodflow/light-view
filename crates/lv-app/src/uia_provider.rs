@@ -385,6 +385,9 @@ struct Host {
 
 thread_local! {
     static HOSTS: RefCell<Vec<Host>> = const { RefCell::new(Vec::new()) };
+    /// Windows between `detach` (WM_DESTROY) and `forget` (WM_NCDESTROY): they get no
+    /// new providers.
+    static DETACHED: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
 }
 
 fn with_host<R>(hwnd: HWND, f: impl FnOnce(&mut Host) -> R) -> Option<R> {
@@ -392,14 +395,15 @@ fn with_host<R>(hwnd: HWND, f: impl FnOnce(&mut Host) -> R) -> Option<R> {
 }
 
 /// `WM_GETOBJECT`: for UiaRootObjectId, the window's root provider (made on the first
-/// request, from `build`'s tree). `None` passes other requests to `DefWindowProc`.
+/// request, from `build`'s tree). `None` passes other requests to `DefWindowProc`, and
+/// so does a request after `detach`: providers made then would never be detached.
 pub fn get_object(
     hwnd: HWND,
     wparam: WPARAM,
     lparam: LPARAM,
     build: impl FnOnce() -> Option<Tree>,
 ) -> Option<LRESULT> {
-    if lparam.0 as i32 != UiaRootObjectId {
+    if lparam.0 as i32 != UiaRootObjectId || DETACHED.with(|d| d.borrow().contains(&hwnd)) {
         return None;
     }
     let root = match with_host(hwnd, |h| h.root.clone()) {
@@ -493,8 +497,15 @@ pub fn action(hwnd: HWND, wparam: WPARAM) -> Option<Act> {
         .flatten()
 }
 
-/// `WM_DESTROY`: the providers stop answering and UI Automation lets go of them.
+/// `WM_DESTROY`: the providers stop answering and UI Automation lets go of them; no new
+/// ones are made for the window until `forget`.
 pub fn detach(hwnd: HWND) {
+    DETACHED.with(|d| {
+        let mut d = d.borrow_mut();
+        if !d.contains(&hwnd) {
+            d.push(hwnd);
+        }
+    });
     let host = HOSTS.with(|h| {
         let mut hosts = h.borrow_mut();
         let i = hosts.iter().position(|h| h.hwnd == hwnd)?;
@@ -513,5 +524,65 @@ pub fn detach(hwnd: HWND) {
             None::<&IRawElementProviderSimple>,
         );
         let _ = UiaDisconnectProvider(&host.root);
+    }
+}
+
+/// `WM_NCDESTROY`: the window's last message. Its handle may name another window from
+/// now on, which may have providers again.
+pub fn forget(hwnd: HWND) {
+    DETACHED.with(|d| d.borrow_mut().retain(|h| *h != hwnd));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    };
+
+    /// A `WM_GETOBJECT` that arrives after `detach` (`WM_DESTROY`) makes no providers:
+    /// nothing would detach them again. Once `forget` (`WM_NCDESTROY`) ran, a later
+    /// window that gets the same handle has them again.
+    #[test]
+    fn no_providers_are_made_after_detach() {
+        let root = LPARAM(UiaRootObjectId as isize);
+        let built = Cell::new(0);
+        let build = || {
+            built.set(built.get() + 1);
+            Some(Tree::default())
+        };
+        // SAFETY: plain Win32 calls on a window this test creates and destroys.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("uia"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        assert!(get_object(hwnd, WPARAM(0), root, build).is_some());
+        assert_eq!(built.get(), 1);
+        detach(hwnd);
+        assert!(get_object(hwnd, WPARAM(0), root, build).is_none());
+        assert_eq!(built.get(), 1);
+        assert!(with_host(hwnd, |_| ()).is_none());
+        forget(hwnd);
+        assert!(get_object(hwnd, WPARAM(0), root, build).is_some());
+        assert_eq!(built.get(), 2);
+        detach(hwnd);
+        forget(hwnd);
+        // SAFETY: as above.
+        unsafe { DestroyWindow(hwnd) }.unwrap();
     }
 }
