@@ -1330,7 +1330,9 @@ mod tests {
 
     #[test]
     fn deleting_hides_the_photo_and_undo_shows_it_again() {
-        let (mut v, rx) = viewer_at("c.jpg");
+        // d's decode is held back, so it cannot be prefetched (and shown from the
+        // cache) before c is hidden.
+        let (mut v, rx, release_d) = gated_viewer_at("c.jpg", "d.jpg");
         wait_shown(&mut v, &rx);
         let (path, _) = v.delete_target().expect("c is on screen");
         assert_eq!(path, p("c.jpg"));
@@ -1338,6 +1340,7 @@ mod tests {
         assert_eq!(v.title(), "d.jpg · 3 / 4");
         // d is not on screen yet: nothing to delete until it is.
         assert_eq!(v.delete_target(), None);
+        release_d.send(()).unwrap();
         wait_shown(&mut v, &rx);
         assert_eq!(v.delete_target().unwrap().0, p("d.jpg"));
 
