@@ -3,6 +3,7 @@
 //! reports.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
@@ -32,7 +33,7 @@ pub enum RescanNotice {
     /// It left the folder while its rotation was unsaved; the rotation is gone.
     Vanished,
     /// It was changed by another program while its rotation was unsaved; it is decoded
-    /// again, unrotated.
+    /// again, unrotated. Without a rotation the reload is silent (ruling R20).
     Reloaded,
 }
 
@@ -173,10 +174,73 @@ fn rescaled(old: &Viewport, old_size: (f32, f32), size: (f32, f32), image: (f32,
     v
 }
 
-/// `path` was changed since `id` was read from it. A file that cannot be read
-/// (`Verify::Missing`) does not count: that may be a sharing violation or a network blip.
-fn changed_on_disk(path: &Path, id: Option<&FileIdentity>) -> bool {
-    id.is_some_and(|id| identity::verify(path, id) == Verify::Changed)
+/// The disk side of a folder rescan, taken by `Viewer::rescan_job`. `run` may block
+/// (a slow or stalled network folder), so it runs off the UI thread.
+#[derive(Debug, Clone)]
+pub struct RescanJob {
+    pub folder: PathBuf,
+    /// The viewer's generation and current photo when the job was taken: a result for
+    /// another photo or folder is not applied.
+    generation: u64,
+    current: Option<PathBuf>,
+    /// The shown photo and the prefetched ones, with the identity they were decoded from.
+    checks: Vec<(PathBuf, FileIdentity)>,
+}
+
+/// What `RescanJob::run` found.
+#[derive(Debug, Clone)]
+pub struct RescanFound {
+    folder: PathBuf,
+    generation: u64,
+    current: Option<PathBuf>,
+    /// The folder's files; `None` if it could not be read.
+    paths: Option<Vec<PathBuf>>,
+    /// The current photo is not listed and its metadata reads "not found".
+    current_absent: bool,
+    /// The checked files whose identity changed (`Verify::Changed` only: a file that
+    /// cannot be read may be shared, locked or behind a network blip).
+    changed: Vec<(PathBuf, FileIdentity)>,
+    /// How long the run took.
+    pub took: Duration,
+}
+
+impl RescanJob {
+    /// Reads the folder and the identities. Blocks as long as the disk does.
+    pub fn run(self) -> RescanFound {
+        let started = Instant::now();
+        let paths = FolderList::read_files(&self.folder).ok();
+        let current_absent = match (&paths, &self.current) {
+            (Some(paths), Some(c)) => !paths.iter().any(|p| same_path(p, c)) && confirmed_absent(c),
+            _ => false,
+        };
+        let changed = self
+            .checks
+            .into_iter()
+            .filter(|(path, id)| identity::verify(path, id) == Verify::Changed)
+            .collect();
+        RescanFound {
+            folder: self.folder,
+            generation: self.generation,
+            current: self.current,
+            paths,
+            current_absent,
+            changed,
+            took: started.elapsed(),
+        }
+    }
+
+    /// A result that changes nothing (for a run that failed).
+    pub fn nothing(&self) -> RescanFound {
+        RescanFound {
+            folder: self.folder.clone(),
+            generation: self.generation,
+            current: self.current.clone(),
+            paths: None,
+            current_absent: false,
+            changed: Vec::new(),
+            took: Duration::ZERO,
+        }
+    }
 }
 
 /// `path` is gone: its metadata reads "not found" (any other error may be passing).
@@ -663,23 +727,59 @@ impl Viewer {
         self.list.dir()
     }
 
-    /// Lists the folder again after a change on disk. The current photo stays current
-    /// (by path); pending deletes stay hidden. A current photo gone from the folder (not
-    /// listed and confirmed absent) gives way to the one at its place, its unsaved
-    /// rotation dropped: there is no file left to save it to. A current photo changed by
-    /// another program is decoded again, unrotated, as is a changed prefetched neighbour.
-    /// A file that only fails to read (`Verify::Missing`: shared, locked, a network
-    /// blip) is left alone, and so is everything when the folder cannot be read.
-    pub fn rescan(&mut self) -> (Redraw, Option<RescanNotice>) {
-        let Some(dir) = self.list.dir().map(Path::to_path_buf) else {
-            return (Redraw::None, None);
-        };
-        let Ok(mut paths) = FolderList::read_files(&dir) else {
-            return (Redraw::None, None);
-        };
+    /// What a rescan has to read from disk, taken on the UI thread; `RescanJob::run`
+    /// reads it on another thread and `apply_rescan` applies the result here. `None`
+    /// without a folder.
+    pub fn rescan_job(&self) -> Option<RescanJob> {
         let current = self.list.current().map(Path::to_path_buf);
+        let mut checks: Vec<(PathBuf, FileIdentity)> = Vec::new();
+        if let (Some(s), Some(c)) = (&self.shown, &current) {
+            if let Some(id) = s.identity.as_ref().filter(|_| same_path(&s.path, c)) {
+                checks.push((s.path.clone(), id.clone()));
+            }
+        }
+        for path in &self.wanted {
+            if let Some((_, Some(id))) = self.prefetcher.get_with_identity(path) {
+                if !checks.iter().any(|(p, i)| p == path && *i == id) {
+                    checks.push((path.clone(), id));
+                }
+            }
+        }
+        Some(RescanJob {
+            folder: self.list.dir()?.to_path_buf(),
+            generation: self.generation,
+            current,
+            checks,
+        })
+    }
+
+    /// Applies a rescan (see `RescanJob`). The current photo stays current (by path);
+    /// pending deletes stay hidden. A current photo gone from the folder (not listed and
+    /// confirmed absent) gives way to the one at its place, its unsaved rotation dropped:
+    /// there is no file left to save it to. A current photo changed by another program
+    /// is decoded again, unrotated (ruling R20: the notice only when a rotation was
+    /// dropped), as is a changed prefetched neighbour. A file that only fails to read
+    /// (`Verify::Missing`: shared, locked, a network blip) is left alone, and so is
+    /// everything when the folder could not be read.
+    ///
+    /// `None` when the result is out of date (another folder or photo since the job was
+    /// taken): nothing is applied and the caller rescans again.
+    pub fn apply_rescan(&mut self, found: RescanFound) -> Option<(Redraw, Option<RescanNotice>)> {
+        let current = self.list.current().map(Path::to_path_buf);
+        let same_current = match (&found.current, &current) {
+            (Some(a), Some(b)) => same_path(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let same_folder = self.list.dir().is_some_and(|d| same_path(d, &found.folder));
+        if !same_folder || found.generation != self.generation || !same_current {
+            return None;
+        }
+        let Some(mut paths) = found.paths else {
+            return Some((Redraw::None, None));
+        };
         if let Some(c) = &current {
-            if !paths.iter().any(|p| same_path(p, c)) && !confirmed_absent(c) {
+            if !paths.iter().any(|p| same_path(p, c)) && !found.current_absent {
                 // Not listed this time, yet still there.
                 paths.push(c.clone());
             }
@@ -701,39 +801,54 @@ impl Viewer {
             } else {
                 self.after_move()
             };
-            return (redraw, notice);
+            return Some((redraw, notice));
         }
         self.request_wanted();
-        let reloaded = self.reload_if_changed();
-        for (i, path) in self.wanted.clone().iter().enumerate() {
-            if reloaded && i == 0 {
-                continue; // the current photo, already decoding again
+        let reloaded = self.reload_if_changed(&found.changed);
+        for (path, id) in &found.changed {
+            if reloaded && current.as_ref().is_some_and(|c| same_path(c, path)) {
+                continue; // already decoding again
             }
+            // Only the decode that was checked: a newer one is of the changed file.
             let cached = self.prefetcher.get_with_identity(path);
-            if cached.is_some_and(|(_, id)| changed_on_disk(path, id.as_ref())) {
+            if cached.is_some_and(|(_, cached)| cached.as_ref() == Some(id)) {
                 self.prefetcher.invalidate(path);
             }
         }
         if reloaded {
-            return (Redraw::Full, rotated.then_some(RescanNotice::Reloaded));
+            return Some((Redraw::Full, rotated.then_some(RescanNotice::Reloaded)));
         }
         if self.list.position() != position {
-            return (Redraw::Full, None);
+            return Some((Redraw::Full, None));
         }
-        (Redraw::None, None)
+        Some((Redraw::None, None))
     }
 
-    /// The current photo on screen was changed by another program: it stays drawn until
-    /// its new decode replaces it (saves and deletes refuse meanwhile, as its identity is
-    /// the old file's), and its rotation is dropped. True if it changed.
-    fn reload_if_changed(&mut self) -> bool {
+    /// Takes and applies a rescan on this thread (tests).
+    #[cfg(test)]
+    pub fn rescan(&mut self) -> (Redraw, Option<RescanNotice>) {
+        let Some(job) = self.rescan_job() else {
+            return (Redraw::None, None);
+        };
+        self.apply_rescan(job.run())
+            .expect("nothing changed in between")
+    }
+
+    /// The current photo on screen was changed by another program (its checked
+    /// identity is in `changed`): it stays drawn until its new decode replaces it (saves
+    /// and deletes refuse meanwhile, as its identity is the old file's), and its
+    /// rotation is dropped. True if it changed.
+    fn reload_if_changed(&mut self, changed: &[(PathBuf, FileIdentity)]) -> bool {
         let Some(current) = self.list.current().map(Path::to_path_buf) else {
             return false;
         };
         let Some(s) = self.shown.as_mut().filter(|s| same_path(&s.path, &current)) else {
             return false;
         };
-        if !changed_on_disk(&s.path, s.identity.as_ref()) {
+        let checked = changed
+            .iter()
+            .any(|(p, id)| *p == s.path && s.identity.as_ref() == Some(id));
+        if !checked {
             return false;
         }
         s.stale = true;
@@ -1361,6 +1476,31 @@ mod tests {
         assert_eq!(v.current_path(), Some(path.as_path()));
         assert!(v.unsaved_rotation());
         assert!(!v.pending());
+    }
+
+    #[test]
+    fn a_rescan_for_an_old_photo_or_folder_is_dropped() {
+        let (dir, mut v, rx) = viewer_in_folder(&["a.jpg", "b.jpg"], "a.jpg");
+        std::fs::remove_file(dir.path().join("a.jpg")).unwrap();
+        let job = v.rescan_job().unwrap();
+        // The user moved on while the job ran (a new generation once b is shown).
+        v.apply(Command::Next);
+        wait_shown(&mut v, &rx);
+        assert!(v.apply_rescan(job.clone().run()).is_none());
+        assert_eq!(v.title(), "b.jpg · 2 / 2");
+        // Another folder since.
+        let (other, mut w, _rx2) = viewer_in_folder(&["x.jpg"], "x.jpg");
+        let job = w.rescan_job().unwrap();
+        w.open(&dir.path().join("b.jpg"));
+        assert!(w.apply_rescan(job.run()).is_none());
+        drop(other);
+        // A failed run changes nothing.
+        let job = v.rescan_job().unwrap();
+        assert_eq!(v.apply_rescan(job.nothing()), Some((Redraw::None, None)));
+        assert_eq!(v.title(), "b.jpg · 2 / 2");
+        // A fresh one applies.
+        assert_eq!(v.rescan(), (Redraw::Full, None));
+        assert_eq!(v.title(), "b.jpg · 1 / 1");
     }
 
     #[test]
