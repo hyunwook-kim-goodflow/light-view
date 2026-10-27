@@ -114,3 +114,11 @@ Checked against the M2 branch (`m2-heic-worker`) in Task 7. The history above is
 | Not an M1 item: first-present target (200 ms JPEG, 400 ms HEIC) | 미해결 | Measured in Task 7 (README "현재 수치"): 12 MP JPEG ~430-580 ms, 12 MP HEIC ~1.2-1.5 s. For HEIC, libheif/libde265 decoding (single-threaded, 0.7-1.0 s) is almost all of it; pipe transfer is ~30 ms and color conversion is negligible. Goes to M5 profiling; see the follow-up note in README. |
 
 Still parked from M1 and untouched by M2: folder refresh (M3), the per-task minor lists above, and the user-verify visual checks.
+
+# M3 status of the parked M1 items
+
+Checked against the M3 branch (`m3-file-ops`) in Task 9. The history above is kept as it was.
+
+| M1 item | Status | Note |
+|---|---|---|
+| Final review #2 / R17: folder refresh unwired (external changes not seen) | **M3에서 해결** (b03c4ec, 92cb75b) | `ReadDirectoryChangesW` watch with a 200 ms debounce; the rescan runs off the UI thread and calls `FolderList::refresh`; the current photo is kept by path, and a pending delete stays hidden. |

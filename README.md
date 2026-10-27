@@ -1,26 +1,29 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Deleting, saving rotations and the EXIF card are not implemented yet. Run `scripts/setup-deps.ps1` once, then `cargo build --release`. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). The DLLs and executables need the Microsoft Visual C++ 2015–2022 (x64) runtime. HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo; the EXIF card is not implemented yet. Run `scripts/setup-deps.ps1` once, then `cargo build --release`. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). The DLLs and executables need the Microsoft Visual C++ 2015–2022 (x64) runtime. HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
 윈도우에서 HEIC(아이폰 사진)를 보려면 마이크로소프트의 유료 HEVC 확장이 필요하고, 기존 뷰어 중에도 HEIC를 유료 기능으로 묶어 둔 것이 있어요. light-view는 일상 사진을 무료로, 빠르게, 안전하게 여는 가벼운 윈도우 이미지 뷰어를 목표로 해요. 오픈소스로 공개하고 무료로 배포할 계획이에요. 설계 문서는 [`docs/superpowers/specs/2026-10-26-light-view-design.md`](docs/superpowers/specs/2026-10-26-light-view-design.md)에 있어요.
 
-## 현재 상태 (M2)
+## 현재 상태 (M3)
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
 - HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. 다만 악성 파일이 작업자를 장악하면 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 아직 막지 못해요. 이 부분은 M5에서 AppContainer로 막을 예정이에요. 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
 - HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 무시). AVIF는 아직 열 수 없어요.
 - `lv-worker.exe`가 앱 옆에 없으면 HEIC만 "이 사진은 열 수 없어요"로 나오고 다른 형식은 그대로 열려요.
-- 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전(보기만, 저장은 M3), 다크 모드를 지원해요.
-- 아직 없는 것: 삭제, 회전 저장, EXIF 카드, 설정 화면, 설치 파일. 아래 로드맵을 보세요.
+- 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전, 다크 모드를 지원해요.
+- **무손실 회전 저장(Ctrl+S):** JPEG은 가로·세로가 MCU 배수이고 뒤에 붙은 데이터나 MPF가 없으면 픽셀을 다시 압축하지 않고 돌려요(libjpeg-turbo, 회전마다 새로 띄우고 끝나면 닫는 작업자 프로세스). 이때 허프만 표를 다시 최적화하므로 파일 크기와 바이트는 달라질 수 있지만 픽셀은 그대로예요. 네 번 돌려 저장하면 원본과 똑같은 픽셀로 돌아와요. 그렇지 않으면 픽셀은 그대로 두고 EXIF 방향 태그만 바꾸고 "이 사진은 회전 정보로 저장했어요"라고 알려 줘요. HEIC/HEIF는 주 이미지의 `irot`만 바꿔요. 알파가 있거나 좌우 반전(`imir`)된 HEIF, 그리고 PNG·BMP·GIF·WebP는 회전 저장을 지원하지 않아요. 저장은 같은 폴더의 임시 파일을 만들어 검증한 뒤 `ReplaceFileW`로 바꿔요. 만든 날짜와 수정 날짜는 원래 값으로 되돌려서 날짜순 정렬이 바뀌지 않아요(탐색기 썸네일은 새로 그리라고 알려 줘요). 어느 단계에서 실패해도 원본은 그대로예요. 교체 도중 원본이 사라지거나 다른 파일로 바뀌어 새 파일이 유일한 사본이 되면, 지우지 않고 `<이름> (light-view 사본).<확장자>`로 남기고 알려 줘요. 저장하지 않은 회전이 있으면 사진을 넘기거나 닫거나 지울 때 창 안에서 물어봐요.
+- **삭제(Delete):** 확인 없이 목록에서 빼고 "휴지통으로 옮겼어요 [실행 취소]"를 6초 보여 줘요. 실제 휴지통 이동은 다음 삭제나 앱 종료 때 일어나고, 그 전에는 Ctrl+Z로 되돌릴 수 있어요(앱이 비정상 종료되면 파일은 그대로 남아요). 휴지통이 없는 위치(네트워크, 이동식 드라이브 등)와 경로가 260자 이상인 파일은 영구 삭제라고 먼저 물어봐요(기본 단추는 [취소]이고, [삭제]는 Tab이나 ←로 옮겨 Space로 눌러요). 폴더, 바로 가기 링크(심볼릭 링크·정션)는 지우지 않아요. OneDrive 같은 클라우드 파일은 지울 수 있어요.
+- 열 때와 저장·삭제 직전에 파일 ID·크기·수정 시각을 비교해서, 그 사이 파일이 바뀌었으면 아무것도 하지 않아요. 긴 경로(`\\?\`)를 지원해요. 폴더가 바깥에서 바뀌면(파일 추가·삭제·이름 변경) 200 ms 뒤 목록을 다시 읽고 보던 사진을 유지해요.
+- 아직 없는 것: EXIF 카드, 설정 화면, 설치 파일. 아래 로드맵을 보세요.
 - 네트워크 통신은 하지 않아요.
 
 ## 빌드
 
 Windows 10 22H2 이상 / Windows 11 (x64)과 Rust(MSVC 도구 체인), Visual Studio C++ 빌드 도구(MSVC), git이 필요해요.
 
-HEIC 디코더(libheif·libde265)는 C/C++ 라이브러리라 [vcpkg](https://github.com/microsoft/vcpkg)로 받아요. **빌드하기 전에** 처음 한 번, 그리고 `vcpkg.json`이 바뀔 때마다 아래 스크립트를 실행해요(Windows PowerShell 5.1에서 동작해요).
+HEIC 디코더(libheif·libde265)와 JPEG 무손실 회전(libjpeg-turbo)은 C/C++ 라이브러리라 [vcpkg](https://github.com/microsoft/vcpkg)로 받아요. **빌드하기 전에** 처음 한 번, 그리고 `vcpkg.json`이 바뀔 때마다 아래 스크립트를 실행해요(Windows PowerShell 5.1에서 동작해요).
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
@@ -30,9 +33,9 @@ cargo build --release
 스크립트가 하는 일:
 
 - vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 다운로드·바이너리 캐시도 `.vcpkg\` 안에만 두고, 전역 설치는 하지 않아요.
-- `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이)와 libde265를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
-- x265, x264, aom, dav1d, kvazaar, openjpeg, libjpeg-turbo가 설치돼 있으면 실패해요.
-- `heif.dll`, `libde265.dll`을 `target\debug`, `target\release`에 복사해요.
+- `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이), libde265, libjpeg-turbo(와 그것이 쓰는 libspng·zlib)를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
+- x265, x264, aom, dav1d, kvazaar, openjpeg가 설치돼 있거나 libheif가 `jpeg` 기능으로 빌드됐으면 실패해요. 이 검사만 따로 돌릴 때는 `-CheckOnly`를 써요.
+- `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`(과 `jpeg62.dll`)을 `target\debug`, `target\release`에 복사해요.
 
 `cargo clean` 뒤처럼 DLL만 다시 복사하면 될 때는 vcpkg 단계를 건너뛰는 `-CopyOnly`를 써요.
 
@@ -42,9 +45,9 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 
 빌드 환경 변수(`VCPKG_ROOT`, `VCPKGRS_TRIPLET`, `VCPKGRS_DYNAMIC`)는 `.cargo\config.toml`에 고정돼 있어서 따로 설정할 필요가 없어요.
 
-`cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC 작업자), `heif.dll`, `libde265.dll`이 함께 있어야 해요. 이 네 파일을 한 폴더에 두면 그대로 실행돼요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
+`cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC·JPEG 회전 작업자), `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`이 함께 있어야 해요. 이 파일들을 한 폴더에 두면 그대로 실행돼요. 작업자는 이 DLL을 모두 정적으로 가져오므로 하나라도 없으면 HEIC도 열리지 않아요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
 
-네 파일 모두 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, 두 DLL은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio나 이 패키지가 설치된 컴퓨터에는 이미 있어요. 다른 컴퓨터로 옮겨 실행하려면 이 패키지를 먼저 설치해야 해요(설치 파일은 M5에서 만들어요).
+이 실행 파일과 DLL은 모두 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, `heif.dll`과 `libde265.dll`은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio나 이 패키지가 설치된 컴퓨터에는 이미 있어요. 다른 컴퓨터로 옮겨 실행하려면 이 패키지를 먼저 설치해야 해요(설치 파일은 M5에서 만들어요).
 
 ## 사용법
 
@@ -54,12 +57,12 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 | Ctrl+휠, + / − | 확대 / 축소 (휠은 포인터 위치 기준, 키는 화면 중심 기준) | 사용 가능 |
 | 더블클릭 | 화면 맞춤 ↔ 원본 크기(100%) 전환 | 사용 가능 |
 | 확대 상태에서 끌기 | 사진 이동 | 사용 가능 |
-| Ctrl+← / Ctrl+→ | 왼쪽 / 오른쪽 90° 회전 (보기만) | 사용 가능 |
+| Ctrl+← / Ctrl+→ | 왼쪽 / 오른쪽 90° 회전 (저장은 Ctrl+S) | 사용 가능 |
 | F11, Enter | 전체 화면 | 사용 가능 |
 | Esc | 전체 화면이면 해제, 아니면 창 닫기 | 사용 가능 |
-| Ctrl+S | 회전 저장 | M3 예정 |
-| Delete | 휴지통으로 보내기 | M3 예정 |
-| Ctrl+Z | 마지막 삭제 되돌리기 | M3 예정 |
+| Ctrl+S | 회전 저장 (묻지 않고 바로) | 사용 가능 |
+| Delete | 휴지통으로 보내기 | 사용 가능 |
+| Ctrl+Z | 마지막 삭제 되돌리기 (다음 삭제나 앱 종료 전까지) | 사용 가능 |
 | I | EXIF 카드 열기 / 닫기 | M4 예정 |
 
 폴더의 처음과 끝에서 더 넘기면 멈춰요(순환하지 않아요).
@@ -106,6 +109,11 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 - 알파가 있는 HEIF가 투명하게 나오고 테두리가 지저분하지 않나요
 - 갤럭시에서 찍은 HEIF가 열리나요
 - 위 파일들로 `real_samples` 테스트를 돌렸을 때 실패가 없나요
+- (M3) 회전 저장한 JPEG과 HEIC가 윈도우 사진 앱과 브라우저에서 같은 방향으로 보이나요(아이폰 세로 사진도)
+- (M3) 모션 포토·라이브 포토를 태그로 저장한 뒤에도 영상이 남아 있나요
+- (M3) 삭제 → 실행 취소 → 다시 삭제 → 앱 종료 뒤, 파일이 휴지통에 있나요
+- (M3) 네트워크 드라이브(UNC)에서 삭제할 때 "휴지통이 없어 영구 삭제돼요" 확인이 뜨나요(개발 중에는 관리 공유에 접근할 수 없어 직접 확인하지 못했어요)
+- (M3) OneDrive 사진 폴더의 사진(온라인 전용·로컬 보관 모두)을 지우면 휴지통으로 가고 실행 취소가 되나요(개발 중에는 OneDrive 폴더에서 확인하지 못했어요)
 - 아이폰 12 MP 사진의 첫 화면 시간과 폴더 중간 메모리(위 표와 같은 방법)
 
 ## 라이선스

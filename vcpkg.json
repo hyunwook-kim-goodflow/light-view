@@ -1,10 +1,14 @@
 {
-  "$comment": "libheif's default feature 'hevc' pulls x265 (GPL encoder) and is disabled. libde265 (HEVC decoder) is an unconditional dependency of the libheif port at this baseline, so it has no feature to enable.",
+  "$comment": "libheif's default feature 'hevc' pulls x265 (GPL encoder) and is disabled. libde265 (HEVC decoder) is an unconditional dependency of the libheif port at this baseline, so it has no feature to enable. libjpeg-turbo is used by lv-worker alone (TurboJPEG lossless transforms); libheif's own 'jpeg' feature must stay off (setup-deps.ps1 checks).",
   "name": "light-view",
   "version-string": "0.1.0",
   "dependencies": [
     {
       "name": "libheif",
+      "default-features": false
+    },
+    {
+      "name": "libjpeg-turbo",
       "default-features": false
     }
   ]

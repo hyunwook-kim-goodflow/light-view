@@ -2,17 +2,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod delete;
 mod fullscreen;
 mod input;
 mod instance;
+mod overlay;
 mod placement;
 mod render;
 mod routing;
+mod save;
 mod theme;
 mod timing;
 mod toolbar;
 mod tooltip;
 mod viewer;
+mod watch;
 mod window;
 mod worker;
 

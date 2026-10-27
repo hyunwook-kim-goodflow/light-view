@@ -172,8 +172,15 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
         // Taken, with nothing to open: the sender must not open a window for it either.
         return LRESULT(1);
     }
-    // An unsaved rotation is discarded (M1); `open` takes and drops its own borrow.
-    commands::open(app, hwnd, &path);
+    // While a dialog is open the path waits for it to close (ruling R14), so the answer
+    // still applies to the photo it asked about. Otherwise it opens now; an unsaved
+    // rotation is discarded (M1). Neither holds a borrow across the calls below.
+    let deferred = app
+        .try_borrow_mut()
+        .is_ok_and(|mut a| a.overlay.defer_open(path.clone()));
+    if !deferred {
+        commands::open(app, hwnd, &path);
+    }
     // SAFETY: plain calls on our window; no App borrow is held (both may re-enter).
     unsafe {
         if IsIconic(hwnd).as_bool() {
@@ -187,9 +194,15 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
 /// Set once the window starts closing; later WM_COPYDATA messages are refused.
 static CLOSING: AtomicBool = AtomicBool::new(false);
 
-/// Called when the window handles WM_CLOSE (it is destroyed right after).
+/// Called when the window closes: right before it is destroyed, or once the user chose
+/// to close after a save that is still running.
 pub fn mark_closing() {
     CLOSING.store(true, Ordering::Relaxed);
+}
+
+/// The save a close waited for failed, so the window stays open after all.
+pub fn cancel_closing() {
+    CLOSING.store(false, Ordering::Relaxed);
 }
 
 /// Whether a forwarded path may be taken: not while a WM_CLOSE waits in the queue

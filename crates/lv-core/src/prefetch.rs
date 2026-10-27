@@ -10,6 +10,22 @@ use crate::decode::{decode_file, DecodeError, DecodeLimits, DecodedImage};
 
 pub type DecodeResult = Arc<Result<DecodedImage, DecodeError>>;
 
+/// A file's identity as read right before it was decoded (Windows only).
+#[cfg(windows)]
+pub type Identity = crate::identity::FileIdentity;
+#[cfg(not(windows))]
+pub type Identity = ();
+
+#[cfg(windows)]
+fn capture_identity(path: &Path) -> Option<Identity> {
+    crate::identity::capture(path).ok()
+}
+
+#[cfg(not(windows))]
+fn capture_identity(_path: &Path) -> Option<Identity> {
+    None
+}
+
 pub trait Decode: Send + Sync + 'static {
     fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError>;
 
@@ -32,6 +48,8 @@ impl Decode for FileDecoder {
 
 struct Entry {
     result: DecodeResult,
+    /// The file decoded, as it was just before the decode read it; `None` if unreadable.
+    identity: Option<Identity>,
     bytes: u64,
     last_used: u64,
 }
@@ -42,6 +60,9 @@ struct State {
     wanted: Vec<PathBuf>,
     queue: VecDeque<PathBuf>,
     in_flight: HashSet<PathBuf>,
+    /// In-flight decodes that read a file since changed (`invalidate`): their results
+    /// are dropped.
+    stale: HashSet<PathBuf>,
     tick: u64,
     shutdown: bool,
 }
@@ -56,7 +77,13 @@ impl State {
     }
 
     /// Returns false if the entry was evicted again in the same pass.
-    fn insert(&mut self, path: PathBuf, result: DecodeResult, budget: u64) -> bool {
+    fn insert(
+        &mut self,
+        path: PathBuf,
+        result: DecodeResult,
+        identity: Option<Identity>,
+        budget: u64,
+    ) -> bool {
         let bytes = match result.as_ref() {
             Ok(img) => img.memory_bytes(),
             Err(_) => 0,
@@ -67,6 +94,7 @@ impl State {
             path.clone(),
             Entry {
                 result,
+                identity,
                 bytes,
                 last_used,
             },
@@ -181,10 +209,34 @@ impl Prefetcher {
         self.shared.cond.notify_all();
     }
 
+    /// The file at `path` changed (saved by the app, or by another program): drops its
+    /// cached result, and the result of a decode of it still running, and decodes it
+    /// again if it is wanted.
+    pub fn invalidate(&self, path: &Path) {
+        let mut st = self.shared.lock();
+        st.cache.remove(path);
+        if st.in_flight.contains(path) {
+            // The worker requeues it once the stale decode ends.
+            st.stale.insert(path.to_path_buf());
+        } else if st.wanted.iter().any(|w| w == path) && !st.queue.iter().any(|q| q == path) {
+            st.queue.push_front(path.to_path_buf());
+        }
+        drop(st);
+        self.shared.cond.notify_all();
+    }
+
     pub fn get(&self, path: &Path) -> Option<DecodeResult> {
+        self.get_with_identity(path).map(|(result, _)| result)
+    }
+
+    /// Like `get`, with the identity of the file the result was decoded from, read just
+    /// before the decode: a save or delete compares against the file that was shown.
+    pub fn get_with_identity(&self, path: &Path) -> Option<(DecodeResult, Option<Identity>)> {
         let mut st = self.shared.lock();
         st.touch(path);
-        st.cache.get(path).map(|e| e.result.clone())
+        st.cache
+            .get(path)
+            .map(|e| (e.result.clone(), e.identity.clone()))
     }
 }
 
@@ -220,6 +272,9 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
             }
         };
 
+        // Read before the decoder opens the file: should it change during the decode,
+        // a later save sees a different file and refuses.
+        let identity = capture_identity(&path);
         // A panicking decoder must not kill the worker or leave `path` in flight forever.
         let result: DecodeResult = Arc::new(
             catch_unwind(AssertUnwindSafe(|| decoder.decode(&path)))
@@ -229,8 +284,13 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
         let inserted = {
             let mut st = shared.lock();
             st.in_flight.remove(&path);
-            if st.wanted.contains(&path) && !st.cache.contains_key(&path) {
-                st.insert(path.clone(), result, shared.budget)
+            if st.stale.remove(&path) {
+                if st.wanted.contains(&path) && !st.queue.contains(&path) {
+                    st.queue.push_front(path.clone());
+                }
+                false
+            } else if st.wanted.contains(&path) && !st.cache.contains_key(&path) {
+                st.insert(path.clone(), result, identity, shared.budget)
             } else {
                 false
             }
@@ -404,6 +464,60 @@ mod tests {
         assert!(h.prefetcher.get(&p("b")).is_none());
         assert!(h.prefetcher.get(&p("a")).is_some());
         assert!(h.prefetcher.get(&p("c")).is_some());
+    }
+
+    #[test]
+    fn invalidate_drops_the_cached_result_and_decodes_again() {
+        let h = harness(1, u64::MAX, &[], &[]);
+        h.prefetcher.request(&[p("a"), p("b")]);
+        h.wait_ready(2);
+        h.prefetcher.invalidate(&p("a"));
+        assert!(h.prefetcher.get(&p("a")).is_none());
+        assert!(h.prefetcher.get(&p("b")).is_some());
+        assert_eq!(h.wait_ready(1), vec![p("a")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("b"), p("a")]);
+    }
+
+    #[test]
+    fn invalidate_drops_inflight_result() {
+        let h = harness(1, u64::MAX, &["a"], &[]);
+        h.prefetcher.request(&[p("a")]);
+        assert_eq!(h.wait_started(), p("a"));
+        h.prefetcher.invalidate(&p("a"));
+        h.releases[&p("a")].send(()).unwrap();
+        // The decode that read the old file is dropped; a fresh one is reported.
+        assert_eq!(h.wait_ready(1), vec![p("a")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("a")]);
+        assert_eq!(h.ready_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn identity_is_read_before_the_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, b"before").unwrap();
+        let before = crate::identity::capture(&path).unwrap();
+        let h = harness(1, u64::MAX, &[path.to_str().unwrap()], &[]);
+        h.prefetcher.request(std::slice::from_ref(&path));
+        assert_eq!(h.wait_started(), path);
+        // The file changes while it is being decoded.
+        std::fs::write(&path, b"changed during the decode").unwrap();
+        h.releases[&path].send(()).unwrap();
+        h.wait_ready(1);
+        let (_, identity) = h.prefetcher.get_with_identity(&path).unwrap();
+        assert_eq!(identity, Some(before));
+        assert_ne!(identity, crate::identity::capture(&path).ok());
+    }
+
+    #[test]
+    fn invalidate_of_an_unwanted_path_decodes_nothing() {
+        let h = harness(1, u64::MAX, &[], &[]);
+        h.prefetcher.request(&[p("a")]);
+        h.wait_ready(1);
+        h.prefetcher.invalidate(&p("z"));
+        h.prefetcher.request(&[p("a"), p("b")]);
+        assert_eq!(h.wait_ready(1), vec![p("b")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("b")]);
     }
 
     #[test]

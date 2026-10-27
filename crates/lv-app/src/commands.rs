@@ -1,15 +1,21 @@
 //! Viewer commands from keys, the wheel and the toolbar, plus the messages that drive
 //! the viewer: worker wake-ups, the loading and animation timers, and dropped files.
+//! Also the rotation save: every way of leaving a photo goes through [`leave`], which
+//! asks (or saves) first when the view rotation is unsaved, and saves run on their own
+//! thread ([`start_save`]) and report back with `WM_APP_SAVE_DONE`.
 
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lv_core::command::{command_for_key, Command, Mods};
 use lv_core::decode::DecodeLimits;
+use lv_core::identity;
 use lv_core::listing::first_supported_in;
 use lv_core::prefetch::Prefetcher;
 use lv_core::settings::Settings;
@@ -21,20 +27,38 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, PostMessageW, SetTimer, SetWindowTextW, WM_APP, WM_CLOSE, WM_DROPFILES, WM_KEYDOWN,
-    WM_SYSKEYDOWN, WM_TIMER,
+    KillTimer, PostMessageW, SetTimer, SetWindowTextW, WM_APP, WM_CLOSE, WM_DROPFILES,
+    WM_ENDSESSION, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
+use crate::delete;
 use crate::fullscreen;
 use crate::input;
+use crate::instance;
+use crate::overlay::{
+    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction, TOAST_FILE_CHANGED,
+    TOAST_KEPT_COPY, TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED,
+    TOAST_UNSUPPORTED_FORMAT,
+};
 use crate::routing::RoutingDecoder;
-use crate::viewer::{Redraw, Viewer};
-use crate::window::{invalidate, App};
+use crate::save::{save_rotation, NoWorker, SaveOutcome};
+use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
+use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
+use crate::window::{self, invalidate, App};
+use crate::worker::WorkerPool;
 
 /// Posted by prefetch workers when a decode finished; carries no data.
 pub const WM_APP_IMAGE_READY: u32 = WM_APP + 1;
+/// Posted by a save thread once its `SaveDone` is in `App::save_rx`.
+pub const WM_APP_SAVE_DONE: u32 = WM_APP + 2;
+/// Posted by the recycle thread once a report is in `App::delete_rx`.
+pub const WM_APP_DELETE_DONE: u32 = WM_APP + 3;
 const ANIMATION_TIMER: usize = 2;
 const LOADING_TIMER: usize = 3;
+/// One-shot: a save still running after `LOADING_DELAY_MS` shows "저장하는 중…".
+const SAVING_TIMER: usize = 5;
+/// How long a running save may hold up the end of a Windows session.
+const END_SESSION_WAIT: Duration = Duration::from_secs(5);
 /// How long the previous photo stays up before "불러오는 중…" replaces it.
 const LOADING_DELAY_MS: u32 = 150;
 const PREFETCH_WORKERS: usize = 2;
@@ -50,26 +74,54 @@ impl HwndCell {
     pub fn set(&self, hwnd: HWND) {
         self.0.store(hwnd.0 as isize, Ordering::Release);
     }
+
+    /// Posts `msg` to the window, once there is one.
+    pub fn post(&self, msg: u32) {
+        let h = self.0.load(Ordering::Acquire);
+        if h != 0 {
+            // SAFETY: plain call; posting to a destroyed window just fails.
+            unsafe {
+                let _ = PostMessageW(HWND(h as *mut _), msg, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
 }
 
-/// The viewer with its prefetcher. HEIF workers (one per prefetch thread, ruling R2) start
-/// here, before the window shows; a missing or failing worker only affects HEIF.
-pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> Viewer {
+/// A rotation save in progress. While it runs, nothing else may save, delete or leave
+/// the photo: leaving waits for it ([`leave`]).
+pub struct Saving {
+    /// The save has run longer than `LOADING_DELAY_MS`: "저장하는 중…" is shown.
+    pub overdue: bool,
+}
+
+/// A save thread's report.
+pub struct SaveDone {
+    path: PathBuf,
+    outcome: SaveOutcome,
+    /// The saved file's identity, read right after the save.
+    identity: Option<identity::FileIdentity>,
+}
+
+/// The viewer with its prefetcher, the worker pool and the decode limits (also used to
+/// check saved files). HEIF workers (one per prefetch thread, ruling R2) start here,
+/// before the window shows; a missing or failing worker only affects HEIF and JPEG pixel
+/// rotation.
+pub fn new_viewer(
+    settings: &Settings,
+    hwnd: HwndCell,
+) -> (Viewer, Option<Arc<WorkerPool>>, DecodeLimits) {
     let budget = memory_budget(settings);
     let limits = DecodeLimits {
         max_pixels: max_pixels_for_budget(budget),
     };
     let decoder = RoutingDecoder::start(limits, PREFETCH_WORKERS);
+    let pool = decoder.pool();
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
-        let h = hwnd.0.load(Ordering::Acquire);
-        if h != 0 {
-            // SAFETY: plain call; posting to a destroyed window just fails.
-            unsafe {
-                let _ = PostMessageW(HWND(h as *mut _), WM_APP_IMAGE_READY, WPARAM(0), LPARAM(0));
-            }
-        }
+        hwnd.post(WM_APP_IMAGE_READY);
     });
-    Viewer::new(prefetcher)
+    let mut viewer = Viewer::new(prefetcher);
+    viewer.set_auto_save(settings.auto_save_rotation);
+    (viewer, pool, limits)
 }
 
 /// The decode pixel limit for a prefetch memory budget. Decoding peaks at about twice
@@ -96,6 +148,7 @@ fn memory_budget(settings: &Settings) -> u64 {
 }
 
 /// Opens a file, or the first supported file of a folder. Nothing is moved or deleted.
+/// Every open (start-up, drops, forwarded launches) goes through the save prompt.
 pub fn open(app: &RefCell<App>, hwnd: HWND, path: &Path) {
     let file = if path.is_dir() {
         match first_supported_in(path) {
@@ -105,17 +158,219 @@ pub fn open(app: &RefCell<App>, hwnd: HWND, path: &Path) {
     } else {
         path.to_path_buf()
     };
+    leave(app, hwnd, LeaveReason::Open(file));
+}
+
+/// WM_CLOSE (no dialog open): closes, after the save prompt or save if needed.
+pub fn request_close(app: &RefCell<App>, hwnd: HWND) {
+    leave(app, hwnd, LeaveReason::Close);
+}
+
+/// Every way of leaving the current photo. With an unsaved rotation it shows the save
+/// prompt, or saves first with `auto_save_rotation`; the leave then waits for the answer
+/// or the save. While a save runs, a leave waits for it to end.
+pub fn leave(app: &RefCell<App>, hwnd: HWND, reason: LeaveReason) {
+    let decision = {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        if a.saving.is_some() {
+            if reason == LeaveReason::Close {
+                // Paths forwarded meanwhile open their own window.
+                instance::mark_closing();
+            }
+            a.viewer.defer_leave(reason);
+            return;
+        }
+        a.viewer.before_leave(reason.clone())
+    };
+    match decision {
+        LeaveDecision::Proceed => perform(app, hwnd, reason),
+        LeaveDecision::Ask => {
+            if let Some(target) = current_target(app) {
+                input::show_dialog(app, hwnd, Prompt::SaveRotation, target);
+            }
+        }
+        LeaveDecision::AutoSave => start_save(app, hwnd),
+    }
+}
+
+/// Does what the user asked for once nothing (or nothing more) needs saving.
+fn perform(app: &RefCell<App>, hwnd: HWND, reason: LeaveReason) {
+    let redraw = {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        match reason {
+            LeaveReason::Move(cmd) => a.viewer.apply(cmd),
+            LeaveReason::Open(path) => {
+                delete::cancel_if_pending(&mut a, &path);
+                a.viewer.open(&path);
+                Redraw::Full
+            }
+            LeaveReason::Close => {
+                drop(a);
+                window::close(app, hwnd);
+                return;
+            }
+            LeaveReason::Delete => {
+                drop(a);
+                delete::delete_current(app, hwnd);
+                return;
+            }
+            LeaveReason::Undo => {
+                drop(a);
+                delete::undo(app, hwnd);
+                return;
+            }
+        }
+    };
+    after(app, hwnd, redraw);
+}
+
+/// The current photo, as a dialog's target.
+fn current_target(app: &RefCell<App>) -> Option<DialogTarget> {
+    let a = app.try_borrow().ok()?;
+    Some(DialogTarget {
+        path: a.viewer.current_path()?.to_path_buf(),
+        generation: a.viewer.generation(),
+    })
+}
+
+/// Saves the current photo's rotation on a background thread. Ctrl+S and the Save button
+/// come here directly; leaving comes here after the prompt or with auto-save, and then
+/// waits for the save. Does nothing while another save runs.
+fn start_save(app: &RefCell<App>, hwnd: HWND) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
     };
-    a.viewer.open(&file);
+    if a.saving.is_some() {
+        return;
+    }
+    let Some(request) = a.viewer.save_request() else {
+        // Nothing to save after all: a waiting leave goes ahead.
+        let pending = a.viewer.take_pending_leave();
+        drop(a);
+        if let Some(reason) = pending {
+            perform(app, hwnd, reason);
+        }
+        return;
+    };
+    let Some(id) = request.identity else {
+        // The file could not be read when it was shown.
+        a.viewer.on_save_failed();
+        drop(a);
+        input::show_toast(app, hwnd, |now| Toast::new(TOAST_FILE_CHANGED, now));
+        return;
+    };
+    if a.viewer.closing_after_save() {
+        // Paths forwarded meanwhile open their own window.
+        instance::mark_closing();
+    }
+    a.saving = Some(Saving { overdue: false });
+    let pool = a.pool.clone();
+    let limits = a.decode_limits;
+    let tx = a.save_tx.clone();
     drop(a);
+    let target = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let path = request.path;
+        let save = || match &pool {
+            Some(pool) => save_rotation(&path, &id, request.quarters, &**pool, &limits),
+            None => save_rotation(&path, &id, request.quarters, &NoWorker, &limits),
+        };
+        let outcome = catch_unwind(AssertUnwindSafe(save))
+            .unwrap_or_else(|_| SaveOutcome::Failed("the save panicked".into()));
+        let saved = matches!(
+            outcome,
+            SaveOutcome::Saved | SaveOutcome::SavedAsOrientationTag
+        );
+        let identity = saved.then(|| identity::capture(&path).ok()).flatten();
+        let _ = tx.send(SaveDone {
+            path,
+            outcome,
+            identity,
+        });
+        // SAFETY: plain call; posting to a destroyed window just fails.
+        unsafe {
+            let _ = PostMessageW(
+                HWND(target as *mut _),
+                WM_APP_SAVE_DONE,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    });
+    // SAFETY: plain call on our window's timer.
+    unsafe { SetTimer(hwnd, SAVING_TIMER, LOADING_DELAY_MS, None) };
+}
+
+/// A save ended: the photo is decoded again unrotated and a waiting leave goes ahead;
+/// or it stays rotated, the leave is dropped and a toast says why.
+fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
+    // SAFETY: plain call on our window's timer.
+    unsafe {
+        let _ = KillTimer(hwnd, SAVING_TIMER);
+    }
+    let toast = match &done.outcome {
+        SaveOutcome::Saved => None,
+        SaveOutcome::SavedAsOrientationTag => Some(TOAST_SAVED_AS_TAG.to_owned()),
+        SaveOutcome::Unsupported => Some(TOAST_UNSUPPORTED_FORMAT.to_owned()),
+        SaveOutcome::Changed => Some(TOAST_FILE_CHANGED.to_owned()),
+        SaveOutcome::ReadOnly => Some(TOAST_READ_ONLY.to_owned()),
+        SaveOutcome::Failed(e) => {
+            eprintln!("light-view: could not save {}: {e}", done.path.display());
+            Some(TOAST_SAVE_FAILED.to_owned())
+        }
+        SaveOutcome::KeptCopy(copy) => {
+            let name = copy.file_name().unwrap_or_default().to_string_lossy();
+            Some(format!("{TOAST_KEPT_COPY}{name}"))
+        }
+    };
+    let pending = {
+        let Ok(mut a) = app.try_borrow_mut() else {
+            return;
+        };
+        a.saving = None;
+        if matches!(
+            done.outcome,
+            SaveOutcome::Saved | SaveOutcome::SavedAsOrientationTag
+        ) {
+            a.viewer.on_saved(&done.path, done.identity);
+            a.viewer.take_pending_leave()
+        } else {
+            if a.viewer.closing_after_save() {
+                instance::cancel_closing();
+            }
+            a.viewer.on_save_failed();
+            None
+        }
+    };
+    if let Some(text) = toast {
+        input::show_toast(app, hwnd, |now| Toast::new(&text, now));
+    }
     after(app, hwnd, Redraw::Full);
+    let closing = pending == Some(LeaveReason::Close);
+    if let Some(reason) = pending {
+        perform(app, hwnd, reason);
+    }
+    // A rescan held back by the save runs now (a closing window needs none).
+    if !closing {
+        watch::rescan_if_due(app, hwnd);
+    }
 }
 
 /// Runs a command. `anchor` (view DIPs) is the zoom centre for pointer-driven zooms.
 pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f32)>) {
     match cmd {
+        Command::Next | Command::Prev => leave(app, hwnd, LeaveReason::Move(cmd)),
+        // Ctrl+S and the Save button save without asking.
+        Command::Save => start_save(app, hwnd),
+        Command::Delete => delete::request(app, hwnd),
+        Command::Undo => delete::request_undo(app, hwnd),
+        // The rotation being saved must not change under the save.
+        Command::RotateLeft | Command::RotateRight
+            if app.try_borrow().map_or(true, |a| a.saving.is_some()) => {}
         Command::ToggleFullscreen => fullscreen::toggle(app, hwnd),
         Command::Escape => {
             let Ok(full) = app.try_borrow().map(|a| a.fullscreen.is_some()) else {
@@ -147,7 +402,7 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
 
 /// After the viewer changed: title, toolbar tools (Save comes and goes), the loading
 /// and animation timers and a repaint.
-fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
+pub fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     if redraw == Redraw::None {
         return;
     }
@@ -173,6 +428,82 @@ fn after(app: &RefCell<App>, hwnd: HWND, redraw: Redraw) {
     }
     input::sync_tooltips(app, hwnd);
     invalidate(hwnd);
+    watch::follow_folder(app, hwnd);
+}
+
+/// Acts on a closed dialog or a used toast action. Returns false when the answer closes
+/// the window (now, or once its save ends): a path forwarded while the dialog was open
+/// must then not be opened.
+pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> bool {
+    match event {
+        OverlayEvent::Dialog {
+            prompt: Prompt::SaveRotation,
+            result,
+            dont_ask,
+            target,
+        } => on_save_prompt(app, hwnd, result, dont_ask, &target),
+        OverlayEvent::Dialog {
+            prompt: Prompt::PermanentDelete { .. },
+            result,
+            target,
+            ..
+        } => {
+            delete::on_permanent_answer(app, hwnd, result, &target);
+            true
+        }
+        OverlayEvent::Toast(ToastAction::Undo) => {
+            delete::request_undo(app, hwnd);
+            true
+        }
+    }
+}
+
+/// [저장] saves (and with the checkbox, from now on without asking), [저장 안 함] drops
+/// the rotation, and either then does what the user tried to do; [취소] stays. An answer
+/// about a photo no longer current does nothing.
+fn on_save_prompt(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    result: PromptResult,
+    dont_ask: bool,
+    target: &DialogTarget,
+) -> bool {
+    let stale = current_target(app).as_ref() != Some(target);
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return true;
+    };
+    if stale {
+        a.viewer.cancel_leave();
+        return true;
+    }
+    match result {
+        PromptResult::Save => {
+            if dont_ask {
+                a.settings.auto_save_rotation = true;
+                a.persist_settings();
+                a.viewer.set_auto_save(true);
+            }
+            let closing = a.viewer.closing_after_save();
+            drop(a);
+            start_save(app, hwnd);
+            !closing
+        }
+        PromptResult::Discard => {
+            let redraw = a.viewer.discard_rotation();
+            let pending = a.viewer.take_pending_leave();
+            drop(a);
+            after(app, hwnd, redraw);
+            let closing = pending == Some(LeaveReason::Close);
+            if let Some(reason) = pending {
+                perform(app, hwnd, reason);
+            }
+            !closing
+        }
+        PromptResult::Cancel | PromptResult::Confirm => {
+            a.viewer.cancel_leave();
+            true
+        }
+    }
 }
 
 /// Starts the animation timer for `delay_ms`, or stops it.
@@ -223,6 +554,49 @@ pub fn handle(
                 let _ = KillTimer(hwnd, LOADING_TIMER);
             }
             if app.try_borrow_mut().ok()?.viewer.loading_overdue() == Redraw::Full {
+                invalidate(hwnd);
+            }
+            Some(LRESULT(0))
+        }
+        WM_APP_DELETE_DONE => {
+            delete::on_reports(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_RESCAN_DONE => {
+            watch::on_rescan_done(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_FOLDER_CHANGED => {
+            watch::on_changed(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_SAVE_DONE => {
+            loop {
+                let done = app.try_borrow().ok()?.save_rx.try_recv();
+                let Ok(done) = done else { break };
+                on_save_done(app, hwnd, done);
+            }
+            Some(LRESULT(0))
+        }
+        // Windows is ending the session: the process may be ended once this returns, so
+        // a running save gets up to `END_SESSION_WAIT` to finish its replace (blocking
+        // the shutdown with WM_QUERYENDSESSION would be worse), and so does sending the
+        // pending delete to the Recycle Bin.
+        WM_ENDSESSION if wparam.0 != 0 => {
+            let mut a = app.try_borrow_mut().ok()?;
+            if a.saving.is_some() {
+                let _ = a.save_rx.recv_timeout(END_SESSION_WAIT);
+            }
+            a.deleter.commit_all(END_SESSION_WAIT);
+            Some(LRESULT(0))
+        }
+        WM_TIMER if wparam.0 == SAVING_TIMER => {
+            // SAFETY: plain call on our window's timer (one-shot).
+            unsafe {
+                let _ = KillTimer(hwnd, SAVING_TIMER);
+            }
+            if let Some(s) = &mut app.try_borrow_mut().ok()?.saving {
+                s.overdue = true;
                 invalidate(hwnd);
             }
             Some(LRESULT(0))

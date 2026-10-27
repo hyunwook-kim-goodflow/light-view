@@ -3,7 +3,7 @@ name = "lv-worker"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
-description = "light-view's sandboxed HEIF decode worker (stdin requests, stdout responses)."
+description = "light-view's sandboxed worker: HEIF decoding and lossless JPEG rotation (stdin requests, stdout responses)."
 
 [[bin]]
 name = "lv-worker"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 lv-core = { path = "../lv-core" }
 lv-heif = { path = "../lv-heif" }
 lv-ipc = { path = "../lv-ipc" }
+lv-jpegtran = { path = "../lv-jpegtran" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

@@ -251,10 +251,12 @@ name = "lv-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "lv-core",
  "lv-ipc",
  "tempfile",
  "windows",
+ "windows-core",
  "winresource",
 ]
 
@@ -276,6 +278,7 @@ name = "lv-heif"
 version = "0.1.0"
 dependencies = [
  "libheif-rs",
+ "lv-core",
  "lv-ipc",
 ]
 
@@ -284,12 +287,21 @@ name = "lv-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "lv-jpegtran"
+version = "0.1.0"
+dependencies = [
+ "lv-core",
+ "lv-ipc",
+]
+
+[[package]]
 name = "lv-worker"
 version = "0.1.0"
 dependencies = [
  "lv-core",
  "lv-heif",
  "lv-ipc",
+ "lv-jpegtran",
  "windows",
 ]
 

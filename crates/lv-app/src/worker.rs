@@ -1,16 +1,24 @@
-//! Pool of sandboxed `lv-worker.exe` processes that decode HEIF files for the viewer.
+//! Pool of sandboxed `lv-worker.exe` processes that decode HEIF files and rotate JPEGs
+//! losslessly for the viewer.
 //!
-//! Each slot holds at most one worker (see [`sandbox`]). A call takes an idle slot, starts a
-//! worker in it if needed, sends one request and waits for the answer on a channel fed by
-//! the worker's reader thread (ruling R4): if no matching answer arrives within the timeout
-//! (10 s), or the worker dies or breaks the protocol, its Job is terminated, the slot is
-//! emptied and the call fails with `Corrupt("작업자가 응답하지 않아요")`; the next call starts
-//! a fresh worker. A worker that died while idle, after answering, is replaced before the
-//! next request without failing it.
+//! Decodes share the pool's long-lived workers. Each JPEG rotation runs in a worker of
+//! its own, started for it and ended after it ([`WorkerPool::single_use`]), so a worker
+//! that a hostile file took over cannot answer a rotation (ruling R21).
+//!
+//! Each slot holds at most one worker (see [`sandbox`]). A call ([`WorkerPool::request`])
+//! takes an idle slot, starts a worker in it if needed, sends one request and waits for the
+//! answer on a channel fed by the worker's reader thread: if no matching answer arrives
+//! within the request's deadline (ruling R4: 10 s for a decode, 10 s + 10 s per 100 MP for
+//! a rotation), or the worker dies or breaks the protocol (an answer of the wrong kind
+//! included), its Job is terminated, the slot is emptied and the call fails with
+//! `PoolError::WorkerUnavailable` (a decode with `Corrupt("작업자가 응답하지 않아요")`);
+//! the next call starts a fresh worker. A worker that
+//! died while idle, after answering, is replaced before the next request without failing
+//! it. Decodes and rotations follow the same rules throughout.
 //!
 //! A worker counts as started only once it has given a valid answer: failing to spawn, or
 //! dying, hanging or breaking the protocol on its first request, is a start failure, and
-//! after three in a row the slot gives up. Once every slot has, `decode_heif` answers
+//! after three in a row the slot gives up. Once every slot has, every call answers
 //! `Unsupported` at once.
 //!
 //! Only a worker that was already dead or stuck *before it took its request* (it had exited
@@ -22,26 +30,28 @@
 //! When the app exits, [`WorkerPool::shutdown`] ends every worker, busy ones included, so
 //! no prefetch thread is left waiting out a hung worker's timeout.
 
+mod protocol;
 mod sandbox;
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
-use lv_ipc::{
-    max_request_data, read_response, write_request, FailKind, IpcError, Request, Response,
-};
+use lv_core::decode::DecodeError;
+use lv_ipc::{read_response, write_request, IpcError, Request, Response};
 
+use protocol::{request_data_cap, response_cap, to_request, Expect};
+pub use protocol::{PoolError, PoolRequest, Reply};
 use sandbox::{log, terminate_job, Sandboxed, StdinMonitor};
 
-/// How long a worker may take to answer one request, and a caller may wait for a free slot.
+/// How long a worker may take to decode one file (ruling R4), and a caller may wait for a
+/// free slot.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
@@ -50,8 +60,6 @@ const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
 const MAX_LOG_LINE: usize = 4096;
 /// How long a failed first request waits for the writer thread to report its write.
 const WRITE_SETTLE: Duration = Duration::from_secs(1);
-
-type Decoded = (u32, u32, Vec<u8>);
 
 pub struct WorkerPool {
     exe: PathBuf,
@@ -66,6 +74,12 @@ pub struct WorkerPool {
     state: Mutex<PoolState>,
     slot_freed: Condvar,
     next_id: AtomicU64,
+    /// Single-use workers start without the best-effort mitigations (sticky; set only
+    /// when one was dead before it took its request).
+    single_use_degraded: AtomicBool,
+    /// Pid of every single-use worker started (tests).
+    #[cfg(test)]
+    single_use_pids: Mutex<Vec<u32>>,
 }
 
 struct PoolState {
@@ -147,6 +161,9 @@ impl WorkerPool {
             }),
             slot_freed: Condvar::new(),
             next_id: AtomicU64::new(1),
+            single_use_degraded: AtomicBool::new(false),
+            #[cfg(test)]
+            single_use_pids: Mutex::new(Vec::new()),
         };
         let slots: Vec<Slot> = (0..size)
             .map(|_| {
@@ -159,27 +176,99 @@ impl WorkerPool {
         pool
     }
 
-    /// Decodes a HEIF file in a worker to premultiplied sRGB BGRA8 (width, height, pixels).
-    /// A file larger than the worker accepts ([`request_data_cap`]) is `FileTooLarge`
-    /// without being sent: the worker would refuse it unread and die, which would count
-    /// against its slot.
-    pub fn decode_heif(&self, data: Vec<u8>) -> Result<Decoded, DecodeError> {
-        if data.len() as u64 > self.data_cap {
-            return Err(DecodeError::FileTooLarge {
-                bytes: data.len() as u64,
-            });
+    /// Sends one request to a worker and waits at most `deadline` for its answer (ruling
+    /// R4 gives the deadlines: [`DEFAULT_TIMEOUT`] for a decode, [`rotate_deadline`](protocol::rotate_deadline) for a
+    /// rotation). A file larger than the worker accepts ([`request_data_cap`]) is
+    /// `FileTooLarge` and a rotation by other than 1 to 3 quarter turns is `Corrupt`, both
+    /// without being sent: the worker would refuse the request unread and die, which would
+    /// count against its slot.
+    pub fn request(&self, req: PoolRequest, deadline: Duration) -> Result<Reply, PoolError> {
+        let bytes = match &req {
+            PoolRequest::DecodeHeif { data } | PoolRequest::RotateJpeg { data, .. } => {
+                data.len() as u64
+            }
+        };
+        if bytes > self.data_cap {
+            return Err(DecodeError::FileTooLarge { bytes }.into());
+        }
+        let single_use = matches!(req, PoolRequest::RotateJpeg { .. });
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (request, expect) = to_request(req, id, self.max_pixels)?;
+        if single_use {
+            return self.single_use(request, expect, deadline);
         }
         loop {
             let mut guard = self.acquire()?;
             if self.ensure_worker(guard.slot()) {
-                return self.request(guard.slot(), data);
+                return self.exchange(guard.slot(), request, expect, deadline);
             }
             if self.is_closed() {
-                return Err(DecodeError::Unsupported);
+                return Err(DecodeError::Unsupported.into());
             }
             log("a worker slot gave up after repeated start failures");
             guard.give_up();
         }
+    }
+
+    /// Runs `request` in a sandboxed worker started for it alone (same sandbox as the
+    /// pool's) and ended right after, so it never sees any other file (ruling R21). JPEG
+    /// rotations go here: a pool worker taken over by a hostile HEIF it decoded must not
+    /// be the one that answers a later rotation. The rules of [`exchange`](Self::exchange)
+    /// apply; a worker that was dead before it took its request makes later single-use
+    /// workers start without the best-effort mitigations, as a slot does.
+    fn single_use(
+        &self,
+        request: Request,
+        expect: Expect,
+        deadline: Duration,
+    ) -> Result<Reply, PoolError> {
+        if self.is_closed() {
+            return Err(DecodeError::Unsupported.into());
+        }
+        let mitigations = !self.single_use_degraded.load(Ordering::Relaxed);
+        let args: Vec<&str> = self.every_args.iter().map(String::as_str).collect();
+        let worker = match Worker::start(&self.exe, self.max_pixels, &args, mitigations) {
+            Ok(worker) => worker,
+            Err(e) => {
+                log(&format!("cannot start {}: {e}", self.exe.display()));
+                return Err(PoolError::WorkerUnavailable);
+            }
+        };
+        let pid = worker.sandboxed.pid;
+        {
+            let mut state = self.lock();
+            if state.closed {
+                return Err(DecodeError::Unsupported.into()); // dropping `worker` ends it
+            }
+            state.jobs.retain(|(_, job)| job.strong_count() > 0);
+            state
+                .jobs
+                .push((pid, Arc::downgrade(&worker.sandboxed.job)));
+        }
+        #[cfg(test)]
+        self.single_use_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(pid);
+        let mut slot = Slot {
+            worker: Some(worker),
+            started_once: true,
+            degraded: !mitigations,
+            ..Slot::default()
+        };
+        let result = self.exchange(&mut slot, request, expect, deadline);
+        if slot.degraded && mitigations {
+            self.single_use_degraded.store(true, Ordering::Relaxed);
+        }
+        if let Some(worker) = slot.worker.take() {
+            terminate_job(&worker.sandboxed.job, pid);
+            if !worker.sandboxed.wait_for_exit(WRITE_SETTLE) {
+                log(&format!(
+                    "worker {pid} has not exited after its one request"
+                ));
+            }
+        }
+        result
     }
 
     /// Ends every worker now, including ones busy with a request (whose callers then get an
@@ -215,12 +304,12 @@ impl WorkerPool {
     }
 
     /// Takes an idle slot, waiting at most `timeout` for one.
-    fn acquire(&self) -> Result<SlotGuard<'_>, DecodeError> {
+    fn acquire(&self) -> Result<SlotGuard<'_>, PoolError> {
         let deadline = Instant::now() + self.timeout;
         let mut state = self.lock();
         loop {
             if state.live == 0 || state.closed {
-                return Err(DecodeError::Unsupported);
+                return Err(DecodeError::Unsupported.into());
             }
             if let Some(slot) = state.idle.pop() {
                 return Ok(SlotGuard {
@@ -231,7 +320,7 @@ impl WorkerPool {
             let now = Instant::now();
             if now >= deadline {
                 log("no worker slot became free in time");
-                return Err(DecodeError::Corrupt(NOT_RESPONDING.into()));
+                return Err(PoolError::WorkerUnavailable);
             }
             state = self
                 .slot_freed
@@ -295,21 +384,27 @@ impl WorkerPool {
         }
     }
 
-    /// Sends one request to the slot's worker and waits for its answer. Anything other than
-    /// a matching answer ends the worker.
-    fn request(&self, slot: &mut Slot, data: Vec<u8>) -> Result<Decoded, DecodeError> {
+    /// Sends `request` to the slot's worker and waits up to `timeout` for its answer.
+    /// Anything other than a matching answer of the `expect`ed kind ends the worker.
+    fn exchange(
+        &self,
+        slot: &mut Slot,
+        request: Request,
+        expect: Expect,
+        timeout: Duration,
+    ) -> Result<Reply, PoolError> {
         let Some(worker) = slot.worker.as_mut() else {
-            return Err(DecodeError::Corrupt(NOT_RESPONDING.into()));
+            return Err(PoolError::WorkerUnavailable);
         };
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let bytes = data.len() as u64;
-        let request = Request::DecodeHeif {
-            id,
-            max_pixels: self.max_pixels,
-            data,
+        let id = request.id();
+        let bytes = match &request {
+            Request::DecodeHeif { data, .. } | Request::RotateJpeg { data, .. } => {
+                data.len() as u64
+            }
+            Request::Shutdown => 0,
         };
         let dead_before_send = worker.sandboxed.has_exited();
-        let deadline = Instant::now() + self.timeout;
+        let deadline = Instant::now() + timeout;
         // Whether the writer put the whole request in the pipe, once it has said so.
         let mut wrote = None;
         let outcome = if worker.requests.send(request).is_err() {
@@ -323,17 +418,19 @@ impl WorkerPool {
                             // Our own encoding refused it before writing a byte: the worker
                             // is untouched, so no strike and no degrade.
                             log(&format!("request {id} ({bytes} bytes) cannot be encoded"));
-                            return Err(DecodeError::FileTooLarge { bytes });
+                            return Err(DecodeError::FileTooLarge { bytes }.into());
                         }
                         outcome => wrote = Some(outcome == WriteOutcome::Sent),
                     },
                     // A late report for an earlier request.
                     Ok(Event::Written { .. }) => {}
-                    Ok(Event::Response(Ok(Some(response)))) => break self.check(id, response),
+                    Ok(Event::Response(Ok(Some(response)))) => {
+                        break self.check(id, expect, response)
+                    }
                     Ok(Event::Response(Ok(None))) => break Err("the worker exited".to_string()),
                     Ok(Event::Response(Err(e))) => break Err(format!("protocol error: {e}")),
                     Err(RecvTimeoutError::Timeout) => {
-                        break Err(format!("no answer within {:?}", self.timeout))
+                        break Err(format!("no answer within {timeout:?}"))
                     }
                     Err(RecvTimeoutError::Disconnected) => {
                         break Err("the worker's threads are gone".to_string())
@@ -351,12 +448,25 @@ impl WorkerPool {
                 // `shutdown` ended the worker: not its fault, nothing to count.
                 log(&format!("request {id} ended by shutdown: {why}"));
                 slot.worker = None;
-                Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
+                Err(PoolError::WorkerUnavailable)
             }
             Err(why) => {
                 let (pid, answered) = (worker.sandboxed.pid, worker.answered);
+                // End the worker before looking into its stdin pipe: while a live worker is
+                // blocked reading stdin (one that answered wrongly and went on, say),
+                // PeekNamedPipe on our copy of that read end waits for the read to finish.
+                // If it will not end, its pipe cannot be inspected: assume it took the
+                // request, as `took_request` does.
+                terminate_job(&worker.sandboxed.job, pid);
+                let exited = worker.sandboxed.wait_for_exit(WRITE_SETTLE);
+                if !exited {
+                    log(&format!(
+                        "worker {pid} has not exited after TerminateJobObject"
+                    ));
+                }
                 // Checked before the worker (and with it the stdin monitor) is dropped.
-                let degrade = !answered && (dead_before_send || !took_request(worker, id, wrote));
+                let degrade =
+                    !answered && (dead_before_send || (exited && !took_request(worker, id, wrote)));
                 slot.worker = None; // terminates its Job
                 if answered {
                     log(&format!("worker {pid} dropped: {why}"));
@@ -364,35 +474,17 @@ impl WorkerPool {
                     let why = format!("worker {pid} failed its first request: {why}");
                     start_failed(slot, &why, degrade);
                 }
-                Err(DecodeError::Corrupt(NOT_RESPONDING.into()))
+                Err(PoolError::WorkerUnavailable)
             }
         }
     }
 
-    /// Maps the answer to request `id`; `Err` means the worker broke the protocol.
-    fn check(&self, id: u64, response: Response) -> Result<Result<Decoded, DecodeError>, String> {
-        match response {
-            Response::Image {
-                id: got,
-                width,
-                height,
-                bgra,
-            } if got == id => {
-                if u64::from(width) * u64::from(height) > self.max_pixels {
-                    Err(format!("{width}x{height} image is over the pixel limit"))
-                } else {
-                    Ok(Ok((width, height, bgra)))
-                }
-            }
-            Response::Failed { id: got, kind } if got == id => Ok(Err(match kind {
-                FailKind::TooLarge { width, height } => DecodeError::TooLarge { width, height },
-                FailKind::Corrupt(msg) => DecodeError::Corrupt(msg),
-                FailKind::Unsupported => DecodeError::Unsupported,
-            })),
-            Response::Image { id: got, .. } | Response::Failed { id: got, .. } => {
-                Err(format!("answer for request {got}, expected {id}"))
-            }
-        }
+    #[cfg(test)]
+    fn single_use_pids(&self) -> Vec<u32> {
+        self.single_use_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     #[cfg(test)]
@@ -485,18 +577,6 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
-/// Largest file a worker accepts in a request: lv-core's file size limit (ruling R10),
-/// clamped to what one frame carries. The worker derives its own cap from the same rule.
-fn request_data_cap(max_pixels: u64) -> u64 {
-    max_request_data(max_file_bytes(&DecodeLimits { max_pixels }))
-}
-
-/// Largest response the app accepts: an `N`-pixel BGRA image plus room for the fixed fields
-/// (ruling R10).
-fn response_cap(max_pixels: u64) -> u64 {
-    max_pixels.saturating_mul(4).saturating_add(64 * 1024)
-}
-
 impl Worker {
     /// Spawns a sandboxed worker with its stderr, reader and writer threads. The threads end
     /// when the process does (its pipes close) or the `Worker` is dropped.
@@ -534,10 +614,7 @@ impl Worker {
         named("writer")
             .spawn(move || {
                 for request in request_rx {
-                    let id = match &request {
-                        Request::DecodeHeif { id, .. } => *id,
-                        Request::Shutdown => 0,
-                    };
+                    let id = request.id();
                     // lv-ipc validates a message before writing any of it, so InvalidInput
                     // leaves the pipe untouched and the writer can go on.
                     let outcome = match write_request(&mut stdin, &request) {
@@ -626,6 +703,10 @@ struct WorkerInfo {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    use lv_core::decode::DecodeLimits;
+
+    use super::protocol::rotate_deadline;
 
     use std::time::Instant;
 
@@ -907,7 +988,8 @@ pub(crate) mod tests {
         // Skip the pool's own size check so the writer meets a request it cannot encode.
         pool.data_cap = u64::MAX;
         let pid = single_worker(&pool).pid;
-        let over = lv_ipc::MAX_REQUEST_DATA + 1;
+        // One byte more than a DecodeHeif frame (16 fixed bytes) carries.
+        let over = lv_ipc::MAX_PAYLOAD - 16 + 1;
         let start = Instant::now();
         match pool.decode_heif(vec![0u8; over as usize]) {
             Err(DecodeError::FileTooLarge { bytes }) => assert_eq!(bytes, over),
@@ -1104,6 +1186,293 @@ pub(crate) mod tests {
         }
         .expect("GetProcessMitigationPolicy");
         flags & 1 == 1
+    }
+
+    fn jpeg_sample(name: &str) -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/jpeg")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn rotate_request(quarters: u8, name: &str) -> PoolRequest {
+        PoolRequest::RotateJpeg {
+            quarters,
+            data: jpeg_sample(name),
+        }
+    }
+
+    fn assert_rotated(result: Result<Reply, PoolError>, dims: (u32, u32)) -> Vec<u8> {
+        match result {
+            Ok(Reply::Bytes { data }) => {
+                let info = lv_core::jpeg_check::inspect(&data).expect("a valid JPEG");
+                assert_eq!((u32::from(info.width), u32::from(info.height)), dims);
+                data
+            }
+            Ok(Reply::Image { width, height, .. }) => {
+                panic!("expected Bytes, got a {width}x{height} image")
+            }
+            Err(e) => panic!("expected Bytes, got {e}"),
+        }
+    }
+
+    fn assert_pool_not_responding(result: Result<Reply, PoolError>) {
+        match result {
+            Err(PoolError::WorkerUnavailable) => {}
+            Err(e) => panic!("expected WorkerUnavailable, got {e}"),
+            Ok(_) => panic!("expected an error, got a reply"),
+        }
+    }
+
+    #[test]
+    fn rotate_request_roundtrip() {
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        let deadline = rotate_deadline(64 * 32);
+        let mut turned = jpeg_sample("gradient-64x32.jpg");
+        for turn in 1..=4 {
+            let request = PoolRequest::RotateJpeg {
+                quarters: 1,
+                data: turned,
+            };
+            let dims = if turn % 2 == 1 { (32, 64) } else { (64, 32) };
+            turned = assert_rotated(pool.request(request, deadline), dims);
+        }
+        assert_rotated(
+            pool.request(rotate_request(2, "gradient-64x32.jpg"), deadline),
+            (64, 32),
+        );
+        assert_rotated(
+            pool.rotate_jpeg(3, jpeg_sample("gradient-64x32.jpg")),
+            (32, 64),
+        );
+        // Decoding goes through the pool's worker, which no rotation used.
+        assert_decodes(&pool);
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        let rotations = pool.single_use_pids();
+        assert_eq!(rotations.len(), 6);
+        assert!(!rotations.contains(&pid));
+    }
+
+    /// Whether a process with this pid is still running.
+    fn alive(pid: u32) -> bool {
+        // SAFETY: plain call; the handle is owned by `Process` and closed on drop.
+        match unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) } {
+            Ok(handle) => !Process(handle).wait_for_exit(Duration::ZERO),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn each_rotation_runs_in_a_fresh_worker_that_ends_after_it() {
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pool_pid = single_worker(&pool).pid;
+        assert_decodes(&pool);
+        for _ in 0..2 {
+            assert_rotated(
+                pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
+                (32, 64),
+            );
+        }
+        let rotations = pool.single_use_pids();
+        assert_eq!(rotations.len(), 2);
+        assert_ne!(rotations[0], rotations[1], "two rotations, two workers");
+        for pid in &rotations {
+            assert_ne!(*pid, pool_pid, "a pool worker rotated");
+            assert!(!alive(*pid), "worker {pid} outlived its rotation");
+        }
+        // The pool's worker is still the one that decoded, and still serves decodes.
+        assert_eq!(single_worker(&pool).pid, pool_pid);
+        assert_decodes(&pool);
+        assert_eq!(single_worker(&pool).pid, pool_pid);
+    }
+
+    #[test]
+    fn single_use_worker_dead_before_its_request_degrades_later_ones() {
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            0,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &[],
+            &["--test-mode=die-at-start"],
+        );
+        assert_pool_not_responding(pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")));
+        assert!(pool.single_use_degraded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rotate_failures_are_answers_not_worker_faults() {
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        assert!(matches!(
+            pool.rotate_jpeg(1, jpeg_sample("gradient-65x33.jpg")),
+            Err(PoolError::NotPerfect)
+        ));
+        let mut broken = jpeg_sample("gradient-64x32.jpg");
+        let len = broken.len();
+        broken[len - 40..len - 2].fill(0xFF);
+        assert!(matches!(
+            pool.rotate_jpeg(1, broken),
+            Err(PoolError::Failed(DecodeError::Corrupt(_)))
+        ));
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+    }
+
+    #[test]
+    fn rotate_is_checked_before_sending() {
+        // 64x32 is 2048 pixels.
+        let pool = WorkerPool::start(worker_exe(), 1, 2047);
+        let pid = single_worker(&pool).pid;
+        assert!(matches!(
+            pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
+            Err(PoolError::Failed(DecodeError::TooLarge {
+                width: 64,
+                height: 32
+            }))
+        ));
+        assert!(matches!(
+            pool.rotate_jpeg(1, b"not a jpeg".to_vec()),
+            Err(PoolError::Failed(DecodeError::Corrupt(_)))
+        ));
+        for quarters in [0, 4] {
+            assert!(matches!(
+                pool.request(
+                    rotate_request(quarters, "gradient-64x32.jpg"),
+                    rotate_deadline(1)
+                ),
+                Err(PoolError::Failed(DecodeError::Corrupt(_)))
+            ));
+        }
+        // Nothing reached the worker.
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+    }
+
+    /// `name` with an MPF APP2 segment right after its APP0.
+    fn with_mpf(name: &str) -> Vec<u8> {
+        let jpeg = jpeg_sample(name);
+        let app0_end = 4 + usize::from(u16::from_be_bytes([jpeg[4], jpeg[5]]));
+        let mpf = b"MPF\0MM\0\x2a\0\0\0\x08";
+        let mut out = jpeg[..app0_end].to_vec();
+        out.extend_from_slice(&[0xFF, 0xE2, 0, (mpf.len() + 2) as u8]);
+        out.extend_from_slice(mpf);
+        out.extend_from_slice(&jpeg[app0_end..]);
+        out
+    }
+
+    #[test]
+    fn rotate_refuses_trailing_data_before_sending() {
+        // Ruling R7: TurboJPEG would drop everything after EOI.
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        let mut trailer = jpeg_sample("gradient-64x32.jpg");
+        trailer.extend_from_slice(&jpeg_sample("gradient-64x32.jpg"));
+        let mut truncated = jpeg_sample("gradient-64x32.jpg");
+        truncated.truncate(truncated.len() - 2);
+        for data in [trailer, with_mpf("gradient-64x32.jpg"), truncated] {
+            assert!(matches!(
+                pool.rotate_jpeg(1, data),
+                Err(PoolError::HasTrailingData)
+            ));
+        }
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+        // A plain JPEG still rotates.
+        assert_rotated(
+            pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")),
+            (32, 64),
+        );
+    }
+
+    #[test]
+    fn worker_refusal_of_trailing_data_is_an_answer() {
+        // Sent past the app's own check: the worker refuses too, as an answer.
+        let pool = WorkerPool::start(worker_exe(), 1, MAX_PIXELS);
+        let pid = single_worker(&pool).pid;
+        let mut data = jpeg_sample("gradient-64x32.jpg");
+        data.push(0);
+        let request = PoolRequest::RotateJpeg { quarters: 1, data };
+        assert!(matches!(
+            pool.request(request, rotate_deadline(64 * 32)),
+            Err(PoolError::HasTrailingData)
+        ));
+        assert_eq!(single_worker(&pool).pid, pid);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+    }
+
+    #[test]
+    fn wrong_reply_kind_is_protocol_failure() {
+        // A decode in the pool's worker.
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            1,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &["--test-mode=wrong-kind"],
+            &[],
+        );
+        let wrong = Process::open(single_worker(&pool).pid);
+        let decode = PoolRequest::DecodeHeif { data: sample() };
+        assert_pool_not_responding(pool.request(decode, Duration::from_secs(10)));
+        assert!(wrong.wait_for_exit(Duration::from_secs(5)), "not killed");
+        // It read the request and answered: a start failure, not a degrade.
+        assert_eq!(pool.slot_states(), vec![(1, false)]);
+        assert_decodes(&pool);
+        assert_eq!(pool.slot_states(), vec![(0, false)]);
+
+        // A rotation in its own worker.
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            0,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &[],
+            &["--test-mode=wrong-kind"],
+        );
+        let rotate = rotate_request(1, "gradient-64x32.jpg");
+        assert_pool_not_responding(pool.request(rotate, Duration::from_secs(10)));
+        let [pid] = pool.single_use_pids()[..] else {
+            panic!("one rotation worker expected");
+        };
+        assert!(!alive(pid), "not killed");
+        assert!(!pool.single_use_degraded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rotate_crash_after_delivery_does_not_degrade() {
+        let pool = WorkerPool::start_with(
+            worker_exe(),
+            0,
+            MAX_PIXELS,
+            Duration::from_secs(10),
+            &[],
+            &["--test-mode=crash"],
+        );
+        assert_pool_not_responding(pool.rotate_jpeg(1, jpeg_sample("gradient-64x32.jpg")));
+        let [pid] = pool.single_use_pids()[..] else {
+            panic!("one rotation worker expected");
+        };
+        assert!(!alive(pid));
+        assert!(
+            !pool.single_use_degraded.load(Ordering::Relaxed),
+            "a crash while rotating weakened the sandbox"
+        );
+    }
+
+    #[test]
+    fn rotate_deadline_grows_with_megapixels() {
+        assert_eq!(rotate_deadline(0), Duration::from_secs(10));
+        // 10 s per 100 MP is 100 ns per pixel.
+        assert_eq!(
+            rotate_deadline(64 * 32),
+            Duration::from_nanos(10_000_204_800)
+        );
+        assert_eq!(rotate_deadline(100_000_000), Duration::from_secs(20));
+        assert_eq!(rotate_deadline(250_000_000), Duration::from_secs(35));
+        assert_eq!(rotate_deadline(u64::MAX), rotate_deadline(u64::MAX - 1));
     }
 
     #[test]

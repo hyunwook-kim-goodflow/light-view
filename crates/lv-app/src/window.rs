@@ -2,8 +2,12 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
+use lv_core::decode::DecodeLimits;
 use lv_core::settings::{save_settings, Settings};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -24,22 +28,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW,
 };
 
-use crate::commands::{self, HwndCell};
+use crate::commands::{self, HwndCell, SaveDone, Saving};
+use crate::delete::{CommitReport, Deleter, ShellTrash};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
+use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::viewer::{Scene, Viewer};
+use crate::watch::Watching;
+use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
 const LOADING: &str = "불러오는 중…";
+const SAVING: &str = "저장하는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
+/// How long the (already hidden) app waits at exit for the Recycle Bin.
+const EXIT_COMMIT_WAIT: Duration = Duration::from_secs(10);
 
 pub struct App {
     renderer: Option<Renderer>,
@@ -58,6 +69,22 @@ pub struct App {
     pub dip: f32,
     icon_family: &'static str,
     pub pointer: Pointer,
+    pub overlay: Overlay,
+    /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
+    pub pool: Option<Arc<WorkerPool>>,
+    /// The prefetcher's decode limits; a save checks its result within them.
+    pub decode_limits: DecodeLimits,
+    /// The rotation save running in the background, if any (one at a time).
+    pub saving: Option<Saving>,
+    /// Save threads report here, then post `WM_APP_SAVE_DONE`.
+    pub save_tx: Sender<SaveDone>,
+    pub save_rx: Receiver<SaveDone>,
+    /// Deletes: one pending (undoable), earlier ones sent to the Recycle Bin.
+    pub deleter: Deleter,
+    /// Recycle results, announced with `WM_APP_DELETE_DONE`.
+    pub delete_rx: Receiver<CommitReport>,
+    /// The shown folder's change watch.
+    pub watching: Watching,
 }
 
 pub fn run(
@@ -66,9 +93,17 @@ pub fn run(
     settings_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let hwnd_cell = HwndCell::default();
+    let (viewer, pool, decode_limits) = commands::new_viewer(&settings, hwnd_cell.clone());
+    let (save_tx, save_rx) = channel();
+    let (delete_tx, delete_rx) = channel();
+    let post = hwnd_cell.clone();
+    let trash = ShellTrash::new(Box::new(move |path, result| {
+        let _ = delete_tx.send((path, result));
+        post.post(commands::WM_APP_DELETE_DONE);
+    }));
     let app = RefCell::new(App {
         renderer: None,
-        viewer: commands::new_viewer(&settings, hwnd_cell.clone()),
+        viewer,
         uploaded: None,
         fullscreen: None,
         dark: system_prefers_dark(),
@@ -79,6 +114,15 @@ pub fn run(
         dip: 1.0,
         icon_family: "",
         pointer: Pointer::default(),
+        overlay: Overlay::default(),
+        pool,
+        decode_limits,
+        saving: None,
+        save_tx,
+        save_rx,
+        deleter: Deleter::new(Box::new(trash)),
+        delete_rx,
+        watching: Watching::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -168,6 +212,8 @@ pub fn run(
             DispatchMessageW(&msg);
         }
     }
+    // The window is gone: the pending delete goes to the Recycle Bin now.
+    app.borrow_mut().deleter.commit_all(EXIT_COMMIT_WAIT);
     Ok(())
 }
 
@@ -221,6 +267,11 @@ impl App {
         self.viewer.set_view(view, dip);
     }
 
+    /// Client area size in DIPs.
+    pub fn client(&self) -> (f32, f32) {
+        self.client_dips
+    }
+
     /// The image area: the client area above a pinned toolbar.
     fn view_dips(&self) -> (f32, f32) {
         let (w, h) = self.client_dips;
@@ -266,10 +317,13 @@ impl App {
             .map(toolbar::zoom_text)
             .unwrap_or_default();
         let (view_w, view_h) = self.view_dips();
+        let now_ms = self.pointer.now_ms();
+        let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
-        let loading = self.viewer.loading();
+        let saving = self.saving.as_ref().is_some_and(|s| s.overdue);
+        let loading = self.viewer.loading() && !saving;
         let mut drew_image = false;
         match self.viewer.scene() {
             // The previous photo stays up while the next one loads.
@@ -280,8 +334,10 @@ impl App {
             Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
         }
-        if loading {
-            draw_loading_pill(r, p, self.dark, (view_w, view_h));
+        if saving {
+            draw_pill(r, p, self.dark, (view_w, view_h), SAVING);
+        } else if loading {
+            draw_pill(r, p, self.dark, (view_w, view_h), LOADING);
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -294,6 +350,15 @@ impl App {
             };
             toolbar::draw(r, &view);
         }
+        let view = OverlayView {
+            client: self.client_dips,
+            pinned: pinned_bar,
+            palette: p,
+            dark: self.dark,
+            icon_family: self.icon_family,
+            now_ms,
+        };
+        overlay::draw(r, &mut self.overlay, &view);
         match r.end() {
             Ok(()) if drew_image => crate::timing::first_image_presented(),
             Ok(()) => {}
@@ -314,7 +379,7 @@ impl App {
         self.persist_settings();
     }
 
-    fn persist_settings(&self) {
+    pub fn persist_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = save_settings(path, &self.settings) {
                 eprintln!("light-view: could not save settings: {e}");
@@ -323,11 +388,11 @@ impl App {
     }
 }
 
-/// A small "불러오는 중…" pill centred in the image area: surface fill, plus a
-/// hairline border in dark mode (no shadows there).
-fn draw_loading_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32)) {
+/// A small "불러오는 중…" or "저장하는 중…" pill centred in the image area: surface
+/// fill, plus a hairline border in dark mode (no shadows there).
+fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32), text: &str) {
     let run = TextRun {
-        text: LOADING,
+        text,
         family: "Segoe UI",
         size: LOADING_SIZE_DIP,
         bold: false,
@@ -454,12 +519,10 @@ fn handle(
             None
         }
         WM_CLOSE => {
-            // From here on, paths forwarded by later launches open their own window.
-            instance::mark_closing();
-            app.try_borrow_mut().ok()?.save_placement(hwnd);
-            // SAFETY: destroying our own window; no App borrow is held.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
+            // An open dialog must be answered first: the close is cancelled. An unsaved
+            // rotation asks (or saves) first.
+            if !input::dialog_open(app) {
+                commands::request_close(app, hwnd);
             }
             Some(LRESULT(0))
         }
@@ -474,8 +537,23 @@ fn handle(
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
         }
-        _ => commands::handle(app, hwnd, msg, wparam, lparam)
+        // The overlay sees input first: an open dialog takes it all.
+        _ => input::overlay(app, hwnd, msg, wparam, lparam)
+            .or_else(|| commands::handle(app, hwnd, msg, wparam, lparam))
             .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
+    }
+}
+
+/// Closes the window now: saves the placement and destroys it.
+pub fn close(app: &RefCell<App>, hwnd: HWND) {
+    // From here on, paths forwarded by later launches open their own window.
+    instance::mark_closing();
+    if let Ok(mut a) = app.try_borrow_mut() {
+        a.save_placement(hwnd);
+    }
+    // SAFETY: destroying our own window; no App borrow is held.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
     }
 }
 
