@@ -19,6 +19,8 @@ pub struct Settings {
     pub window: Option<WindowPlacement>,
     pub open_in_new_window: bool,
     pub memory_budget_mb: Option<u32>,
+    /// Save a view rotation without asking when leaving the photo.
+    pub auto_save_rotation: bool,
 }
 
 /// 설정을 읽는다. 파일이 없으면 기본값, 파싱에 실패하면 원본을 `.bak`으로 옮기고 기본값을 돌려준다.
@@ -73,6 +75,7 @@ mod tests {
             }),
             open_in_new_window: true,
             memory_budget_mb: Some(512),
+            auto_save_rotation: true,
         }
     }
 
@@ -119,5 +122,7 @@ mod tests {
         let s = load_settings(&path);
         assert!(s.toolbar_pinned);
         assert_eq!(s.window, None);
+        // Settings files from before M3 ask before saving a rotation.
+        assert!(!s.auto_save_rotation);
     }
 }

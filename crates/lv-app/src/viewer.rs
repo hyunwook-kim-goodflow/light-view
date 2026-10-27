@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
+use lv_core::identity::{self, FileIdentity};
 use lv_core::listing::FolderList;
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
@@ -51,6 +52,43 @@ struct Shown {
     content: Content,
     /// The view rotation it is drawn with; kept while the next photo loads.
     quarters: u8,
+    /// The file as it was when shown (or as the app last saved it); saves and deletes
+    /// act only on that file. `None` if it could not be read.
+    identity: Option<FileIdentity>,
+    /// The file was saved since it was decoded: it stays drawn (with its old rotation,
+    /// which the saved file now holds) until the new decode replaces it.
+    stale: bool,
+}
+
+/// What the user tried to do when leaving a photo with an unsaved rotation; done once
+/// the save prompt is answered (or the save finished).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeaveReason {
+    /// `Command::Next` or `Command::Prev`.
+    Move(Command),
+    /// Open a file (a drop, a forwarded launch).
+    Open(PathBuf),
+    /// Close the window.
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaveDecision {
+    /// Nothing to save: go ahead.
+    Proceed,
+    /// Show the save prompt; the reason waits for its answer.
+    Ask,
+    /// Save without asking (`auto_save_rotation`); the reason waits for the save.
+    AutoSave,
+}
+
+/// What a save of the current photo needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveRequest {
+    pub path: PathBuf,
+    pub identity: Option<FileIdentity>,
+    pub quarters: u8,
+    pub generation: u64,
 }
 
 pub struct Viewer {
@@ -77,6 +115,13 @@ pub struct Viewer {
     /// A move came back to the photo still on screen; its animation timer, stopped
     /// while another photo was pending, must be restarted (the generation did not change).
     rearm_animation: bool,
+    /// `Settings::auto_save_rotation`.
+    auto_save: bool,
+    /// A save of the shown photo failed: leaving it asks again even with `auto_save`, so
+    /// a file that cannot be saved never traps the user.
+    save_failed: bool,
+    /// What waits for the save prompt or a running save.
+    pending_leave: Option<LeaveReason>,
 }
 
 pub fn error_message(e: &DecodeError) -> String {
@@ -142,6 +187,9 @@ impl Viewer {
             touched: false,
             loading: false,
             rearm_animation: false,
+            auto_save: false,
+            save_failed: false,
+            pending_leave: None,
         }
     }
 
@@ -321,12 +369,18 @@ impl Viewer {
             Ok(_) => Content::Message(CANNOT_OPEN.to_owned()),
             Err(e) => Content::Message(error_message(e)),
         };
+        // The identity is read after the decode: a change in between goes unnoticed, as
+        // the decode may have read either version.
+        let identity = identity::capture(&path).ok();
         self.shown = Some(Shown {
             path,
             content,
             quarters: self.quarters,
+            identity,
+            stale: false,
         });
         self.generation += 1;
+        self.save_failed = false;
         self.frame = 0;
         self.touched = false;
         self.loading = false;
@@ -335,7 +389,13 @@ impl Viewer {
 
     fn showing_current(&self) -> bool {
         let current = self.list.current();
-        current.is_some() && self.shown.as_ref().map(|s| s.path.as_path()) == current
+        current.is_some()
+            && self
+                .shown
+                .as_ref()
+                .filter(|s| !s.stale)
+                .map(|s| s.path.as_path())
+                == current
     }
 
     /// The current photo is still decoding.
@@ -387,10 +447,108 @@ impl Viewer {
         self.list.current().is_some()
     }
 
-    /// The current photo's path (a dialog's target; Tasks 6 and 7).
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// The current photo's path (a dialog's target).
     pub fn current_path(&self) -> Option<&Path> {
         self.list.current()
+    }
+
+    pub fn set_auto_save(&mut self, on: bool) {
+        self.auto_save = on;
+    }
+
+    /// Called before every way of leaving the current photo. With an unsaved rotation
+    /// the reason is kept (`take_pending_leave`) and the caller asks or saves first. A
+    /// move that would not move (at either end of the folder) never asks.
+    pub fn before_leave(&mut self, reason: LeaveReason) -> LeaveDecision {
+        let moves = match reason {
+            LeaveReason::Move(Command::Next) => self.list.neighbor(1).is_some(),
+            LeaveReason::Move(Command::Prev) => self.list.neighbor(-1).is_some(),
+            _ => true,
+        };
+        if !moves || !self.unsaved_rotation() {
+            return LeaveDecision::Proceed;
+        }
+        self.defer_leave(reason);
+        if self.auto_save && !self.save_failed {
+            LeaveDecision::AutoSave
+        } else {
+            LeaveDecision::Ask
+        }
+    }
+
+    /// Keeps `reason` to do once a save ends. A close already waiting is not replaced.
+    pub fn defer_leave(&mut self, reason: LeaveReason) {
+        if self.pending_leave != Some(LeaveReason::Close) {
+            self.pending_leave = Some(reason);
+        }
+    }
+
+    pub fn take_pending_leave(&mut self) -> Option<LeaveReason> {
+        self.pending_leave.take()
+    }
+
+    /// The prompt was cancelled: stay on the photo, rotated.
+    pub fn cancel_leave(&mut self) {
+        self.pending_leave = None;
+    }
+
+    /// A close waits for the running save (or the prompt's answer).
+    pub fn closing_after_save(&self) -> bool {
+        self.pending_leave == Some(LeaveReason::Close)
+    }
+
+    /// [저장 안 함]: drops the view rotation.
+    pub fn discard_rotation(&mut self) -> Redraw {
+        if self.quarters == 0 {
+            return Redraw::None;
+        }
+        self.quarters = 0;
+        if self.showing_current() {
+            if let Some(s) = &mut self.shown {
+                s.quarters = 0;
+            }
+        }
+        self.touched = false;
+        let (size, dip) = (self.view_size, self.dip);
+        self.set_view(size, dip);
+        Redraw::Full
+    }
+
+    /// The current photo with its unsaved rotation, if it is on screen.
+    pub fn save_request(&self) -> Option<SaveRequest> {
+        if !self.showing_current() || !self.unsaved_rotation() {
+            return None;
+        }
+        let s = self.shown.as_ref()?;
+        Some(SaveRequest {
+            path: s.path.clone(),
+            identity: s.identity.clone(),
+            quarters: self.quarters,
+            generation: self.generation,
+        })
+    }
+
+    /// `path` was saved and now holds the rotation on screen: it is decoded again and
+    /// shown unrotated, the old decode staying up until then. `identity` is the saved
+    /// file's.
+    pub fn on_saved(&mut self, path: &Path, identity: Option<FileIdentity>) -> Redraw {
+        self.prefetcher.invalidate(path);
+        if let Some(s) = self.shown.as_mut().filter(|s| s.path == path) {
+            s.identity = identity;
+            s.stale = true;
+        }
+        if self.list.current() == Some(path) {
+            self.quarters = 0;
+        }
+        self.save_failed = false;
+        self.show_current();
+        Redraw::Full
+    }
+
+    /// A save of the shown photo did not happen: stay on it, and the next leave asks.
+    pub fn on_save_failed(&mut self) {
+        self.save_failed = true;
+        self.pending_leave = None;
     }
 
     /// (1-based index, count), or (0, 0) with no file.
@@ -699,6 +857,110 @@ mod tests {
         v.apply(Command::RotateRight);
         assert_eq!(v.view_rotation_quarters(), 2);
         drop(release);
+    }
+
+    #[test]
+    fn leave_with_unsaved_rotation_asks() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        let next = LeaveReason::Move(Command::Next);
+        assert_eq!(v.before_leave(next.clone()), LeaveDecision::Proceed);
+        assert_eq!(v.take_pending_leave(), None);
+
+        v.apply(Command::RotateRight);
+        assert_eq!(v.before_leave(next.clone()), LeaveDecision::Ask);
+        assert_eq!(v.take_pending_leave(), Some(next));
+        for reason in [LeaveReason::Open(p("x.jpg")), LeaveReason::Close] {
+            assert_eq!(v.before_leave(reason.clone()), LeaveDecision::Ask);
+            assert_eq!(v.take_pending_leave(), Some(reason));
+        }
+        // Nothing to ask at the end of the folder: the move would not move.
+        let (mut v, rx) = viewer_at("e.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateLeft);
+        let next = LeaveReason::Move(Command::Next);
+        assert_eq!(v.before_leave(next), LeaveDecision::Proceed);
+        let prev = LeaveReason::Move(Command::Prev);
+        assert_eq!(v.before_leave(prev), LeaveDecision::Ask);
+    }
+
+    #[test]
+    fn auto_save_skips_prompt() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.set_auto_save(true);
+        v.apply(Command::RotateRight);
+        let next = LeaveReason::Move(Command::Next);
+        assert_eq!(v.before_leave(next.clone()), LeaveDecision::AutoSave);
+        assert_eq!(v.take_pending_leave(), Some(next.clone()));
+        // A failed save stays on the photo; leaving it then asks.
+        v.before_leave(next.clone());
+        v.on_save_failed();
+        assert_eq!(v.take_pending_leave(), None);
+        assert_eq!(v.before_leave(next), LeaveDecision::Ask);
+    }
+
+    #[test]
+    fn cancel_keeps_position() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        assert_eq!(
+            v.before_leave(LeaveReason::Move(Command::Prev)),
+            LeaveDecision::Ask
+        );
+        v.cancel_leave();
+        assert_eq!(v.take_pending_leave(), None);
+        assert_eq!(v.position(), (3, 5));
+        assert_eq!(v.view_rotation_quarters(), 1);
+        assert!(v.unsaved_rotation());
+    }
+
+    #[test]
+    fn a_waiting_close_is_not_replaced() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        v.before_leave(LeaveReason::Close);
+        assert!(v.closing_after_save());
+        v.defer_leave(LeaveReason::Open(p("x.jpg")));
+        v.before_leave(LeaveReason::Move(Command::Next));
+        assert_eq!(v.take_pending_leave(), Some(LeaveReason::Close));
+    }
+
+    #[test]
+    fn discard_drops_the_rotation() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        assert_eq!(v.discard_rotation(), Redraw::Full);
+        assert!(!v.unsaved_rotation());
+        assert!(matches!(v.scene(), Scene::Image { quarters: 0, .. }));
+        assert_eq!(v.view(), Some(&Viewport::initial(VIEW, (400.0, 300.0))));
+    }
+
+    #[test]
+    fn saved_photo_is_decoded_again_unrotated() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.save_request(), None);
+        v.apply(Command::RotateRight);
+        let request = v.save_request().expect("a rotated photo on screen");
+        assert_eq!((request.path.clone(), request.quarters), (p("c.jpg"), 1));
+        let generation = v.generation();
+
+        v.on_saved(&p("c.jpg"), None);
+        assert!(!v.unsaved_rotation());
+        assert_eq!(v.save_request(), None);
+        // The old decode stays up, turned as the file now is, until the new one is in.
+        assert!(v.pending());
+        assert!(matches!(v.scene(), Scene::Image { quarters: 1, .. }));
+        assert_eq!(v.apply(Command::RotateRight), Redraw::None);
+
+        wait_shown(&mut v, &rx);
+        assert!(v.generation() > generation);
+        assert!(matches!(v.scene(), Scene::Image { quarters: 0, .. }));
+        assert_eq!(v.title(), "c.jpg · 3 / 5");
     }
 
     #[test]

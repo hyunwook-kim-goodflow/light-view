@@ -325,8 +325,6 @@ pub fn handle(
 /// Shows a dialog about `target`. Until it closes it takes every key, click and wheel
 /// turn, cancels WM_CLOSE and defers forwarded opens; its answer, with `target`, goes
 /// to `commands::on_overlay_event`. A drag in progress ends.
-// Release builds call it only from Tasks 6 and 7 (debug builds also from `debug_overlay`).
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn show_dialog(app: &RefCell<App>, hwnd: HWND, prompt: Prompt, target: DialogTarget) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
@@ -353,7 +351,6 @@ pub fn dialog_open(app: &RefCell<App>) -> bool {
 
 /// Shows a toast for six seconds, replacing any toast already up. `make` gets the
 /// current time, e.g. `show_toast(app, hwnd, Toast::recycled)`.
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn show_toast(app: &RefCell<App>, hwnd: HWND, make: impl FnOnce(u64) -> Toast) {
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
@@ -448,14 +445,17 @@ pub fn overlay(
 
 /// After the overlay handled input: repaint and, once a dialog closed or a toast
 /// action was used, restore the toolbar tooltips and act on it. Then a path forwarded
-/// while the dialog was open is opened, after the answer was applied to its target.
+/// while the dialog was open is opened, after the answer was applied to its target,
+/// unless the answer closes the window.
 fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) {
     invalidate(hwnd);
     let Some(event) = event else {
         return;
     };
     sync_tooltips(app, hwnd);
-    commands::on_overlay_event(app, hwnd, event);
+    if !commands::on_overlay_event(app, hwnd, event) {
+        return;
+    }
     let deferred = app
         .try_borrow_mut()
         .ok()

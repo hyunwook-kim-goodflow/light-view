@@ -42,6 +42,9 @@ struct State {
     wanted: Vec<PathBuf>,
     queue: VecDeque<PathBuf>,
     in_flight: HashSet<PathBuf>,
+    /// In-flight decodes that read a file since changed (`invalidate`): their results
+    /// are dropped.
+    stale: HashSet<PathBuf>,
     tick: u64,
     shutdown: bool,
 }
@@ -181,6 +184,21 @@ impl Prefetcher {
         self.shared.cond.notify_all();
     }
 
+    /// The file at `path` changed (the app saved it): drops its cached result, and the
+    /// result of a decode of it still running, and decodes it again if it is wanted.
+    pub fn invalidate(&self, path: &Path) {
+        let mut st = self.shared.lock();
+        st.cache.remove(path);
+        if st.in_flight.contains(path) {
+            // The worker requeues it once the stale decode ends.
+            st.stale.insert(path.to_path_buf());
+        } else if st.wanted.iter().any(|w| w == path) && !st.queue.iter().any(|q| q == path) {
+            st.queue.push_front(path.to_path_buf());
+        }
+        drop(st);
+        self.shared.cond.notify_all();
+    }
+
     pub fn get(&self, path: &Path) -> Option<DecodeResult> {
         let mut st = self.shared.lock();
         st.touch(path);
@@ -229,7 +247,12 @@ fn worker_loop(shared: &Shared, decoder: &dyn Decode, on_ready: &dyn Fn(PathBuf)
         let inserted = {
             let mut st = shared.lock();
             st.in_flight.remove(&path);
-            if st.wanted.contains(&path) && !st.cache.contains_key(&path) {
+            if st.stale.remove(&path) {
+                if st.wanted.contains(&path) && !st.queue.contains(&path) {
+                    st.queue.push_front(path.clone());
+                }
+                false
+            } else if st.wanted.contains(&path) && !st.cache.contains_key(&path) {
                 st.insert(path.clone(), result, shared.budget)
             } else {
                 false
@@ -404,6 +427,42 @@ mod tests {
         assert!(h.prefetcher.get(&p("b")).is_none());
         assert!(h.prefetcher.get(&p("a")).is_some());
         assert!(h.prefetcher.get(&p("c")).is_some());
+    }
+
+    #[test]
+    fn invalidate_drops_the_cached_result_and_decodes_again() {
+        let h = harness(1, u64::MAX, &[], &[]);
+        h.prefetcher.request(&[p("a"), p("b")]);
+        h.wait_ready(2);
+        h.prefetcher.invalidate(&p("a"));
+        assert!(h.prefetcher.get(&p("a")).is_none());
+        assert!(h.prefetcher.get(&p("b")).is_some());
+        assert_eq!(h.wait_ready(1), vec![p("a")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("b"), p("a")]);
+    }
+
+    #[test]
+    fn invalidate_discards_a_decode_in_flight() {
+        let h = harness(1, u64::MAX, &["a"], &[]);
+        h.prefetcher.request(&[p("a")]);
+        assert_eq!(h.wait_started(), p("a"));
+        h.prefetcher.invalidate(&p("a"));
+        h.releases[&p("a")].send(()).unwrap();
+        // The decode that read the old file is dropped; a fresh one is reported.
+        assert_eq!(h.wait_ready(1), vec![p("a")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("a")]);
+        assert_eq!(h.ready_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn invalidate_of_an_unwanted_path_decodes_nothing() {
+        let h = harness(1, u64::MAX, &[], &[]);
+        h.prefetcher.request(&[p("a")]);
+        h.wait_ready(1);
+        h.prefetcher.invalidate(&p("z"));
+        h.prefetcher.request(&[p("a"), p("b")]);
+        assert_eq!(h.wait_ready(1), vec![p("b")]);
+        assert_eq!(*h.calls.lock().unwrap(), vec![p("a"), p("b")]);
     }
 
     #[test]

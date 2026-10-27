@@ -194,9 +194,15 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
 /// Set once the window starts closing; later WM_COPYDATA messages are refused.
 static CLOSING: AtomicBool = AtomicBool::new(false);
 
-/// Called when the window handles WM_CLOSE (it is destroyed right after).
+/// Called when the window closes: right before it is destroyed, or once the user chose
+/// to close after a save that is still running.
 pub fn mark_closing() {
     CLOSING.store(true, Ordering::Relaxed);
+}
+
+/// The save a close waited for failed, so the window stays open after all.
+pub fn cancel_closing() {
+    CLOSING.store(false, Ordering::Relaxed);
 }
 
 /// Whether a forwarded path may be taken: not while a WM_CLOSE waits in the queue

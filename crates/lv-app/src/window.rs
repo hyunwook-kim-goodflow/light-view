@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 use anyhow::Context;
 use lv_core::settings::{save_settings, Settings};
@@ -24,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW,
 };
 
-use crate::commands::{self, HwndCell};
+use crate::commands::{self, HwndCell, SaveDone, Saving};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
@@ -35,9 +37,11 @@ use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
 use crate::tooltip;
 use crate::viewer::{Scene, Viewer};
+use crate::worker::WorkerPool;
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
 const LOADING: &str = "불러오는 중…";
+const SAVING: &str = "저장하는 중…";
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
@@ -60,6 +64,13 @@ pub struct App {
     icon_family: &'static str,
     pub pointer: Pointer,
     pub overlay: Overlay,
+    /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
+    pub pool: Option<Arc<WorkerPool>>,
+    /// The rotation save running in the background, if any (one at a time).
+    pub saving: Option<Saving>,
+    /// Save threads report here, then post `WM_APP_SAVE_DONE`.
+    pub save_tx: Sender<SaveDone>,
+    pub save_rx: Receiver<SaveDone>,
 }
 
 pub fn run(
@@ -68,9 +79,11 @@ pub fn run(
     settings_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let hwnd_cell = HwndCell::default();
+    let (viewer, pool) = commands::new_viewer(&settings, hwnd_cell.clone());
+    let (save_tx, save_rx) = channel();
     let app = RefCell::new(App {
         renderer: None,
-        viewer: commands::new_viewer(&settings, hwnd_cell.clone()),
+        viewer,
         uploaded: None,
         fullscreen: None,
         dark: system_prefers_dark(),
@@ -82,6 +95,10 @@ pub fn run(
         icon_family: "",
         pointer: Pointer::default(),
         overlay: Overlay::default(),
+        pool,
+        saving: None,
+        save_tx,
+        save_rx,
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -279,7 +296,8 @@ impl App {
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
-        let loading = self.viewer.loading();
+        let saving = self.saving.as_ref().is_some_and(|s| s.overdue);
+        let loading = self.viewer.loading() && !saving;
         let mut drew_image = false;
         match self.viewer.scene() {
             // The previous photo stays up while the next one loads.
@@ -290,8 +308,10 @@ impl App {
             Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
         }
-        if loading {
-            draw_loading_pill(r, p, self.dark, (view_w, view_h));
+        if saving {
+            draw_pill(r, p, self.dark, (view_w, view_h), SAVING);
+        } else if loading {
+            draw_pill(r, p, self.dark, (view_w, view_h), LOADING);
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -333,7 +353,7 @@ impl App {
         self.persist_settings();
     }
 
-    fn persist_settings(&self) {
+    pub fn persist_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = save_settings(path, &self.settings) {
                 eprintln!("light-view: could not save settings: {e}");
@@ -342,11 +362,11 @@ impl App {
     }
 }
 
-/// A small "불러오는 중…" pill centred in the image area: surface fill, plus a
-/// hairline border in dark mode (no shadows there).
-fn draw_loading_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32)) {
+/// A small "불러오는 중…" or "저장하는 중…" pill centred in the image area: surface
+/// fill, plus a hairline border in dark mode (no shadows there).
+fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32), text: &str) {
     let run = TextRun {
-        text: LOADING,
+        text,
         family: "Segoe UI",
         size: LOADING_SIZE_DIP,
         bold: false,
@@ -473,17 +493,10 @@ fn handle(
             None
         }
         WM_CLOSE => {
-            // An open dialog must be answered first: the close is cancelled. (Task 6
-            // hooks in here: an unsaved rotation shows the save prompt instead.)
-            if input::dialog_open(app) {
-                return Some(LRESULT(0));
-            }
-            // From here on, paths forwarded by later launches open their own window.
-            instance::mark_closing();
-            app.try_borrow_mut().ok()?.save_placement(hwnd);
-            // SAFETY: destroying our own window; no App borrow is held.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
+            // An open dialog must be answered first: the close is cancelled. An unsaved
+            // rotation asks (or saves) first.
+            if !input::dialog_open(app) {
+                commands::request_close(app, hwnd);
             }
             Some(LRESULT(0))
         }
@@ -502,6 +515,19 @@ fn handle(
         _ => input::overlay(app, hwnd, msg, wparam, lparam)
             .or_else(|| commands::handle(app, hwnd, msg, wparam, lparam))
             .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
+    }
+}
+
+/// Closes the window now: saves the placement and destroys it.
+pub fn close(app: &RefCell<App>, hwnd: HWND) {
+    // From here on, paths forwarded by later launches open their own window.
+    instance::mark_closing();
+    if let Ok(mut a) = app.try_borrow_mut() {
+        a.save_placement(hwnd);
+    }
+    // SAFETY: destroying our own window; no App borrow is held.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
     }
 }
 

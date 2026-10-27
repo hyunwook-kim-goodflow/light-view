@@ -26,6 +26,7 @@ pub const TOAST_SAVED_AS_TAG: &str = "이 사진은 회전 정보로 저장했�
 pub const TOAST_FILE_CHANGED: &str = "파일이 바뀌었어요, 다시 열어 주세요";
 pub const TOAST_SAVE_FAILED: &str = "저장하지 못했어요";
 pub const TOAST_UNSUPPORTED_FORMAT: &str = "이 형식은 아직 회전 저장을 지원하지 않아요";
+pub const TOAST_READ_ONLY: &str = "읽기 전용 파일이에요";
 
 // Dialog layout (DIPs).
 const CARD_MAX_W: f32 = 420.0;

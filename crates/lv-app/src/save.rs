@@ -56,6 +56,20 @@ impl RotateService for WorkerPool {
     }
 }
 
+/// Stands in for the pool when `lv-worker.exe` is missing: JPEG pixel rotations and
+/// HEIF checks fail, so only what needs no worker can be saved.
+pub struct NoWorker;
+
+impl RotateService for NoWorker {
+    fn rotate_jpeg(&self, _data: Vec<u8>, _quarters: u8) -> Result<Vec<u8>, PoolError> {
+        Err(DecodeError::Unsupported.into())
+    }
+
+    fn heif_dims(&self, _data: Vec<u8>) -> Result<(u32, u32), DecodeError> {
+        Err(DecodeError::Unsupported)
+    }
+}
+
 /// Saves `user_quarters` clockwise quarter turns into the file at `path`, which must
 /// still be the file `id` was captured from. Runs for a while (a worker rotation, a full
 /// decode to check the result): call it off the UI thread.
