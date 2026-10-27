@@ -149,6 +149,21 @@ fn installer_grants_appcontainer_read_and_cleans_up() {
         !run[icacls].contains("postinstall"),
         "runs with the install, not as a choice"
     );
+    // Review I1: /DIR= or a previous install's folder bypasses DisableDirPage, so the
+    // grant runs only when {app} is the spec folder.
+    assert!(run[icacls].ends_with("; Check: IsDefaultAppDir"), "{}", run[icacls]);
+    let code = s
+        .split_once("\n[Code]")
+        .or_else(|| s.split_once("\r\n[Code]"))
+        .expect("[Code] section")
+        .1;
+    assert!(code.contains("function IsDefaultAppDir(): Boolean;"));
+    assert!(code.contains(
+        r"Expected := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Programs\light-view'));"
+    ));
+    assert!(code.contains("Installed := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));"));
+    // CompareText ignores case.
+    assert!(code.contains("Result := CompareText(Installed, Expected) = 0;"));
     // Last page: the default apps settings.
     assert!(has_line(
         &run,
@@ -167,6 +182,17 @@ fn installer_grants_appcontainer_read_and_cleans_up() {
             "runhidden",
             "waituntilterminated",
             "RunOnceId:"
+        ]
+    ));
+    // The uninstaller takes the grant back, under the same check.
+    assert!(has_line(
+        &uninstall,
+        &[
+            r#"Filename: "{sys}\icacls.exe""#,
+            r#"""{app}"" /remove:g *S-1-15-2-1"#,
+            "waituntilterminated",
+            "RunOnceId:",
+            "Check: IsDefaultAppDir"
         ]
     ));
 }

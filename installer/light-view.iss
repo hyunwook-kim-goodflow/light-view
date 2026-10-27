@@ -38,6 +38,8 @@ PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\light-view
 ; The folder is fixed (spec §9): icacls grants ALL APPLICATION PACKAGES read access to it,
 ; which must never land on a folder the user picked (an existing folder, a drive root).
+; Hiding the page is not enough (/DIR= and a previous install's folder still choose it),
+; so the grant also checks the folder itself (IsDefaultAppDir in [Code]).
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 ; Windows 10 22H2 or later, x64 (spec §9).
@@ -156,8 +158,9 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 [Run]
 ; The decoder worker runs in an AppContainer only where ALL APPLICATION PACKAGES
 ; (S-1-15-2-1) may read and run its files (ruling R2); without this it falls back to the
-; low integrity sandbox. Runs right after the files are in place.
-Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /grant *S-1-15-2-1:(OI)(CI)(RX)"; StatusMsg: "{cm:GrantingAccess}"; Flags: runhidden waituntilterminated
+; low integrity sandbox. Runs right after the files are in place, and only in the spec
+; folder: a folder chosen with /DIR= keeps its permissions and the worker falls back.
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /grant *S-1-15-2-1:(OI)(CI)(RX)"; StatusMsg: "{cm:GrantingAccess}"; Flags: runhidden waituntilterminated; Check: IsDefaultAppDir
 ; Last page: the default apps page of the Settings app, opened at light-view's entry.
 Filename: "ms-settings:defaultapps?registeredAppUser=light-view"; Description: "{cm:OpenDefaultApps}"; Flags: postinstall shellexec nowait skipifsilent
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,light-view}"; Flags: postinstall nowait skipifsilent unchecked
@@ -165,3 +168,20 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,light-view}"; Flags
 [UninstallRun]
 ; Before the files go: delete the worker's AppContainer profile (exits 0, shows nothing).
 Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteAppContainerProfile"
+; Take back the grant made at install (only the granted entry, /remove:g), in case the
+; folder stays because it holds files the uninstaller did not put there.
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /remove:g *S-1-15-2-1"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAppContainerGrant"; Check: IsDefaultAppDir
+
+[Code]
+// True when {app} is the spec folder %LOCALAPPDATA%\Programs\light-view (case-insensitive,
+// a trailing backslash ignored). Only there may icacls grant ALL APPLICATION PACKAGES
+// read access: a folder given with /DIR= (or kept from a previous install) could be the
+// user's profile or a drive root.
+function IsDefaultAppDir(): Boolean;
+var
+  Installed, Expected: String;
+begin
+  Installed := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
+  Expected := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Programs\light-view'));
+  Result := CompareText(Installed, Expected) = 0;
+end;
