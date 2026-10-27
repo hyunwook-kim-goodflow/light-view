@@ -4,14 +4,14 @@
 //! unless a dialog is open or a save runs: the rescan then waits for it ([`Watching`],
 //! ruling R14).
 //!
-//! The UI thread never touches the disk for a rescan: it takes a
-//! [`RescanJob`](crate::viewer::RescanJob) (the folder, the current photo and the
-//! identities to check), a background thread runs it (a slow or stalled network folder
-//! blocks only that thread) and posts `WM_APP_RESCAN_DONE`, and the UI thread applies
-//! the result unless the viewer moved on meanwhile (then it rescans again). One rescan
-//! runs at a time; changes reported meanwhile give exactly one more after it. A slow
-//! rescan stretches the debounce to twice its duration, so a busy network folder is not
-//! listed back to back.
+//! The UI thread never touches the disk for a rescan: it takes a `RescanJob`
+//! ([`Viewer::rescan_job`](crate::viewer::Viewer::rescan_job): the folder, the current
+//! photo and the identities to check), a background thread runs it (a slow or stalled
+//! network folder blocks only that thread) and posts `WM_APP_RESCAN_DONE`, and the UI
+//! thread applies the result unless the viewer moved on meanwhile (then it rescans again).
+//! One rescan runs at a time; changes reported meanwhile give exactly one more after it. A
+//! slow rescan stretches the debounce to twice its duration, so a busy network folder is
+//! not listed back to back.
 //!
 //! Safe removal of a drive (M4 task 7): the folder handle is registered for device
 //! events (`RegisterDeviceNotificationW`, `DBT_DEVTYP_HANDLE`, [`Registration`]). On
@@ -22,10 +22,8 @@
 //! identity check like any changed file.
 
 use std::cell::RefCell;
-use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,23 +34,15 @@ use std::time::{Duration, Instant};
 
 use lv_core::identity::to_extended_path;
 use lv_core::listing::same_path;
-use windows::Win32::Foundation::{
-    ERROR_NOTIFY_ENUM_DIR, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
-};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Storage::FileSystem::{
-    ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
     FILE_NOTIFY_CHANGE, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-    FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_NOTIFY_CHANGE_SIZE,
 };
-use windows::Win32::System::Threading::{
-    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
-};
-use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::Threading::SetEvent;
 use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, RegisterDeviceNotificationW, UnregisterDeviceNotification, DBT_DEVICEQUERYREMOVE,
-    DBT_DEVICEQUERYREMOVEFAILED, DBT_DEVICEREMOVECOMPLETE, DBT_DEVICEREMOVEPENDING,
-    DBT_DEVTYP_HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
-    HDEVNOTIFY, WM_APP,
+    DBT_DEVICEQUERYREMOVE, DBT_DEVICEQUERYREMOVEFAILED, DBT_DEVICEREMOVECOMPLETE,
+    DBT_DEVICEREMOVEPENDING, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR, WM_APP,
 };
 
 use crate::commands;
@@ -61,6 +51,12 @@ use crate::overlay::{Overlay, Toast};
 use crate::strings::S;
 use crate::viewer::{RescanFound, RescanNotice};
 use crate::window::App;
+
+mod device_watch;
+mod reader;
+
+use device_watch::{device_step, register_device, DeviceStep, Register, Registration};
+use reader::{new_event, post, start_reading, watch_loop};
 
 /// Posted by a [`FolderWatch`] once a burst of changes settled. (`WM_APP + 3` is
 /// `WM_APP_DELETE_DONE`.)
@@ -136,14 +132,6 @@ pub struct FolderWatch {
     /// Disconnected once the thread ended, so once the handle is closed.
     ended: Receiver<()>,
     thread: Option<JoinHandle<()>>,
-}
-
-/// The overlapped read: the system writes into it until the read completes or is
-/// cancelled, so it lives in a `Box` (it never moves) owned by the watch thread, which
-/// waits for the read to end before dropping it.
-struct Read {
-    ov: OVERLAPPED,
-    buf: [u32; BUFFER_WORDS],
 }
 
 impl FolderWatch {
@@ -251,231 +239,6 @@ impl Drop for FolderWatch {
 fn signal(event: &OwnedHandle) {
     // SAFETY: the event handle is owned by the caller and alive.
     let _ = unsafe { SetEvent(HANDLE(event.as_raw_handle())) };
-}
-
-/// A folder handle's device-event registration (`RegisterDeviceNotificationW` with
-/// `DBT_DEVTYP_HANDLE`); unregistered when dropped.
-pub struct Registration {
-    /// The `HDEVNOTIFY`, as events name it in `dbch_hdevnotify`.
-    id: isize,
-    unregister: Option<Box<dyn FnOnce()>>,
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        if let Some(unregister) = self.unregister.take() {
-            unregister();
-        }
-    }
-}
-
-/// How `Watching` registers a folder handle (`dir_handle`, of the folder `dir`) for the
-/// device events sent to `hwnd`; tests swap it.
-type Register = Box<dyn Fn(&Path, isize, HWND) -> io::Result<Registration>>;
-
-/// Registers `dir_handle` so `hwnd` gets `WM_DEVICECHANGE` when its drive is removed.
-fn register_device(_dir: &Path, dir_handle: isize, hwnd: HWND) -> io::Result<Registration> {
-    let filter = DEV_BROADCAST_HANDLE {
-        dbch_size: std::mem::size_of::<DEV_BROADCAST_HANDLE>() as u32,
-        dbch_devicetype: DBT_DEVTYP_HANDLE.0,
-        dbch_handle: HANDLE(dir_handle as *mut _),
-        ..Default::default()
-    };
-    // SAFETY: `filter` is a live DEV_BROADCAST_HANDLE naming an open directory handle:
-    // the watch thread closes it only after it is told to stop, which happens after this
-    // call returns.
-    let h = unsafe {
-        RegisterDeviceNotificationW(
-            HANDLE(hwnd.0),
-            std::ptr::from_ref(&filter).cast(),
-            DEVICE_NOTIFY_WINDOW_HANDLE,
-        )
-    }?;
-    let id = h.0 as isize;
-    Ok(Registration {
-        id,
-        unregister: Some(Box::new(move || {
-            // SAFETY: `id` is the HDEVNOTIFY returned above, unregistered once (here).
-            if let Err(e) = unsafe { UnregisterDeviceNotification(HDEVNOTIFY(id as *mut _)) } {
-                eprintln!("light-view: could not unregister the device events: {e}");
-            }
-        })),
-    })
-}
-
-/// What a `WM_DEVICECHANGE` event for a folder handle asks of the watch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeviceStep {
-    /// Stop the watch and close its handle; keep the registration for the outcome.
-    Release,
-    /// The removal was cancelled: watch the same folder again.
-    Restart,
-    /// The drive is gone (or going): unregister and stay unwatched.
-    Forget,
-    /// Not ours, or nothing to do.
-    Ignore,
-}
-
-/// The step for device `event`: `live` when it names the running watch's registration,
-/// `released` when it names the one kept after a query-remove. Anything else (a stale
-/// registration, another device) is ignored.
-pub fn device_step(event: u32, live: bool, released: bool) -> DeviceStep {
-    match event {
-        DBT_DEVICEQUERYREMOVE if live => DeviceStep::Release,
-        DBT_DEVICEQUERYREMOVEFAILED if released => DeviceStep::Restart,
-        DBT_DEVICEREMOVEPENDING | DBT_DEVICEREMOVECOMPLETE if live || released => {
-            DeviceStep::Forget
-        }
-        _ => DeviceStep::Ignore,
-    }
-}
-
-/// Opens `dir` for overlapped change reads and starts the first one.
-fn start_reading(dir: &Path) -> io::Result<(File, OwnedHandle, Box<Read>)> {
-    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    let file = OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY.0)
-        .share_mode(share.0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OVERLAPPED.0)
-        .open(dir)?;
-    let io_done = new_event()?;
-    let mut read = Box::new(Read {
-        ov: OVERLAPPED {
-            hEvent: HANDLE(io_done.as_raw_handle()),
-            ..Default::default()
-        },
-        buf: [0; BUFFER_WORDS],
-    });
-    read.issue(&file)?;
-    Ok((file, io_done, read))
-}
-
-impl Read {
-    /// Starts the next overlapped read of `dir`'s changes.
-    fn issue(&mut self, dir: &File) -> io::Result<()> {
-        let event = self.ov.hEvent;
-        self.ov = OVERLAPPED {
-            hEvent: event,
-            ..Default::default()
-        };
-        // SAFETY: `dir` is a directory handle opened for overlapped I/O; the buffer and
-        // the OVERLAPPED live in this boxed `Read`, which the watch thread keeps until
-        // the read has completed or been cancelled and waited for (or leaks on a panic).
-        unsafe {
-            ReadDirectoryChangesW(
-                HANDLE(dir.as_raw_handle()),
-                self.buf.as_mut_ptr().cast(),
-                std::mem::size_of_val(&self.buf) as u32,
-                false,
-                FILTER,
-                None,
-                Some(&mut self.ov),
-                None,
-            )
-        }
-        .map_err(io::Error::from)
-    }
-
-    /// The finished read's byte count (0: too many changes to report, which also means
-    /// "something changed").
-    fn result(&self, dir: &File, wait: bool) -> windows::core::Result<u32> {
-        let mut bytes = 0;
-        // SAFETY: `self.ov` is the OVERLAPPED of a read issued on `dir`; `bytes` is a
-        // live local.
-        unsafe { GetOverlappedResult(HANDLE(dir.as_raw_handle()), &self.ov, &mut bytes, wait) }
-            .map(|()| bytes)
-    }
-}
-
-fn new_event() -> io::Result<OwnedHandle> {
-    // SAFETY: plain call; an unnamed auto-reset event, initially not set.
-    let h = unsafe { CreateEventW(None, false, false, None) }?;
-    // SAFETY: `h` is a new handle owned by nobody else.
-    Ok(unsafe { OwnedHandle::from_raw_handle(h.0) })
-}
-
-fn post(target: isize, msg: u32) {
-    if target == 0 {
-        return;
-    }
-    // SAFETY: plain call; posting to a destroyed window just fails.
-    unsafe {
-        let _ = PostMessageW(HWND(target as *mut _), msg, WPARAM(0), LPARAM(0));
-    }
-}
-
-fn watch_loop(
-    dir: &File,
-    io_done: &OwnedHandle,
-    stop: &OwnedHandle,
-    slow_ms: &AtomicU64,
-    read: &mut Read,
-    notify: &dyn Fn(),
-) {
-    let handles = [
-        HANDLE(stop.as_raw_handle()),
-        HANDLE(io_done.as_raw_handle()),
-    ];
-    let mut reading = true;
-    let mut wait_failed = false;
-    let mut debounce = Debounce::default();
-    loop {
-        debounce.set_slow(Duration::from_millis(slow_ms.load(Ordering::Relaxed)));
-        let timeout = debounce.due().map_or(INFINITE, |due| {
-            let left = due.saturating_duration_since(Instant::now()).as_millis();
-            u32::try_from(left)
-                .unwrap_or(INFINITE - 1)
-                .saturating_add(1)
-        });
-        let waiting = if reading { &handles[..] } else { &handles[..1] };
-        // SAFETY: both handles are owned events alive for the whole loop.
-        let woke = unsafe { WaitForMultipleObjects(waiting, false, timeout) };
-        if woke == WAIT_OBJECT_0 {
-            break;
-        }
-        if woke.0 == WAIT_OBJECT_0.0 + 1 {
-            debounce.event(Instant::now());
-            match read.result(dir, false) {
-                Ok(_) => {}
-                Err(e) if e.code() == ERROR_NOTIFY_ENUM_DIR.to_hresult() => {}
-                Err(e) => {
-                    // The folder went away, or the location stopped reporting: one last
-                    // rescan finds out what is left.
-                    eprintln!("light-view: no longer watching the folder: {e}");
-                    reading = false;
-                }
-            }
-            if reading {
-                if let Err(e) = read.issue(dir) {
-                    eprintln!("light-view: no longer watching the folder: {e}");
-                    reading = false;
-                }
-            }
-        } else if woke != WAIT_TIMEOUT {
-            eprintln!("light-view: folder watch wait failed");
-            wait_failed = true;
-            break;
-        }
-        if debounce.fire(Instant::now()) {
-            notify();
-        }
-    }
-    if reading {
-        // SAFETY: cancels our own read on `dir`; the wait below lets it end before
-        // `read` (its buffer and OVERLAPPED) can be dropped.
-        unsafe {
-            let _ = CancelIoEx(HANDLE(dir.as_raw_handle()), Some(&read.ov));
-        }
-        let _ = read.result(dir, true);
-    }
-    if wait_failed {
-        // The handle stays open until the window lets go of its device registration and
-        // says stop (a registration must end before its handle closes).
-        // SAFETY: `stop` is an owned event alive for the whole call.
-        unsafe {
-            let _ = WaitForSingleObject(HANDLE(stop.as_raw_handle()), INFINITE);
-        }
-    }
 }
 
 /// The window's folder watch and its rescans: one due (waiting for a dialog or a save
@@ -772,7 +535,10 @@ mod tests {
     use lv_core::decode::{DecodeError, DecodedImage, Frame};
     use lv_core::format::ImageFormat;
     use lv_core::prefetch::{Decode, Prefetcher};
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::sync::mpsc::RecvTimeoutError;
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY};
 
     const MS: Duration = Duration::from_millis(1);
 
