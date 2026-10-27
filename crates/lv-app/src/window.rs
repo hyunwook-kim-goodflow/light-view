@@ -2,11 +2,9 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::Context;
 use lv_core::decode::DecodeLimits;
 use lv_core::portable::DataDir;
 use lv_core::settings::{update_settings, Settings};
@@ -14,51 +12,45 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath,
-    KF_FLAG_DEFAULT,
+    FOLDERID_LocalAppData, FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, IsZoomed, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, TranslateMessage, CREATESTRUCTW, CS_DBLCLKS, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MINMAXINFO, MSG, SWP_NOACTIVATE,
-    SWP_NOZORDER, WINDOW_EX_STYLE, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DEVICECHANGE,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, IsZoomed, PostQuitMessage,
+    SetWindowLongPtrW, SetWindowPos, CREATESTRUCTW, GWLP_USERDATA, MINMAXINFO, SWP_NOACTIVATE,
+    SWP_NOZORDER, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_GETOBJECT, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
 };
 
-use crate::commands::{self, HwndCell, SaveDone, Saving};
-use crate::delete::{CommitReport, Deleter, ShellTrash};
-use crate::exif_card::{self, CardInfo, CardView, ExifCard};
+use crate::commands::{self, SaveDone, Saving};
+use crate::delete::{CommitReport, Deleter};
+use crate::exif_card::{self, CardInfo, ExifCard};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
-use crate::menu::{self, Menu, MenuView};
-use crate::overlay::{self, Overlay, OverlayView};
+use crate::menu::Menu;
+use crate::overlay::Overlay;
 use crate::placement;
-use crate::render::{self, Align, Renderer, TextRun};
+use crate::render::{self, Renderer};
 use crate::settings_win::{self, SettingsWindow};
 use crate::start::{self, StartScreen};
-use crate::strings::{t, S};
-use crate::theme::{self, palette, system_prefers_dark, Palette};
-use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
+use crate::theme::{self, system_prefers_dark};
+use crate::toolbar::{pinned_bar_height, ToolbarInput};
 use crate::tooltip;
 use crate::uia;
 use crate::uia_provider;
 use crate::update::{self, UpdateState};
-use crate::viewer::{Redraw, Scene, Viewer};
+use crate::viewer::Viewer;
 use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
 
+mod paint;
+mod run;
+
+pub use run::run;
+
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Window");
-const LOADING_SIZE_DIP: f32 = 13.0;
-const PILL_HEIGHT_DIP: f32 = 28.0;
-const PILL_PAD_DIP: f32 = 14.0;
-/// How long the (already hidden) app waits at exit for the Recycle Bin.
-const EXIT_COMMIT_WAIT: Duration = Duration::from_secs(10);
 
 pub struct App {
     renderer: Option<Renderer>,
@@ -105,192 +97,7 @@ pub struct App {
     pub update: UpdateState,
 }
 
-pub fn run(
-    initial: Option<PathBuf>,
-    settings: Settings,
-    settings_path: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let hwnd_cell = HwndCell::default();
-    let (mut viewer, pool, decode_limits) = crate::timing::step("viewer-ms", || {
-        commands::new_viewer(&settings, hwnd_cell.clone())
-    });
-    // The first photo starts decoding now, while the window and its renderer are made,
-    // instead of after them. Its ready message may come before the window exists and is
-    // then lost: the window checks for the photo itself once it is up.
-    let first = initial.as_deref().and_then(commands::file_to_open);
-    if let Some(file) = &first {
-        crate::timing::set_target(file);
-        crate::timing::step("open-ms", || viewer.open(file));
-    }
-    let (save_tx, save_rx) = channel();
-    let (delete_tx, delete_rx) = channel();
-    let post = hwnd_cell.clone();
-    let trash = ShellTrash::new(Box::new(move |path, result| {
-        let _ = delete_tx.send((path, result));
-        post.post(commands::WM_APP_DELETE_DONE);
-    }));
-    let app = RefCell::new(App {
-        renderer: None,
-        viewer,
-        uploaded: None,
-        fullscreen: None,
-        dark: system_prefers_dark(),
-        settings,
-        settings_path,
-        restoring: false,
-        client_dips: (0.0, 0.0),
-        dip: 1.0,
-        icon_family: "",
-        pointer: Pointer::default(),
-        overlay: Overlay::default(),
-        exif_card: ExifCard::default(),
-        menu: Menu::default(),
-        start: StartScreen::default(),
-        pool,
-        decode_limits,
-        saving: None,
-        save_tx,
-        save_rx,
-        deleter: Deleter::new(Box::new(trash)),
-        delete_rx,
-        watching: Watching::default(),
-        settings_win: None,
-        update: UpdateState::default(),
-    });
-
-    // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
-    // message loop below runs until the window is destroyed, and the window procedure
-    // clears its pointer on WM_NCDESTROY.
-    unsafe {
-        let instance = GetModuleHandleW(None).context("GetModuleHandleW")?;
-        let class = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance.into(),
-            hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW")?,
-            lpszClassName: CLASS_NAME,
-            ..Default::default()
-        };
-        if RegisterClassExW(&class) == 0 {
-            return Err(windows::core::Error::from_win32()).context("RegisterClassExW");
-        }
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            CLASS_NAME,
-            w!("light-view"),
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            None,
-            None,
-            instance,
-            Some(std::ptr::from_ref(&app).cast()),
-        )
-        .context("CreateWindowExW")?;
-        hwnd_cell.set(hwnd);
-        DragAcceptFiles(hwnd, true);
-
-        theme::apply_title_bar(hwnd, app.borrow().dark);
-        let tooltip = tooltip::create(hwnd);
-        if let Some(tt) = tooltip {
-            let dark = app.borrow().dark;
-            tooltip::set_dark(tt, dark);
-        }
-        // On failure, destroy the window before `app` goes away (no borrow is held).
-        crate::timing::mark("window-at");
-        let renderer = match crate::timing::step("d2d-ms", || Renderer::new(hwnd)) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = DestroyWindow(hwnd);
-                return Err(e).context("Direct2D renderer");
-            }
-        };
-        {
-            let mut a = app.borrow_mut();
-            a.icon_family = toolbar::icon_family(&renderer);
-            a.renderer = Some(renderer);
-            a.pointer.set_tooltip(tooltip);
-        }
-        // The first photo (opened above) is shown if it is ready, and the title, toolbar
-        // and folder watch follow it, as after any open.
-        if first.is_some() {
-            app.borrow_mut().viewer.check_current();
-            commands::after(&app, hwnd, Redraw::Full);
-        }
-
-        let saved = app.borrow().settings.window.clone();
-        let wp = placement::initial_placement(saved.as_ref());
-        // Restoring onto a monitor with another DPI sends WM_DPICHANGED; the saved
-        // rect is already in that monitor's pixels, so it must not be rescaled.
-        app.borrow_mut().restoring = true;
-        let restored = crate::timing::step("show-ms", || SetWindowPlacement(hwnd, &wp));
-        app.borrow_mut().restoring = false;
-        if let Err(e) = restored {
-            let _ = DestroyWindow(hwnd);
-            return Err(e).context("SetWindowPlacement");
-        }
-        // Size the image area for the final (possibly maximized) size, not the
-        // CW_USEDEFAULT size seen during creation.
-        {
-            let mut a = app.borrow_mut();
-            a.on_size(hwnd);
-            a.refresh_toolbar();
-        }
-        input::sync_tooltips(&app, hwnd);
-        let _ = InvalidateRect(hwnd, None, false);
-        crate::timing::mark("shown-at");
-        // The update question, if the first photo is already up; and the daily check
-        // (on its own thread) if the user said yes before.
-        update::maybe_ask(&app, hwnd);
-        update::check_if_due(&app, hwnd);
-
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    // The window is gone: the pending delete goes to the Recycle Bin now.
-    app.borrow_mut().deleter.commit_all(EXIT_COMMIT_WAIT);
-    Ok(())
-}
-
 impl App {
-    /// Uploads the shown image (or animation frame) if it changed since the last paint,
-    /// or again after the renderer lost its device (it keeps no pixel copy), and
-    /// (re)starts the animation timer for a newly shown photo. Done at paint time
-    /// so that a burst of key repeats uploads only the photo that ends up on screen.
-    fn upload_image(&mut self, hwnd: HWND) {
-        let key = (
-            self.viewer.generation(),
-            self.viewer.frame_to_upload().map_or(0, |f| f.1),
-        );
-        let lost = self.renderer.as_ref().is_some_and(Renderer::needs_upload);
-        if self.uploaded == Some(key) && !lost {
-            return;
-        }
-        let new_photo = self.uploaded.map(|k| k.0) != Some(key.0);
-        self.uploaded = Some(key);
-        let Some(r) = &mut self.renderer else { return };
-        match self.viewer.frame_to_upload() {
-            Some((img, frame)) => {
-                crate::timing::step("upload-ms", || r.set_image(Some(img), frame));
-                if !r.has_image() {
-                    // Larger than the GPU's maximum bitmap size; release the pixel copy.
-                    r.set_image(None, 0);
-                    self.viewer.too_large_to_draw();
-                }
-            }
-            None => r.set_image(None, 0),
-        }
-        if new_photo {
-            commands::set_animation_timer(hwnd, self.viewer.frame_delay());
-        }
-    }
-
     pub fn on_size(&mut self, hwnd: HWND) {
         let mut rc = RECT::default();
         // SAFETY: `rc` is a live local and `hwnd` is our window.
@@ -392,97 +199,6 @@ impl App {
         self.on_size(hwnd);
     }
 
-    fn paint(&mut self, hwnd: HWND) {
-        self.upload_image(hwnd);
-        let toolbar = self.toolbar_input().filter(|_| self.pointer.shown);
-        let info = self
-            .viewer
-            .info()
-            .map(|(w, h, bytes)| toolbar::info_text(w, h, bytes))
-            .unwrap_or_default();
-        let zoom = self
-            .viewer
-            .zoom()
-            .map(toolbar::zoom_text)
-            .unwrap_or_default();
-        let (view_w, view_h) = self.view_dips();
-        let now_ms = self.pointer.now_ms();
-        let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
-        let card = self.card_model();
-        let start = self.start_layout();
-        let menu = self.menu.layout(self.client_dips);
-        let Some(r) = &mut self.renderer else { return };
-        let p = palette(self.dark);
-        r.begin(p.paper);
-        let saving = self.saving.as_ref().is_some_and(|s| s.overdue);
-        let loading = self.viewer.loading() && !saving;
-        let mut drew_image = false;
-        match self.viewer.scene() {
-            // The previous photo stays up while the next one loads.
-            Scene::Image { rect, quarters } => {
-                r.draw_image(rect, quarters);
-                drew_image = r.has_image();
-            }
-            Scene::Message(text) if !loading => r.draw_text_center(&text, p.ink2),
-            Scene::Message(_) | Scene::Empty => {}
-        }
-        if let Some(l) = &start {
-            start::draw(r, l, p);
-        }
-        if saving {
-            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Saving));
-        } else if loading {
-            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Loading));
-        }
-        if let Some(input) = toolbar {
-            let view = ToolbarView {
-                input,
-                palette: p,
-                dark: self.dark,
-                icon_family: self.icon_family,
-                position: self.viewer.position(),
-                info: (&info, &zoom),
-            };
-            toolbar::draw(r, &view);
-        }
-        if let Some(m) = &card {
-            let view = CardView {
-                palette: p,
-                dark: self.dark,
-                icon_family: self.icon_family,
-            };
-            exif_card::draw(r, &self.exif_card, m, &view);
-        }
-        if let Some(l) = &menu {
-            let view = MenuView {
-                palette: p,
-                dark: self.dark,
-            };
-            menu::draw(r, &self.menu, l, &view);
-        }
-        let view = OverlayView {
-            client: self.client_dips,
-            pinned: pinned_bar,
-            palette: p,
-            dark: self.dark,
-            icon_family: self.icon_family,
-            now_ms,
-        };
-        overlay::draw(r, &mut self.overlay, &view);
-        let ended = if drew_image {
-            crate::timing::step("present-ms", || r.end())
-        } else {
-            r.end()
-        };
-        match ended {
-            Ok(()) if drew_image => crate::timing::first_image_presented(),
-            Ok(()) => {}
-            Err(e) => eprintln!("light-view: EndDraw failed: {e}"),
-        }
-        // What was just drawn is what a screen reader sees.
-        uia_provider::publish(hwnd, || uia::main_tree_of(self));
-    }
-
     /// Saves the normal-window placement (the one from before fullscreen, if active).
     fn save_placement(&mut self, hwnd: HWND) {
         let wp = match &self.fullscreen {
@@ -518,26 +234,6 @@ impl App {
         }
         saved
     }
-}
-
-/// A small "불러오는 중…" or "저장하는 중…" pill centred in the image area: surface
-/// fill, plus a hairline border in dark mode (no shadows there).
-fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32), text: &str) {
-    let run = TextRun {
-        text,
-        family: "Segoe UI",
-        size: LOADING_SIZE_DIP,
-        bold: false,
-        color: p.ink2,
-    };
-    let text_w = r.measure_runs(&[run]).unwrap_or(80.0);
-    let (w, h) = (text_w + 2.0 * PILL_PAD_DIP, PILL_HEIGHT_DIP);
-    let rect = ((view_w - w) / 2.0, (view_h - h) / 2.0, w, h);
-    r.fill_round_rect(rect, h / 2.0, p.surface);
-    if dark {
-        r.stroke_round_rect(rect, h / 2.0, p.hairline, 1.0);
-    }
-    r.draw_runs(rect, &[run], Align::Center);
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
