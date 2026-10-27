@@ -3,12 +3,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use lv_core::decode::{decode_file, open_image, DecodeError, DecodeLimits, DecodedImage, Frame};
 use lv_core::exif_info::ExifData;
 use lv_core::format::ImageFormat;
 use lv_core::prefetch::Decode;
+use lv_core::profile;
 
+use crate::timing;
 use crate::worker::WorkerPool;
 
 /// The worker's file name; it is looked for in the app's own folder only.
@@ -22,8 +25,9 @@ pub struct RoutingDecoder {
 }
 
 impl RoutingDecoder {
-    /// Starts `workers` HEIF workers from `lv-worker.exe` next to the app right away.
-    /// Never fails: without the worker, or if it cannot start, only HEIF is affected.
+    /// Starts `workers` HEIF workers from `lv-worker.exe` next to the app, in the
+    /// background. Never fails: without the worker, or if it cannot start, only HEIF is
+    /// affected.
     pub fn start(limits: DecodeLimits, workers: usize) -> RoutingDecoder {
         let exe = std::env::current_exe()
             .ok()
@@ -33,7 +37,12 @@ impl RoutingDecoder {
 
     fn with_worker(limits: DecodeLimits, exe: Option<PathBuf>, workers: usize) -> RoutingDecoder {
         let pool = match exe {
-            Some(exe) => Some(Arc::new(WorkerPool::start(exe, workers, limits.max_pixels))),
+            // The workers start on a thread of their own: the window does not wait.
+            Some(exe) => Some(WorkerPool::start_in_background(
+                exe,
+                workers,
+                limits.max_pixels,
+            )),
             None => {
                 eprintln!("light-view: {WORKER_EXE} not found next to the app; HEIC is off");
                 None
@@ -65,6 +74,23 @@ impl Decode for RoutingDecoder {
     }
 
     fn decode(&self, path: &Path) -> Result<DecodedImage, DecodeError> {
+        if !timing::is_target(path) {
+            return self.decode_any(path);
+        }
+        timing::mark("decode-start-at");
+        let start = Instant::now();
+        let (result, phases) = profile::collect(|| self.decode_any(path));
+        timing::add("decode-ms", start.elapsed().as_secs_f64() * 1000.0);
+        for (name, ms) in phases {
+            timing::add(&format!("decode.{name}"), ms);
+        }
+        timing::mark("decoded-at");
+        result
+    }
+}
+
+impl RoutingDecoder {
+    fn decode_any(&self, path: &Path) -> Result<DecodedImage, DecodeError> {
         let image = open_image(path)?;
         if image.format != ImageFormat::Heif {
             drop(image);
@@ -74,11 +100,11 @@ impl Decode for RoutingDecoder {
             return Err(DecodeError::Unsupported);
         };
         // Within `max_file_bytes`, which is also the most a worker accepts.
-        let bytes = image.read_all(&self.limits)?;
+        let bytes = profile::phase("read", || image.read_all(&self.limits))?;
         let byte_len = bytes.len() as u64;
         // Read here, on the prefetch thread, from the bytes the worker decodes (R5).
-        let exif = ExifData::read(&bytes).map(Arc::new);
-        let (width, height, bgra) = pool.decode_heif(bytes)?;
+        let exif = profile::phase("exif", || ExifData::read(&bytes).map(Arc::new));
+        let (width, height, bgra) = profile::phase("worker", || pool.decode_heif(bytes))?;
         Ok(DecodedImage {
             width,
             height,
@@ -86,6 +112,7 @@ impl Decode for RoutingDecoder {
             format: ImageFormat::Heif,
             byte_len,
             exif,
+            scaled_from: None,
         })
     }
 }

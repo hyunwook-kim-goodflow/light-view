@@ -16,8 +16,7 @@
 
 use std::cell::RefCell;
 
-use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
-use lv_core::settings::{LangSetting, Settings};
+use lv_core::settings::Settings;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -28,7 +27,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{IsWindowEnabled, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW,
     GetWindowRect, IsWindow, LoadCursorW, RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW,
@@ -39,441 +38,33 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSEXW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
 };
 
-use crate::about;
 use crate::commands;
 use crate::input;
 use crate::overlay::Toast;
-use crate::render::{Align, Renderer, TextRun};
+use crate::render::Renderer;
 use crate::shell;
-use crate::strings::{self, t, text, Lang, S};
-use crate::theme::{self, palette, Palette, Rgb};
-use crate::toolbar::Rect;
+use crate::strings::{self, t, S};
+use crate::theme::{self, palette};
 use crate::uia::Act;
 use crate::uia_provider;
 use crate::viewer::Redraw;
 use crate::window::{invalidate, App};
 
+mod draw;
+mod model;
+
+use draw::draw;
+pub use draw::layout;
+#[cfg(test)]
+use model::MainUpdate;
+use model::{apply_change, Action, Change, Model};
+pub use model::{Control, CONTROLS};
+
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Settings");
 /// Client size in DIPs; the window cannot be resized.
-pub const SIZE_DIP: (f32, f32) = (420.0, 480.0);
+pub const SIZE_DIP: (f32, f32) = (420.0, 532.0);
 /// A caption and a close box: no sizing border, no minimize or maximize.
 const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0);
-
-const VK_TAB: u16 = 0x09;
-const VK_SPACE: u16 = 0x20;
-
-/// The memory limit's options; `None` is automatic.
-const MEMORY_MB: [Option<u32>; 5] = [None, Some(256), Some(512), Some(1024), Some(2048)];
-const LANGUAGES: [LangSetting; 3] = [LangSetting::Auto, LangSetting::Ko, LangSetting::En];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Control {
-    Language,
-    PinMenu,
-    OpenIn,
-    Rotation,
-    Memory,
-    DefaultApps,
-}
-
-/// Top to bottom; also the Tab order.
-pub const CONTROLS: [Control; 6] = [
-    Control::Language,
-    Control::PinMenu,
-    Control::OpenIn,
-    Control::Rotation,
-    Control::Memory,
-    Control::DefaultApps,
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    /// A row of options, one of them chosen.
-    Choice,
-    Check,
-    Button,
-}
-
-impl Control {
-    pub fn label_key(self) -> S {
-        match self {
-            Control::Language => S::SettingsLanguage,
-            Control::PinMenu => S::SettingsPinMenu,
-            Control::OpenIn => S::SettingsOpenOther,
-            Control::Rotation => S::SettingsRotated,
-            Control::Memory => S::SettingsMemory,
-            Control::DefaultApps => S::MenuDefaultApps,
-        }
-    }
-
-    fn kind(self) -> Kind {
-        match self {
-            Control::PinMenu => Kind::Check,
-            Control::DefaultApps => Kind::Button,
-            _ => Kind::Choice,
-        }
-    }
-
-    /// A choice's option labels in `lang`; empty for the checkbox and the button.
-    pub fn option_labels(self, lang: Lang) -> Vec<String> {
-        let keys = |keys: &[S]| keys.iter().map(|k| text(lang, *k).to_owned()).collect();
-        match self {
-            Control::Language => keys(&[S::SettingsAuto, S::SettingsKorean, S::SettingsEnglish]),
-            Control::OpenIn => keys(&[S::SettingsSameWindow, S::SettingsNewWindow]),
-            Control::Rotation => keys(&[S::SettingsAskToSave, S::SettingsSaveRightAway]),
-            Control::Memory => MEMORY_MB
-                .iter()
-                .map(|mb| match mb {
-                    None => text(lang, S::SettingsAuto).to_owned(),
-                    Some(mb) => format!("{mb}{}", text(lang, S::SettingsMegabytes)),
-                })
-                .collect(),
-            Control::PinMenu | Control::DefaultApps => Vec::new(),
-        }
-    }
-
-    fn option_count(self) -> usize {
-        match self {
-            Control::Language => LANGUAGES.len(),
-            Control::OpenIn | Control::Rotation => 2,
-            Control::Memory => MEMORY_MB.len(),
-            Control::PinMenu | Control::DefaultApps => 0,
-        }
-    }
-
-    /// The chosen option of a choice. A memory limit that is not offered chooses none.
-    pub fn selected(self, s: &Settings) -> Option<usize> {
-        match self {
-            Control::Language => LANGUAGES.iter().position(|l| *l == s.language),
-            Control::OpenIn => Some(usize::from(s.open_in_new_window)),
-            Control::Rotation => Some(usize::from(s.auto_save_rotation)),
-            Control::Memory => {
-                let mb = s.memory_budget_mb.filter(|&mb| mb > 0);
-                MEMORY_MB.iter().position(|m| *m == mb)
-            }
-            Control::PinMenu | Control::DefaultApps => None,
-        }
-    }
-
-    /// The checkbox's state.
-    pub fn checked(self, s: &Settings) -> bool {
-        self == Control::PinMenu && s.toolbar_pinned
-    }
-
-    /// The change that picks option `i` of a choice.
-    fn change_for(self, i: usize) -> Option<Change> {
-        Some(match self {
-            Control::Language => Change::Language(*LANGUAGES.get(i)?),
-            Control::OpenIn => Change::NewWindow(i == 1),
-            Control::Rotation => Change::AutoSave(i == 1),
-            Control::Memory => Change::Memory(*MEMORY_MB.get(i)?),
-            Control::PinMenu | Control::DefaultApps => return None,
-        })
-    }
-}
-
-/// A settings change, applied to `Settings` by [`apply_change`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Change {
-    Language(LangSetting),
-    PinMenu(bool),
-    NewWindow(bool),
-    AutoSave(bool),
-    Memory(Option<u32>),
-}
-
-/// What the main window has to do after a change.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MainUpdate {
-    /// The language changed: title, cached texts and a redraw.
-    pub retranslate: bool,
-    /// The toolbar was pinned or unpinned: the image area changes size.
-    pub relayout: bool,
-    pub auto_save: Option<bool>,
-}
-
-/// Applies `c` to `s`; `None` when it changes nothing (nothing to save or redo). The
-/// window and memory choices only change the file: a new launch reads the first, and
-/// the memory limit applies from the next start.
-pub fn apply_change(s: &mut Settings, c: Change) -> Option<MainUpdate> {
-    let mut update = MainUpdate::default();
-    match c {
-        Change::Language(l) => {
-            (s.language != l).then_some(())?;
-            s.language = l;
-            update.retranslate = true;
-        }
-        Change::PinMenu(on) => {
-            (s.toolbar_pinned != on).then_some(())?;
-            s.toolbar_pinned = on;
-            update.relayout = true;
-        }
-        Change::NewWindow(on) => {
-            (s.open_in_new_window != on).then_some(())?;
-            s.open_in_new_window = on;
-        }
-        Change::AutoSave(on) => {
-            (s.auto_save_rotation != on).then_some(())?;
-            s.auto_save_rotation = on;
-            update.auto_save = Some(on);
-        }
-        Change::Memory(mb) => {
-            let mb = mb.filter(|&mb| mb > 0);
-            (s.memory_budget_mb != mb).then_some(())?;
-            s.memory_budget_mb = mb;
-        }
-    }
-    Some(update)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Nothing,
-    Redraw,
-    Change(Change),
-    OpenDefaultApps,
-    Close,
-}
-
-/// The focused control and the pressed part (control, option).
-#[derive(Debug, Default)]
-pub struct Model {
-    /// Index into `CONTROLS`.
-    pub focused: usize,
-    pressed: Option<(usize, usize)>,
-}
-
-impl Model {
-    /// A key; `None` for Alt combinations (they go on to `DefWindowProc`). `repeat`:
-    /// an auto-repeat of a held key, which toggles or presses nothing.
-    pub fn on_key(&mut self, vk: u16, mods: Mods, repeat: bool, s: &Settings) -> Option<Action> {
-        if mods.alt {
-            return None;
-        }
-        if repeat && matches!(vk, VK_SPACE | VK_RETURN) {
-            return Some(Action::Nothing);
-        }
-        let n = CONTROLS.len();
-        let control = CONTROLS[self.focused];
-        Some(match vk {
-            VK_TAB => {
-                self.focused = if mods.shift {
-                    (self.focused + n - 1) % n
-                } else {
-                    (self.focused + 1) % n
-                };
-                Action::Redraw
-            }
-            VK_ESCAPE => Action::Close,
-            VK_LEFT | VK_RIGHT if control.kind() == Kind::Choice => {
-                let last = control.option_count() - 1;
-                let current = control.selected(s);
-                let next = match current {
-                    None => 0,
-                    Some(i) if vk == VK_LEFT => i.saturating_sub(1),
-                    Some(i) => (i + 1).min(last),
-                };
-                pick(control, current, next)
-            }
-            VK_SPACE | VK_RETURN => press_control(control, s),
-            _ => Action::Nothing,
-        })
-    }
-
-    fn hit(x: f32, y: f32, l: &Layout) -> Option<(usize, usize)> {
-        l.controls.iter().enumerate().find_map(|(c, rects)| {
-            let o = rects.options.iter().position(|r| r.contains(x, y))?;
-            Some((c, o))
-        })
-    }
-
-    /// Mouse down; true if it is on a control, which takes the focus.
-    pub fn press(&mut self, x: f32, y: f32, l: &Layout) -> bool {
-        self.pressed = Self::hit(x, y, l);
-        if let Some((c, _)) = self.pressed {
-            self.focused = c;
-        }
-        self.pressed.is_some()
-    }
-
-    /// UI Automation invoked option `option` of control `c` (a choice), or the
-    /// checkbox or button `c` (`None`): it acts as a click would, and takes the focus.
-    pub fn invoke(&mut self, c: usize, option: Option<usize>, s: &Settings) -> Action {
-        let Some(&control) = CONTROLS.get(c) else {
-            return Action::Nothing;
-        };
-        self.focused = c;
-        let action = match (control.kind(), option) {
-            (Kind::Choice, Some(o)) if o < control.option_count() => {
-                pick(control, control.selected(s), o)
-            }
-            (Kind::Check | Kind::Button, None) => press_control(control, s),
-            _ => Action::Nothing,
-        };
-        if action == Action::Nothing {
-            Action::Redraw
-        } else {
-            action
-        }
-    }
-
-    /// The mouse capture ended without a release (another window took it).
-    pub fn cancel_press(&mut self) {
-        self.pressed = None;
-    }
-
-    /// Mouse up: acts only when released on the part that was pressed.
-    pub fn release(&mut self, x: f32, y: f32, l: &Layout, s: &Settings) -> Action {
-        let Some(pressed) = self.pressed.take() else {
-            return Action::Nothing;
-        };
-        if Self::hit(x, y, l) != Some(pressed) {
-            return Action::Redraw;
-        }
-        let (c, o) = pressed;
-        let control = CONTROLS[c];
-        let action = match control.kind() {
-            Kind::Choice => pick(control, control.selected(s), o),
-            Kind::Check | Kind::Button => press_control(control, s),
-        };
-        if action == Action::Nothing {
-            Action::Redraw
-        } else {
-            action
-        }
-    }
-}
-
-/// Picking option `i` of a choice whose chosen option is `current`.
-fn pick(control: Control, current: Option<usize>, i: usize) -> Action {
-    if current == Some(i) {
-        return Action::Nothing;
-    }
-    control
-        .change_for(i)
-        .map_or(Action::Nothing, Action::Change)
-}
-
-/// Space or Enter (or a click) on the checkbox or the button.
-fn press_control(control: Control, s: &Settings) -> Action {
-    match control.kind() {
-        Kind::Check => Action::Change(Change::PinMenu(!control.checked(s))),
-        Kind::Button => Action::OpenDefaultApps,
-        Kind::Choice => Action::Nothing,
-    }
-}
-
-// Layout (DIPs).
-const PAD_X: f32 = 24.0;
-const TOP: f32 = 16.0;
-const LABEL_H: f32 = 20.0;
-const LABEL_GAP: f32 = 2.0;
-const ROW_H: f32 = 44.0;
-const OPTION_GAP: f32 = 6.0;
-const SECTION_GAP: f32 = 8.0;
-const NOTE_H: f32 = 16.0;
-const VERSION_H: f32 = 18.0;
-const BOTTOM: f32 = 12.0;
-
-/// One control's rects: a choice's label above its options; the checkbox's row or the
-/// button as its only "option". `focus` is what the focus ring goes around.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ControlRects {
-    pub label: Option<Rect>,
-    pub options: Vec<Rect>,
-    pub focus: Rect,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Layout {
-    /// Follows `CONTROLS`.
-    pub controls: Vec<ControlRects>,
-    /// "다음 실행부터 적용돼요", under the memory options.
-    pub note: Rect,
-    /// "다음에 사진을 열 때부터 적용돼요", under the open-in options.
-    pub open_note: Rect,
-    pub version: Rect,
-}
-
-/// The controls top to bottom inside 24 DIP side padding, each option row 44 DIP tall
-/// with equal option widths; the version line at the bottom.
-pub fn layout((w, h): (f32, f32)) -> Layout {
-    let x = PAD_X;
-    let inner = (w - 2.0 * PAD_X).max(0.0);
-    let row = |y: f32| Rect {
-        x,
-        y,
-        w: inner,
-        h: ROW_H,
-    };
-    let mut y = TOP;
-    let mut note = Rect {
-        x,
-        y,
-        w: inner,
-        h: NOTE_H,
-    };
-    let mut open_note = note;
-    let mut controls = Vec::with_capacity(CONTROLS.len());
-    for c in CONTROLS {
-        let rects = match c.kind() {
-            Kind::Choice => {
-                let label = Rect {
-                    x,
-                    y,
-                    w: inner,
-                    h: LABEL_H,
-                };
-                y += LABEL_H + LABEL_GAP;
-                let n = c.option_count();
-                let ow = (inner - OPTION_GAP * (n as f32 - 1.0)) / n as f32;
-                let options = (0..n)
-                    .map(|i| Rect {
-                        x: x + i as f32 * (ow + OPTION_GAP),
-                        y,
-                        w: ow,
-                        h: ROW_H,
-                    })
-                    .collect();
-                ControlRects {
-                    label: Some(label),
-                    options,
-                    focus: row(y),
-                }
-            }
-            Kind::Check | Kind::Button => ControlRects {
-                label: None,
-                options: vec![row(y)],
-                focus: row(y),
-            },
-        };
-        y += ROW_H;
-        match c {
-            Control::Memory => {
-                note.y = y;
-                y += NOTE_H;
-            }
-            Control::OpenIn => {
-                open_note.y = y;
-                y += NOTE_H;
-            }
-            _ => {}
-        }
-        y += SECTION_GAP;
-        controls.push(rects);
-    }
-    Layout {
-        controls,
-        note,
-        open_note,
-        version: Rect {
-            x,
-            y: h - BOTTOM - VERSION_H,
-            w: inner,
-            h: VERSION_H,
-        },
-    }
-}
 
 /// Window position for `size` centered on `owner`, moved inside `work` (the work area
 /// of the owner's monitor) when it would stick out.
@@ -484,127 +75,6 @@ fn center_on(owner: RECT, (w, h): (i32, i32), work: RECT) -> (i32, i32) {
         x.min(work.right - w).max(work.left),
         y.min(work.bottom - h).max(work.top),
     )
-}
-
-// ---- Drawing -------------------------------------------------------------------
-
-const UI_FAMILY: &str = "Segoe UI";
-const LABEL_SIZE: f32 = 13.0;
-const TEXT_SIZE: f32 = 14.0;
-const SMALL_SIZE: f32 = 12.0;
-const RADIUS: f32 = 10.0;
-const CHECK_BOX: f32 = 20.0;
-const CHECK_GLYPH: char = '\u{E73E}';
-const FOCUS_OUTSET: f32 = 3.0;
-
-fn tuple(r: Rect) -> (f32, f32, f32, f32) {
-    (r.x, r.y, r.w, r.h)
-}
-
-fn run(text: &str, color: Rgb, size: f32, bold: bool) -> TextRun<'_> {
-    TextRun {
-        text,
-        family: UI_FAMILY,
-        size,
-        bold,
-        color,
-    }
-}
-
-/// Paper background; choices as rows of surface2 options with the chosen one in
-/// highlighter; the focus ring in ink around the focused control.
-fn draw(r: &mut Renderer, m: &Model, s: &Settings, p: &Palette, icon_family: &str) {
-    let lang = strings::current();
-    let l = layout(SIZE_DIP);
-    r.begin(p.paper);
-    for (i, (c, rects)) in CONTROLS.iter().zip(&l.controls).enumerate() {
-        if let Some(label) = rects.label {
-            let label_run = [run(t(c.label_key()), p.ink2, LABEL_SIZE, false)];
-            r.draw_runs_ellipsis(tuple(label), &label_run, Align::Leading);
-        }
-        match c.kind() {
-            Kind::Choice => {
-                let chosen = c.selected(s);
-                let labels = c.option_labels(lang);
-                for (j, (rect, text)) in rects.options.iter().zip(&labels).enumerate() {
-                    let on = chosen == Some(j);
-                    let (fill, color) = if on {
-                        (p.highlighter, p.on_highlighter)
-                    } else {
-                        (p.surface2, p.ink)
-                    };
-                    r.fill_round_rect(tuple(*rect), RADIUS, fill);
-                    let label = [run(text, color, LABEL_SIZE, on)];
-                    r.draw_runs_ellipsis(tuple(*rect), &label, Align::Center);
-                }
-            }
-            Kind::Check => {
-                let label = t(c.label_key());
-                draw_checkbox(r, rects.options[0], label, c.checked(s), p, icon_family);
-            }
-            Kind::Button => {
-                let rect = rects.options[0];
-                r.fill_round_rect(tuple(rect), RADIUS, p.surface2);
-                let label = [run(t(c.label_key()), p.ink, TEXT_SIZE, false)];
-                r.draw_runs_ellipsis(tuple(rect), &label, Align::Center);
-            }
-        }
-        if i == m.focused {
-            let f = rects.focus;
-            let ring = (
-                f.x - FOCUS_OUTSET,
-                f.y - FOCUS_OUTSET,
-                f.w + 2.0 * FOCUS_OUTSET,
-                f.h + 2.0 * FOCUS_OUTSET,
-            );
-            r.stroke_round_rect(ring, RADIUS + FOCUS_OUTSET, p.ink, 1.5);
-        }
-    }
-    for (rect, key) in [
-        (l.open_note, S::SettingsOpenOtherNote),
-        (l.note, S::SettingsMemoryNote),
-    ] {
-        let note = [run(t(key), p.ink2, SMALL_SIZE, false)];
-        r.draw_runs_ellipsis(tuple(rect), &note, Align::Leading);
-    }
-    let version = about::version_line();
-    let version = [run(&version, p.ink2, SMALL_SIZE, false)];
-    r.draw_runs(tuple(l.version), &version, Align::Leading);
-    if let Err(e) = r.end() {
-        eprintln!("light-view: EndDraw failed in the settings window: {e}");
-    }
-}
-
-fn draw_checkbox(
-    r: &mut Renderer,
-    row: Rect,
-    label: &str,
-    checked: bool,
-    p: &Palette,
-    icon_family: &str,
-) {
-    let mark = (
-        row.x + 4.0,
-        row.y + (row.h - CHECK_BOX) / 2.0,
-        CHECK_BOX,
-        CHECK_BOX,
-    );
-    if checked {
-        r.fill_round_rect(mark, 5.0, p.highlighter);
-        r.draw_glyph(
-            mark,
-            CHECK_GLYPH,
-            icon_family,
-            14.0,
-            p.on_highlighter,
-            false,
-        );
-    } else {
-        r.stroke_round_rect(mark, 5.0, p.ink2, 1.5);
-    }
-    let label_x = mark.0 + CHECK_BOX + 10.0;
-    let text = (label_x, row.y, row.x + row.w - label_x, row.h);
-    r.draw_runs_ellipsis(text, &[run(label, p.ink, TEXT_SIZE, false)], Align::Leading);
 }
 
 // ---- Window --------------------------------------------------------------------
@@ -816,14 +286,12 @@ fn handle(
         uia_provider::WM_APP_UIA => {
             let action = {
                 let act = uia_provider::action(hwnd, wparam)?;
+                // SAFETY: plain query on our own window handle.
+                let enabled = unsafe { IsWindowEnabled(hwnd) }.as_bool();
                 let mut a = app.try_borrow_mut().ok()?;
                 let a = &mut *a;
                 let w = a.settings_win.as_mut().filter(|w| w.hwnd == hwnd)?;
-                match act {
-                    Act::Pick(c, o) => w.model.invoke(c, Some(o), &a.settings),
-                    Act::Press(c) => w.model.invoke(c, None, &a.settings),
-                    _ => Action::Nothing,
-                }
+                uia_action(&mut w.model, act, enabled, &a.settings)
             };
             act(app, hwnd, action);
             Some(LRESULT(0))
@@ -920,6 +388,7 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_NCDESTROY => {
+            uia_provider::forget(hwnd);
             // SAFETY: clears the App pointer so no later message can reach it.
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
             None
@@ -1010,6 +479,9 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
         }
         update
     };
+    if update.check_updates {
+        crate::update::check_if_due(app, owner);
+    }
     if update.retranslate {
         // The main window's title and tooltips, and a repaint.
         commands::after(app, owner, Redraw::Full);
@@ -1027,10 +499,27 @@ fn apply(app: &RefCell<App>, hwnd: HWND, change: Change) {
     invalidate(hwnd);
 }
 
+/// What a UI Automation invocation does in the settings window. Nothing while the window
+/// is disabled (held while the modal Open dialog is up), as for a click and as in the
+/// main window (`uia_glue::run_main`).
+fn uia_action(m: &mut Model, act: Act, enabled: bool, s: &Settings) -> Action {
+    if !enabled {
+        return Action::Nothing;
+    }
+    match act {
+        Act::Pick(c, o) => m.invoke(c, Some(o), s),
+        Act::Press(c) => m.invoke(c, None, s),
+        _ => Action::Nothing,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::strings::{text, Lang};
+    use crate::toolbar::Rect;
+    use lv_core::command::Mods;
+    use lv_core::settings::LangSetting;
 
     const NONE: Mods = Mods {
         ctrl: false,
@@ -1063,6 +552,30 @@ mod tests {
     }
 
     #[test]
+    fn uia_invocations_wait_while_the_window_is_held() {
+        let s = Settings::default();
+        let language = CONTROLS
+            .iter()
+            .position(|c| *c == Control::Language)
+            .unwrap();
+        let mut m = Model::default();
+        focus(&mut m, Control::PinMenu);
+        let before = m.focused;
+        // Disabled by the Open dialog: neither the pick nor the focus move happens.
+        assert_eq!(
+            uia_action(&mut m, Act::Pick(language, 2), false, &s),
+            Action::Nothing
+        );
+        assert_eq!(m.focused, before);
+        // Enabled again: the same invocation acts as a click.
+        assert!(matches!(
+            uia_action(&mut m, Act::Pick(language, 2), true, &s),
+            Action::Change(_)
+        ));
+        assert_eq!(m.focused, language);
+    }
+
+    #[test]
     fn controls_in_spec_order_with_their_options() {
         let labels: Vec<_> = CONTROLS
             .iter()
@@ -1076,6 +589,7 @@ mod tests {
                 "다른 사진을 열 때",
                 "회전한 사진을",
                 "메모리 한도",
+                "업데이트 확인",
                 "기본 앱 설정 열기"
             ]
         );
@@ -1088,6 +602,7 @@ mod tests {
             ["자동", "256 MB", "512 MB", "1024 MB", "2048 MB"]
         );
         assert!(options(Control::PinMenu).is_empty());
+        assert!(options(Control::UpdateCheck).is_empty());
         assert!(options(Control::DefaultApps).is_empty());
         assert_eq!(
             Control::Language.option_labels(Lang::En),
@@ -1128,12 +643,12 @@ mod tests {
         assert_eq!(m.focused, 0);
         assert_eq!(m.on_key(VK_TAB, NONE, false, &s), Some(Action::Redraw));
         assert_eq!(m.focused, 1);
-        for _ in 0..5 {
+        for _ in 0..6 {
             m.on_key(VK_TAB, NONE, false, &s);
         }
         assert_eq!(m.focused, 0);
         m.on_key(VK_TAB, SHIFT, false, &s);
-        assert_eq!(m.focused, 5);
+        assert_eq!(m.focused, 6);
     }
 
     #[test]
@@ -1241,7 +756,11 @@ mod tests {
         assert_eq!(m.invoke(0, Some(0), &s), Action::Redraw);
         assert_eq!(m.focused, 0);
         assert_eq!(m.invoke(1, None, &s), Action::Change(Change::PinMenu(true)));
-        assert_eq!(m.invoke(5, None, &s), Action::OpenDefaultApps);
+        assert_eq!(
+            m.invoke(5, None, &s),
+            Action::Change(Change::UpdateCheck(true))
+        );
+        assert_eq!(m.invoke(6, None, &s), Action::OpenDefaultApps);
         // Mismatched or out-of-range parts do nothing.
         assert_eq!(m.invoke(0, None, &s), Action::Redraw);
         assert_eq!(m.invoke(1, Some(0), &s), Action::Redraw);
@@ -1278,10 +797,10 @@ mod tests {
             m.release(px, py, &l, &s),
             Action::Change(Change::PinMenu(true))
         );
-        let (bx, by) = center(l.controls[5].options[0]);
+        let (bx, by) = center(l.controls[6].options[0]);
         m.press(bx, by, &l);
         assert_eq!(m.release(bx, by, &l, &s), Action::OpenDefaultApps);
-        assert_eq!(m.focused, 5);
+        assert_eq!(m.focused, 6);
         // Outside every control: not taken, nothing happens.
         assert!(!m.press(2.0, 2.0, &l));
         assert_eq!(m.release(2.0, 2.0, &l, &s), Action::Nothing);
@@ -1339,6 +858,40 @@ mod tests {
             apply_change(&mut s, Change::Language(LangSetting::En)),
             None
         );
+    }
+
+    /// "업데이트 확인" is a checkbox: off while unanswered, toggled with Space or a
+    /// click, and turning it on asks for a check.
+    #[test]
+    fn update_check_toggles() {
+        let mut s = Settings::default();
+        assert!(!Control::UpdateCheck.checked(&s));
+        let mut m = Model::default();
+        focus(&mut m, Control::UpdateCheck);
+        let on = Action::Change(Change::UpdateCheck(true));
+        assert_eq!(m.on_key(VK_SPACE, NONE, false, &s), Some(on));
+        let update = apply_change(&mut s, Change::UpdateCheck(true)).unwrap();
+        assert!(update.check_updates);
+        assert_eq!(s.update_check, Some(true));
+        assert!(Control::UpdateCheck.checked(&s));
+        let off = Action::Change(Change::UpdateCheck(false));
+        assert_eq!(m.on_key(VK_RETURN, NONE, false, &s), Some(off));
+        let update = apply_change(&mut s, Change::UpdateCheck(false)).unwrap();
+        assert!(!update.check_updates);
+        assert_eq!(s.update_check, Some(false));
+        assert_eq!(apply_change(&mut s, Change::UpdateCheck(false)), None);
+        // Unanswered, then turned off here: that is an answer too.
+        let mut fresh = Settings::default();
+        assert!(apply_change(&mut fresh, Change::UpdateCheck(false)).is_some());
+        assert_eq!(fresh.update_check, Some(false));
+        let l = layout(SIZE_DIP);
+        let i = CONTROLS
+            .iter()
+            .position(|c| *c == Control::UpdateCheck)
+            .unwrap();
+        let (x, y) = center(l.controls[i].options[0]);
+        assert!(m.press(x, y, &l));
+        assert_eq!(m.release(x, y, &l, &fresh), on);
     }
 
     #[test]
@@ -1430,7 +983,7 @@ mod tests {
             let mut rc = RECT::default();
             GetClientRect(settings, &mut rc).unwrap();
             assert_eq!(rc.right, (420.0 * dpi / 96.0).round() as i32);
-            assert_eq!(rc.bottom, (480.0 * dpi / 96.0).round() as i32);
+            assert_eq!(rc.bottom, (SIZE_DIP.1 * dpi / 96.0).round() as i32);
             // Destroying the main window takes the settings window with it.
             DestroyWindow(owner).unwrap();
             assert!(!IsWindow(settings).as_bool());

@@ -1,0 +1,219 @@
+# Build, lint, test, supply-chain checks and the lv-bench regression check.
+#
+# Third-party actions are pinned to full commit SHAs (the tag is in the comment);
+# Dependabot (.github/dependabot.yml) proposes updates.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
+
+# bash (Git Bash on Windows) runs with `set -eo pipefail`, so a failing command in a
+# multi-line step fails the step; pwsh steps check $LASTEXITCODE themselves.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      # setup-deps.ps1 keeps vcpkg's binary cache in .vcpkg\archives; restoring it skips
+      # rebuilding libheif, libde265 and libjpeg-turbo. vcpkg checks each archive's ABI
+      # hash itself, so a stale entry is rebuilt rather than used.
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .vcpkg/archives
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-x64-windows-
+
+      # A cache entry is never overwritten, so the key includes the commit: every run saves
+      # its target folder and the next one starts from the newest entry (restore-keys).
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ env.RUST_TOOLCHAIN }}-
+
+      # vcpkg at the pinned commit, manifest install, forbidden-codec check, DLLs next to
+      # the build outputs.
+      - name: Native dependencies (vcpkg)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
+
+      # fuzz/ is its own workspace (excluded in Cargo.toml), so `cargo fmt --all`, clippy
+      # and `cargo deny` do not cover it; `cargo audit` checks its lockfile (supply-chain
+      # job) and fuzz.yml builds it twice a week.
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # lv-app's tests start the worker, so build it first.
+      - name: Test
+        run: |
+          cargo build -p lv-worker
+          cargo test --workspace
+
+      # crates/lv-bench/baseline.json was measured on a laptop, so the runner is compared
+      # only with a baseline measured on a runner: crates/lv-bench/baseline-ci.json. Until
+      # one is committed, the run only measures, uploads the result as the artifact
+      # `lv-bench-ci` (commit its lines as baseline-ci.json) and warns.
+      - name: Benchmark (lv-bench)
+        shell: pwsh
+        run: |
+          cargo build --release -p lv-app -p lv-worker -p lv-bench
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $baseline = 'crates/lv-bench/baseline-ci.json'
+          if (Test-Path $baseline) {
+            ./target/release/lv-bench.exe --check $baseline > lv-bench-ci.json
+            $code = $LASTEXITCODE
+            Get-Content lv-bench-ci.json
+            exit $code
+          }
+          ./target/release/lv-bench.exe > lv-bench-ci.json
+          $code = $LASTEXITCODE
+          Get-Content lv-bench-ci.json
+          if ($code -ne 0) {
+            Write-Output "::warning::lv-bench failed on the runner (exit $code); no CI baseline yet, so this does not fail the build."
+          } else {
+            Write-Output "::warning::No $baseline yet: measured only. Commit the lv-bench-ci artifact as $baseline to enable the regression check."
+          }
+          exit 0
+
+      - name: Upload lv-bench result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lv-bench-ci
+          path: lv-bench-ci.json
+          if-no-files-found: ignore
+
+  # Release builds link the C runtime statically (ruling R16, release.yml and
+  # scripts/package.ps1), which the build job above does not. This job builds lv-worker
+  # and lv-app's tests the same way and runs the worker's own tests and lv-app's worker
+  # tests (sandbox, AppContainer, HEIC decode and JPEG rotation through the pool).
+  crt-static:
+    name: Worker tests with the static C runtime (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .vcpkg/archives
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-x64-windows-
+
+      # Its own cache: RUSTFLAGS changes every artifact, so it cannot share the build job's.
+      - name: Cache cargo registry and target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-crt-static-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Native dependencies (vcpkg)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1
+
+      - name: Build
+        run: |
+          cargo build --locked -p lv-worker
+          cargo test --locked -p lv-worker -p lv-app --no-run
+
+      - name: Test
+        run: |
+          cargo test --locked -p lv-worker
+          cargo test --locked -p lv-app -- worker::
+
+  supply-chain:
+    name: cargo deny and cargo audit
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_AUDIT_VERSION: "0.22.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Cache tools
+        id: tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny.exe
+            ~/.cargo/bin/cargo-audit.exe
+          key: tools-${{ env.RUST_TOOLCHAIN }}-deny-${{ env.CARGO_DENY_VERSION }}-audit-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-deny and cargo-audit
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+          cargo install --locked cargo-audit --version "$CARGO_AUDIT_VERSION"
+
+      # Licenses, bans, sources and RustSec advisories (deny.toml).
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: cargo audit
+        run: |
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock

@@ -57,3 +57,17 @@ Task 5: minor (deferred): Open dialog keeps old filter names after language chan
 - Split oversized files: settings_win.rs (~973), uia.rs (~690 → uia_glue.rs), watch.rs (~738 → device_watch.rs), exif_card.rs (~790), input/commands/window.rs.
 - with_com STA init once at startup; NOTICES copied beside exe in packaging; Open-dialog filter names refresh on language change.
 - Settings cross-process lock / unique .tmp name; UIA robustness minors (Task 6 list); watch_loop panic handle leak.
+
+# M5 status of the items carried to M5
+
+Checked against the M5 branch (`m5-harden-ship`) in Task 9. The history above is kept as it was.
+
+| M4 item | Status | Note |
+|---|---|---|
+| Split oversized files (settings_win, uia → uia_glue, watch → device_watch, exif_card, input, commands, window) | **M5에서 해결** (da802e6, 54b41ca, 197f512, 772b910, 883723e, 95272fc, 7ee8075, 2db101c) | Split by responsibility with no behaviour change; tests unchanged. |
+| `with_com` STA init once at start-up | **M5에서 해결** (3ba0cff) | COM is initialized on the UI thread once; the per-call init/teardown is gone. |
+| NOTICES copied beside the exe in packaging | **M5에서 해결** (bfcf3da) | Both the portable zip and the installer input carry `THIRD_PARTY_NOTICES.md` next to `light-view.exe`. Clicking About → [오픈소스 고지] in the packaged build was not driven (it would start the user's default .md program; README user-check). |
+| Open-dialog filter names after a language change | **M5에서 해결** (3366bff) | Solved by holding the settings window while the Open dialog is up, so the language cannot change under a live dialog (a live IFileDialog cannot rename its filters). |
+| Settings: unique .tmp name / cross-process lock | 일부 해결 (43e4d26) | Saves go through `settings.toml.<pid>.tmp`, so two processes never rename each other's half-written file. No cross-process lock (field-level saves from M4 remain). A stale `.<pid>.tmp` after a crash is not swept yet (Task 8 review minor). |
+| UIA robustness minors (Task 6 list) | 일부 해결 (5008c6c) | `WM_GETOBJECT` after `WM_DESTROY` no longer recreates a provider, and the toast's [실행 취소] is exposed disabled while a dialog is open. The rest of the Task 6 list is still open. |
+| watch_loop panic handle leak | 미해결 | Not changed in M5. |

@@ -3,6 +3,7 @@ name = "lv-ipc"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
+publish = false
 description = "Bounded message format between light-view's app and its sandboxed decode worker."
 
 [dependencies]

@@ -56,11 +56,16 @@ impl Viewport {
         self.scale
     }
 
+    /// The smallest and largest scale `zoom_at` allows: down to the fit scale or
+    /// `MIN_SCALE_FLOOR`, whichever is smaller, up to `MAX_SCALE` or the fit scale.
+    pub fn zoom_bounds(&self) -> (f32, f32) {
+        let fit = self.fit_scale();
+        (fit.min(MIN_SCALE_FLOOR), MAX_SCALE.max(fit))
+    }
+
     /// Zoom by `factor`; the image point under `anchor` stays put.
     pub fn zoom_at(&mut self, factor: f32, anchor: (f32, f32)) {
-        let fit = self.fit_scale();
-        let min = fit.min(MIN_SCALE_FLOOR);
-        let max = MAX_SCALE.max(fit);
+        let (min, max) = self.zoom_bounds();
         self.set_scale_at((self.scale * factor).clamp(min, max), anchor);
     }
 

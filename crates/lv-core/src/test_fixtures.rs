@@ -36,9 +36,15 @@ pub fn png_pixel(rgba: [u8; 4]) -> Vec<u8> {
 /// 16x8 JPEG, left 8 columns red, right 8 columns blue, with an EXIF Orientation APP1
 /// segment inserted right after SOI.
 pub fn jpeg_16x8_with_orientation(orientation: u16) -> Vec<u8> {
-    let mut img = image::RgbImage::new(16, 8);
+    jpeg_halves(16, 8, orientation, None)
+}
+
+/// `w`x`h` JPEG, left half red, right half blue, with an EXIF Orientation APP1 segment
+/// and, if given, an ICC profile APP2 segment inserted right after SOI.
+pub fn jpeg_halves(w: u32, h: u32, orientation: u16, icc: Option<&[u8]>) -> Vec<u8> {
+    let mut img = image::RgbImage::new(w, h);
     for (x, _, p) in img.enumerate_pixels_mut() {
-        *p = if x < 8 {
+        *p = if x < w / 2 {
             image::Rgb([255, 0, 0])
         } else {
             image::Rgb([0, 0, 255])
@@ -46,7 +52,7 @@ pub fn jpeg_16x8_with_orientation(orientation: u16) -> Vec<u8> {
     }
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
-        .write_image(img.as_raw(), 16, 8, image::ExtendedColorType::Rgb8)
+        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .unwrap();
 
     let field = Field {
@@ -67,6 +73,12 @@ pub fn jpeg_16x8_with_orientation(orientation: u16) -> Vec<u8> {
 
     let mut out = jpeg[..2].to_vec();
     out.extend_from_slice(&app1);
+    if let Some(icc) = icc {
+        out.extend_from_slice(&[0xFF, 0xE2]);
+        out.extend_from_slice(&((icc.len() + 16) as u16).to_be_bytes());
+        out.extend_from_slice(b"ICC_PROFILE\0\x01\x01");
+        out.extend_from_slice(icc);
+    }
     out.extend_from_slice(&jpeg[2..]);
     out
 }

@@ -4,17 +4,22 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
 use lv_core::exif_info::ExifData;
-use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
-use lv_core::listing::{same_path, FolderList};
+use lv_core::identity::FileIdentity;
+use lv_core::listing::FolderList;
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
 
 use crate::strings::{self, t, text, Lang, S};
+
+mod leave;
+mod rescan;
+
+pub use leave::{LeaveDecision, LeaveReason};
+pub use rescan::RescanFound;
 
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
 const MIN_DELAY_MS: u32 = 20;
@@ -70,41 +75,6 @@ struct Shown {
     /// The file was saved since it was decoded: it stays drawn (with its old rotation,
     /// which the saved file now holds) until the new decode replaces it.
     stale: bool,
-}
-
-/// What the user tried to do when leaving a photo with an unsaved rotation; done once
-/// the save prompt is answered (or the save finished).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LeaveReason {
-    /// `Command::Next` or `Command::Prev`.
-    Move(Command),
-    /// Open a file (a drop, a forwarded launch).
-    Open(PathBuf),
-    /// Close the window.
-    Close,
-    /// Delete the photo on screen.
-    Delete,
-    /// Show the pending deleted photo again.
-    Undo,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LeaveDecision {
-    /// Nothing to save: go ahead.
-    Proceed,
-    /// Show the save prompt; the reason waits for its answer.
-    Ask,
-    /// Save without asking (`auto_save_rotation`); the reason waits for the save.
-    AutoSave,
-}
-
-/// What a save of the current photo needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SaveRequest {
-    pub path: PathBuf,
-    pub identity: Option<FileIdentity>,
-    pub quarters: u8,
-    pub generation: u64,
 }
 
 pub struct Viewer {
@@ -190,83 +160,6 @@ fn rescaled(old: &Viewport, old_size: (f32, f32), size: (f32, f32), image: (f32,
     let (x, y, w, h) = v.image_rect();
     v.pan(centre.0 - (x + rel.0 * w), centre.1 - (y + rel.1 * h));
     v
-}
-
-/// The disk side of a folder rescan, taken by `Viewer::rescan_job`. `run` may block
-/// (a slow or stalled network folder), so it runs off the UI thread.
-#[derive(Debug, Clone)]
-pub struct RescanJob {
-    pub folder: PathBuf,
-    /// The viewer's generation and current photo when the job was taken: a result for
-    /// another photo or folder is not applied.
-    generation: u64,
-    current: Option<PathBuf>,
-    /// The shown photo and the prefetched ones, with the identity they were decoded from.
-    checks: Vec<(PathBuf, FileIdentity)>,
-}
-
-/// What `RescanJob::run` found.
-#[derive(Debug, Clone)]
-pub struct RescanFound {
-    folder: PathBuf,
-    generation: u64,
-    current: Option<PathBuf>,
-    /// The folder's files; `None` if it could not be read.
-    paths: Option<Vec<PathBuf>>,
-    /// The current photo is not listed and its metadata reads "not found".
-    current_absent: bool,
-    /// The checked files whose identity changed (`Verify::Changed` only: a file that
-    /// cannot be read may be shared, locked or behind a network blip).
-    changed: Vec<(PathBuf, FileIdentity)>,
-    /// How long the run took.
-    pub took: Duration,
-}
-
-impl RescanJob {
-    /// Reads the folder and the identities. Blocks as long as the disk does.
-    pub fn run(self) -> RescanFound {
-        let started = Instant::now();
-        let paths = FolderList::read_files(&self.folder).ok();
-        let current_absent = match (&paths, &self.current) {
-            (Some(paths), Some(c)) => !paths.iter().any(|p| same_path(p, c)) && confirmed_absent(c),
-            _ => false,
-        };
-        let changed = self
-            .checks
-            .into_iter()
-            .filter(|(path, id)| identity::verify(path, id) == Verify::Changed)
-            .collect();
-        RescanFound {
-            folder: self.folder,
-            generation: self.generation,
-            current: self.current,
-            paths,
-            current_absent,
-            changed,
-            took: started.elapsed(),
-        }
-    }
-
-    /// A result that changes nothing (for a run that failed).
-    pub fn nothing(&self) -> RescanFound {
-        RescanFound {
-            folder: self.folder.clone(),
-            generation: self.generation,
-            current: self.current.clone(),
-            paths: None,
-            current_absent: false,
-            changed: Vec::new(),
-            took: Duration::ZERO,
-        }
-    }
-}
-
-/// `path` is gone: its metadata reads "not found" (any other error may be passing).
-fn confirmed_absent(path: &Path) -> bool {
-    matches!(
-        std::fs::symlink_metadata(to_extended_path(path)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound
-    )
 }
 
 fn frame_delay(img: &DecodedImage, frame: usize) -> Option<u32> {
@@ -422,13 +315,17 @@ impl Viewer {
         }
     }
 
-    /// Asks the prefetcher for the current photo and its neighbours, in the direction
-    /// of the last move first.
+    /// Asks the prefetcher for the current photo and one neighbour each side, the one in
+    /// the direction of the last move first (spec §5.2). A second photo ahead was
+    /// dropped in M5: it cost a decoded 12 MP photo (~46 MB) and kept the app over the
+    /// 300 MB target. For a ~12 MP JPEG one decode (~0.25–0.3 s) is quicker than normal
+    /// paging; larger photos (24 MP and up, HEIC) may show "불러오는 중…" briefly on a
+    /// quick second press.
     fn request_wanted(&mut self) {
-        let offsets: [isize; 4] = if self.backward {
-            [0, -1, 1, -2]
+        let offsets: [isize; 3] = if self.backward {
+            [0, -1, 1]
         } else {
-            [0, 1, -1, 2]
+            [0, 1, -1]
         };
         self.wanted = offsets
             .iter()
@@ -569,312 +466,9 @@ impl Viewer {
         self.list.current()
     }
 
-    pub fn set_auto_save(&mut self, on: bool) {
-        self.auto_save = on;
-    }
-
-    /// Called before every way of leaving the current photo. With an unsaved rotation
-    /// the reason is kept (`take_pending_leave`) and the caller asks or saves first. A
-    /// move that would not move (at either end of the folder) never asks.
-    pub fn before_leave(&mut self, reason: LeaveReason) -> LeaveDecision {
-        let moves = match reason {
-            LeaveReason::Move(Command::Next) => self.list.neighbor(1).is_some(),
-            LeaveReason::Move(Command::Prev) => self.list.neighbor(-1).is_some(),
-            _ => true,
-        };
-        if !moves || !self.unsaved_rotation() {
-            return LeaveDecision::Proceed;
-        }
-        self.defer_leave(reason);
-        if self.auto_save && !self.save_failed {
-            LeaveDecision::AutoSave
-        } else {
-            LeaveDecision::Ask
-        }
-    }
-
-    /// Keeps `reason` to do once a save ends. A close already waiting is not replaced.
-    pub fn defer_leave(&mut self, reason: LeaveReason) {
-        if self.pending_leave != Some(LeaveReason::Close) {
-            self.pending_leave = Some(reason);
-        }
-    }
-
-    pub fn take_pending_leave(&mut self) -> Option<LeaveReason> {
-        self.pending_leave.take()
-    }
-
-    /// The prompt was cancelled: stay on the photo, rotated.
-    pub fn cancel_leave(&mut self) {
-        self.pending_leave = None;
-    }
-
-    /// A close waits for the running save (or the prompt's answer).
-    pub fn closing_after_save(&self) -> bool {
-        self.pending_leave == Some(LeaveReason::Close)
-    }
-
-    /// [저장 안 함]: drops the view rotation.
-    pub fn discard_rotation(&mut self) -> Redraw {
-        if self.quarters == 0 {
-            return Redraw::None;
-        }
-        self.quarters = 0;
-        if self.showing_current() {
-            if let Some(s) = &mut self.shown {
-                s.quarters = 0;
-            }
-        }
-        self.touched = false;
-        let (size, dip) = (self.view_size, self.dip);
-        self.set_view(size, dip);
-        Redraw::Full
-    }
-
-    /// The photo a delete acts on: the current one, if it is the one on screen (also
-    /// right after a save, while it is decoded again), with its identity.
-    pub fn delete_target(&self) -> Option<(PathBuf, Option<FileIdentity>)> {
-        let s = self.shown.as_ref()?;
-        (self.list.current() == Some(s.path.as_path()))
-            .then(|| (s.path.clone(), s.identity.clone()))
-    }
-
-    /// Hides a deleted (pending) photo; the next one is shown, or the previous one at
-    /// the end of the folder, or nothing once the folder is empty.
-    pub fn hide(&mut self, path: &Path) -> Redraw {
-        let was_current = self.list.current() == Some(path);
-        if !self.list.hide(path) {
-            return Redraw::None;
-        }
-        if !was_current {
-            return Redraw::Full;
-        }
-        self.quarters = 0;
-        self.backward = false;
-        if self.list.current().is_none() {
-            return self.clear_shown();
-        }
-        self.after_move()
-    }
-
-    /// Nothing left to show: the folder has no (listed) photo.
-    fn clear_shown(&mut self) -> Redraw {
-        self.shown = None;
-        self.generation += 1;
-        self.loading = false;
-        self.wanted.clear();
-        self.prefetcher.request(&[]);
-        Redraw::Full
-    }
-
-    /// Like `hide`, for good (the photo was deleted permanently).
-    pub fn remove(&mut self, path: &Path) -> Redraw {
-        let redraw = self.hide(path);
-        self.list.forget(path);
-        redraw
-    }
-
-    /// A hidden photo is gone from disk: it is never listed again.
-    pub fn forget_hidden(&mut self, path: &Path) {
-        self.list.forget(path);
-    }
-
-    /// A hidden photo stays on disk after all: listed again, without moving to it.
-    pub fn unhide(&mut self, path: &Path) -> Redraw {
-        let empty = !self.has_file();
-        if !self.list.unhide(path) {
-            return Redraw::None;
-        }
-        if empty {
-            return self.after_move();
-        }
-        Redraw::Full
-    }
-
-    /// Undo: lists a hidden photo again and shows it; a photo from another folder is
-    /// opened there.
-    pub fn restore(&mut self, path: &Path) -> Redraw {
-        if !self.list.unhide(path) || !self.list.go_to(path) {
-            self.open(path);
-            return Redraw::Full;
-        }
-        self.quarters = 0;
-        self.backward = false;
-        self.after_move()
-    }
-
-    /// The current photo with its unsaved rotation, if it is on screen.
-    pub fn save_request(&self) -> Option<SaveRequest> {
-        if !self.showing_current() || !self.unsaved_rotation() {
-            return None;
-        }
-        let s = self.shown.as_ref()?;
-        Some(SaveRequest {
-            path: s.path.clone(),
-            identity: s.identity.clone(),
-            quarters: self.quarters,
-            generation: self.generation,
-        })
-    }
-
-    /// `path` was saved and now holds the rotation on screen: it is decoded again and
-    /// shown unrotated, the old decode staying up until then. `identity` is the saved
-    /// file's.
-    pub fn on_saved(&mut self, path: &Path, identity: Option<FileIdentity>) -> Redraw {
-        self.prefetcher.invalidate(path);
-        if let Some(s) = self.shown.as_mut().filter(|s| s.path == path) {
-            s.identity = identity;
-            s.stale = true;
-        }
-        if self.list.current() == Some(path) {
-            self.quarters = 0;
-        }
-        self.save_failed = false;
-        self.show_current();
-        Redraw::Full
-    }
-
-    /// A save of the shown photo did not happen: stay on it, and the next leave asks.
-    pub fn on_save_failed(&mut self) {
-        self.save_failed = true;
-        self.pending_leave = None;
-    }
-
     /// The folder listed (and watched).
     pub fn folder(&self) -> Option<&Path> {
         self.list.dir()
-    }
-
-    /// What a rescan has to read from disk, taken on the UI thread; `RescanJob::run`
-    /// reads it on another thread and `apply_rescan` applies the result here. `None`
-    /// without a folder.
-    pub fn rescan_job(&self) -> Option<RescanJob> {
-        let current = self.list.current().map(Path::to_path_buf);
-        let mut checks: Vec<(PathBuf, FileIdentity)> = Vec::new();
-        if let (Some(s), Some(c)) = (&self.shown, &current) {
-            if let Some(id) = s.identity.as_ref().filter(|_| same_path(&s.path, c)) {
-                checks.push((s.path.clone(), id.clone()));
-            }
-        }
-        for path in &self.wanted {
-            if let Some((_, Some(id))) = self.prefetcher.get_with_identity(path) {
-                if !checks.iter().any(|(p, i)| p == path && *i == id) {
-                    checks.push((path.clone(), id));
-                }
-            }
-        }
-        Some(RescanJob {
-            folder: self.list.dir()?.to_path_buf(),
-            generation: self.generation,
-            current,
-            checks,
-        })
-    }
-
-    /// Applies a rescan (see `RescanJob`). The current photo stays current (by path);
-    /// pending deletes stay hidden. A current photo gone from the folder (not listed and
-    /// confirmed absent) gives way to the one at its place, its unsaved rotation dropped:
-    /// there is no file left to save it to. A current photo changed by another program
-    /// is decoded again, unrotated (ruling R20: the notice only when a rotation was
-    /// dropped), as is a changed prefetched neighbour. A file that only fails to read
-    /// (`Verify::Missing`: shared, locked, a network blip) is left alone, and so is
-    /// everything when the folder could not be read.
-    ///
-    /// `None` when the result is out of date (another folder or photo since the job was
-    /// taken): nothing is applied and the caller rescans again.
-    pub fn apply_rescan(&mut self, found: RescanFound) -> Option<(Redraw, Option<RescanNotice>)> {
-        let current = self.list.current().map(Path::to_path_buf);
-        let same_current = match (&found.current, &current) {
-            (Some(a), Some(b)) => same_path(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        let same_folder = self.list.dir().is_some_and(|d| same_path(d, &found.folder));
-        if !same_folder || found.generation != self.generation || !same_current {
-            return None;
-        }
-        let Some(mut paths) = found.paths else {
-            return Some((Redraw::None, None));
-        };
-        if let Some(c) = &current {
-            if !paths.iter().any(|p| same_path(p, c)) && !found.current_absent {
-                // Not listed this time, yet still there.
-                paths.push(c.clone());
-            }
-        }
-        let rotated = self.unsaved_rotation();
-        let position = self.list.position();
-        self.list.refresh(paths, current.as_deref());
-        let stayed = match (&current, self.list.current()) {
-            (Some(old), Some(new)) => same_path(old, new),
-            (None, None) => true,
-            _ => false,
-        };
-        if !stayed {
-            self.quarters = 0;
-            self.backward = false;
-            let notice = (current.is_some() && rotated).then_some(RescanNotice::Vanished);
-            let redraw = if self.list.current().is_none() {
-                self.clear_shown()
-            } else {
-                self.after_move()
-            };
-            return Some((redraw, notice));
-        }
-        self.request_wanted();
-        let reloaded = self.reload_if_changed(&found.changed);
-        for (path, id) in &found.changed {
-            if reloaded && current.as_ref().is_some_and(|c| same_path(c, path)) {
-                continue; // already decoding again
-            }
-            // Only the decode that was checked: a newer one is of the changed file.
-            let cached = self.prefetcher.get_with_identity(path);
-            if cached.is_some_and(|(_, cached)| cached.as_ref() == Some(id)) {
-                self.prefetcher.invalidate(path);
-            }
-        }
-        if reloaded {
-            return Some((Redraw::Full, rotated.then_some(RescanNotice::Reloaded)));
-        }
-        if self.list.position() != position {
-            return Some((Redraw::Full, None));
-        }
-        Some((Redraw::None, None))
-    }
-
-    /// Takes and applies a rescan on this thread (tests).
-    #[cfg(test)]
-    pub fn rescan(&mut self) -> (Redraw, Option<RescanNotice>) {
-        let Some(job) = self.rescan_job() else {
-            return (Redraw::None, None);
-        };
-        self.apply_rescan(job.run())
-            .expect("nothing changed in between")
-    }
-
-    /// The current photo on screen was changed by another program (its checked
-    /// identity is in `changed`): it stays drawn until its new decode replaces it (saves
-    /// and deletes refuse meanwhile, as its identity is the old file's), and its
-    /// rotation is dropped. True if it changed.
-    fn reload_if_changed(&mut self, changed: &[(PathBuf, FileIdentity)]) -> bool {
-        let Some(current) = self.list.current().map(Path::to_path_buf) else {
-            return false;
-        };
-        let Some(s) = self.shown.as_mut().filter(|s| same_path(&s.path, &current)) else {
-            return false;
-        };
-        let checked = changed
-            .iter()
-            .any(|(p, id)| *p == s.path && s.identity.as_ref() == Some(id));
-        if !checked {
-            return false;
-        }
-        s.stale = true;
-        self.prefetcher.invalidate(&s.path);
-        self.quarters = 0;
-        self.touched = false;
-        self.show_current();
-        true
     }
 
     /// (1-based index, count), or (0, 0) with no file.
@@ -921,6 +515,11 @@ impl Viewer {
         self.image().map(|i| (i.width, i.height, i.byte_len))
     }
 
+    /// The full size of a JPEG opened at reduced size (ruling R1); `None` otherwise.
+    pub fn scaled_from(&self) -> Option<(u32, u32)> {
+        self.image()?.scaled_from
+    }
+
     /// The shown image's EXIF, read with its decode (ruling R5).
     pub fn exif(&self) -> Option<&Arc<ExifData>> {
         self.image()?.exif.as_ref()
@@ -940,9 +539,15 @@ impl Viewer {
         self.generation
     }
 
-    /// The shown image and the frame to draw.
-    pub fn frame_to_upload(&self) -> Option<(&DecodedImage, usize)> {
-        self.image().map(|i| (i, self.frame))
+    /// The shown image (always a decoded one) and the frame to draw.
+    pub fn frame_to_upload(&self) -> Option<(&DecodeResult, usize)> {
+        match &self.shown {
+            Some(Shown {
+                content: Content::Image { result, .. },
+                ..
+            }) if result.is_ok() => Some((result, self.frame)),
+            _ => None,
+        }
     }
 
     /// The current frame's delay in ms, if the shown photo is animated.
@@ -990,6 +595,7 @@ mod tests {
     use super::*;
     use lv_core::decode::Frame;
     use lv_core::format::ImageFormat;
+    use lv_core::identity;
     use lv_core::prefetch::Decode;
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Mutex;
@@ -1020,6 +626,7 @@ mod tests {
                 format: ImageFormat::Png,
                 byte_len: 0,
                 exif: None,
+                scaled_from: None,
             })
         }
     }
@@ -1073,10 +680,32 @@ mod tests {
     }
 
     #[test]
+    fn opened_before_the_window_exists_shows_once_checked_and_sized() {
+        // At start-up the first photo is opened before the window exists, so its decode
+        // runs while the window and renderer are made; the ready message posted then is
+        // lost and the window checks for the photo itself.
+        let (tx, rx) = channel();
+        let prefetcher = Prefetcher::new(FakeDecoder { gate: None }, 1, u64::MAX, move |path| {
+            let _ = tx.send(path);
+        });
+        let mut v = Viewer::new(prefetcher);
+        let names = ["a.jpg", "b.jpg", "c.jpg"];
+        v.open_list(FolderList::from_paths(names.map(p).to_vec(), &p("b.jpg")));
+        let first = rx.recv_timeout(Duration::from_secs(5)).expect("a decode");
+        assert_eq!(first, p("b.jpg"), "the opened photo decodes first");
+        assert_eq!(v.check_current(), Redraw::Full);
+        v.set_view(VIEW, 1.0);
+        match v.scene() {
+            Scene::Image { rect, .. } => assert_eq!((rect.2, rect.3), (400.0, 300.0)),
+            _ => panic!("the photo should be shown"),
+        }
+    }
+
+    #[test]
     fn prev_requests_prefetch_backwards() {
         let (mut v, _rx) = viewer_at("d.jpg");
         v.apply(Command::Prev);
-        assert_eq!(v.wanted, [p("c.jpg"), p("b.jpg"), p("d.jpg"), p("a.jpg")]);
+        assert_eq!(v.wanted, [p("c.jpg"), p("b.jpg"), p("d.jpg")]);
     }
 
     #[test]

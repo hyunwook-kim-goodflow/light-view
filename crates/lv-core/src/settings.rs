@@ -44,6 +44,11 @@ pub struct Settings {
     /// Save a view rotation without asking when leaving the photo.
     pub auto_save_rotation: bool,
     pub language: LangSetting,
+    /// Look for a new release once a day (spec §6.6). `None`: not asked yet, so no
+    /// check is made until the user answers.
+    pub update_check: Option<bool>,
+    /// When the last update check started, in seconds since the Unix epoch.
+    pub last_update_check: Option<u64>,
 }
 
 /// 설정을 읽는다. 파일이 없으면 기본값, 파싱에 실패하면 원본을 `.bak`으로 옮기고 기본값을 돌려준다.
@@ -69,10 +74,80 @@ pub fn save_settings(path: &Path, s: &Settings) -> std::io::Result<()> {
     }
     let text =
         toml::to_string(s).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = with_suffix(path, ".tmp");
-    std::fs::write(&tmp, text)?;
-    // Windows에서도 std::fs::rename은 기존 대상을 덮어쓴다.
-    std::fs::rename(&tmp, path)
+    let tmp = temp_path(path);
+    let written = std::fs::write(&tmp, text).and_then(|()| {
+        // Windows에서도 std::fs::rename은 기존 대상을 덮어쓴다.
+        std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// The temp file a save writes before renaming it into place: one per process
+/// (`settings.toml.<pid>.tmp`), so windows in separate processes saving at once never
+/// write into or rename each other's.
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    with_suffix(path, &format!(".{}.tmp", std::process::id()))
+}
+
+/// A temp file younger than this may belong to a save running in another process.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Deletes the `settings.toml.<pid>.tmp` files a process left behind when it crashed
+/// between writing and renaming (a failed write or rename removes its own). Called at
+/// start-up, before this process saves anything. Only that exact name pattern beside
+/// `path` is touched, and only a file older than a minute or carrying this process's id
+/// (a dead process that had the same id left it); a fresh file of another id may be a
+/// save in progress. Returns how many were deleted.
+pub fn sweep_stale_temps(path: &Path, now: std::time::SystemTime) -> usize {
+    let (Some(dir), Some(base)) = (path.parent(), path.file_name()) else {
+        return 0;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let base = base.to_string_lossy();
+    let mut deleted = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| temp_pid(n, &base)) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if (old || pid == std::process::id()) && std::fs::remove_file(entry.path()).is_ok() {
+            deleted += 1;
+        }
+    }
+    deleted
+}
+
+/// The process id in `<base>.<pid>.tmp` (the name `temp_path` makes), or `None`.
+fn temp_pid(name: &str, base: &str) -> Option<u32> {
+    let digits = name
+        .strip_prefix(base)?
+        .strip_prefix('.')?
+        .strip_suffix(".tmp")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Changes only what `change` sets: reads the file as it is now (another window in
@@ -90,12 +165,15 @@ pub fn update_settings(
 
 impl Settings {
     /// Takes the fields this process does not apply while it runs (the new-window
-    /// choice, the memory limit and the placement) from `written`. The language, the
-    /// pin and auto-save stay as this window applied them.
+    /// choice, the memory limit and the placement) from `written`, and the update
+    /// answer and last check time, which any window may have written last. The
+    /// language, the pin and auto-save stay as this window applied them.
     pub fn sync_from(&mut self, written: &Settings) {
         self.open_in_new_window = written.open_in_new_window;
         self.memory_budget_mb = written.memory_budget_mb;
         self.window = written.window.clone();
+        self.update_check = written.update_check;
+        self.last_update_check = written.last_update_check;
     }
 }
 
@@ -109,6 +187,62 @@ fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_temp_files_are_swept_at_start() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let now = SystemTime::now();
+        let make = |name: &str, age: Duration| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, "x").unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(now - age).unwrap();
+            p
+        };
+        let other = std::process::id().wrapping_add(1);
+        let old_other = make(
+            &format!("settings.toml.{other}.tmp"),
+            Duration::from_secs(120),
+        );
+        let fresh_other = make(&format!("settings.toml.{other}.tmp2"), Duration::ZERO);
+        let fresh_live = make(
+            &format!("settings.toml.{}.tmp", other.wrapping_add(1)),
+            Duration::from_secs(5),
+        );
+        let fresh_own = make(
+            &format!("settings.toml.{}.tmp", std::process::id()),
+            Duration::ZERO,
+        );
+        // Names outside the pattern stay, however old.
+        let keep: Vec<_> = [
+            "settings.toml",
+            "settings.toml.bak",
+            "settings.toml..tmp",
+            "settings.toml.12a.tmp",
+            "settings.toml.12.TMP",
+            "other.toml.12.tmp",
+            "xsettings.toml.12.tmp",
+        ]
+        .iter()
+        .map(|n| make(n, Duration::from_secs(3600)))
+        .collect();
+        assert_eq!(sweep_stale_temps(&path, now), 2);
+        assert!(!old_other.exists());
+        assert!(!fresh_own.exists());
+        // A fresh file of another process may be a save in progress.
+        assert!(fresh_live.exists());
+        assert!(fresh_other.exists());
+        for p in &keep {
+            assert!(p.exists(), "{}", p.display());
+        }
+        // A missing folder is fine.
+        assert_eq!(
+            sweep_stale_temps(&dir.path().join("none").join("settings.toml"), now),
+            0
+        );
+    }
 
     fn sample() -> Settings {
         Settings {
@@ -124,6 +258,8 @@ mod tests {
             memory_budget_mb: Some(512),
             auto_save_rotation: true,
             language: LangSetting::En,
+            update_check: Some(true),
+            last_update_check: Some(1_790_000_000),
         }
     }
 
@@ -133,6 +269,28 @@ mod tests {
         let path = dir.path().join("settings.toml");
         save_settings(&path, &sample()).unwrap();
         assert_eq!(load_settings(&path), sample());
+    }
+
+    /// Windows in separate processes may save at the same moment: each writes its own
+    /// temp file (`settings.toml.<pid>.tmp`), so neither renames the other's half-written
+    /// one into place, and a temp file of another process is left alone.
+    #[test]
+    fn each_process_saves_through_its_own_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let own = dir
+            .path()
+            .join(format!("settings.toml.{}.tmp", std::process::id()));
+        assert_eq!(temp_path(&path), own);
+        let other = dir.path().join("settings.toml.4294967295.tmp");
+        std::fs::write(&other, b"another process, mid-write").unwrap();
+        save_settings(&path, &sample()).unwrap();
+        assert_eq!(load_settings(&path), sample());
+        assert!(!own.exists());
+        assert_eq!(
+            std::fs::read(&other).unwrap(),
+            b"another process, mid-write"
+        );
     }
 
     /// Two windows in separate processes ("새 창") each keep their own Settings: a
@@ -204,6 +362,30 @@ mod tests {
         // Settings files from before M3 ask before saving a rotation.
         assert!(!s.auto_save_rotation);
         assert_eq!(s.language, LangSetting::Auto);
+        // Files from before M5 have not been asked about update checks yet.
+        assert_eq!(s.update_check, None);
+        assert_eq!(s.last_update_check, None);
+    }
+
+    /// The update answer is three-state: unanswered (no key), on, off. Another
+    /// window's answer and check time are taken over on the next field save.
+    #[test]
+    fn update_answer_round_trips_and_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        save_settings(&path, &Settings::default()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("update_check"), "{text}");
+        for answer in [Some(true), Some(false)] {
+            update_settings(&path, |s| s.update_check = answer).unwrap();
+            assert_eq!(load_settings(&path).update_check, answer);
+        }
+        let mut a = Settings::default();
+        update_settings(&path, |s| s.last_update_check = Some(42)).unwrap();
+        let written = update_settings(&path, |s| s.toolbar_pinned = true).unwrap();
+        a.sync_from(&written);
+        assert_eq!(a.update_check, Some(false));
+        assert_eq!(a.last_update_check, Some(42));
     }
 
     #[test]

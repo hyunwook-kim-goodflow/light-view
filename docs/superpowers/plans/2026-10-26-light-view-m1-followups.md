@@ -130,3 +130,13 @@ Checked against the M4 branch (`m4-info-settings`) in Task 8. The history above 
 | M1 item | Status | Note |
 |---|---|---|
 | R12 (T9): toolbar accessible names (spec §4.2 UIA) deferred to M4 | **M4에서 해결** (83aeb77) | A UI Automation fragment provider exposes the toolbar as a ToolBar with Buttons named by their tooltips, the counter as Text and the pin button with a Toggle state; an auto-hidden toolbar stays in the tree as offscreen. Checked with a UIA client; Narrator itself is on the README user-check list. |
+
+# M5 status of the parked M1 items
+
+Checked against the M5 branch (`m5-harden-ship`) in Task 9. The history above is kept as it was. Items not listed here are still open.
+
+| M1 item | Status | Note |
+|---|---|---|
+| Task 12 / M2 table: first-present target (200 ms JPEG, 400 ms HEIC) | 일부 해결 (97afd57, 4075e84) | `lv-bench` measures it. 12 MP JPEG first pixel 543 → 375 ms in Task 3 and 286–290 ms in the Task 9 run (AC power): **still over 200 ms**. Most of what is left is Direct2D/D3D device creation (about 250–400 ms on AC), which does not depend on the photo. 12 MP HEIC is not measured (no sample). Recorded in README "현재 수치". |
+| R14 (T10): ~340 MB steady state for a 12 MP photo mid-folder, above the 300 MB target | **M5에서 해결** (97afd57) | Prefetch keeps one photo on each side, mips are uploaded one level at a time and freed. `lv-bench` jpeg12mp: 294 MB in the Task 9 run (target 300 MB, small margin). |
+| R18: smoke runs write the real settings.toml | 일부 해결 (97afd57, bfcf3da) | `lv-app --bench` starts with default settings and saves nothing; the portable build (`portable.txt`) keeps its settings in `data\` beside the exe. Other app runs (including `--timing`) use the normal settings file. |
