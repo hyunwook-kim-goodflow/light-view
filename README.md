@@ -10,8 +10,8 @@
 
 [GitHub Releases](https://github.com/goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
 
-- **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록은 지우고 설정은 남겨요.
-- **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 레지스트리와 `%APPDATA%`는 건드리지 않아요. 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(AppContainer는 설치 폴더에 권한을 주는 설치판에서만 써요).
+- **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록, 작업자의 AppContainer 프로필은 지우고 설정과 크래시 기록(미니덤프 포함)은 남겨요. 필요 없으면 두 폴더를 직접 지워도 돼요.
+- **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 레지스트리와 `%APPDATA%`는 건드리지 않아요. 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 보통 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(압축을 푼 폴더에는 AppContainer가 읽을 권한이 없어요). 다만 폴더에 `ALL APPLICATION PACKAGES` 읽기 권한이 있으면(예: `C:\Program Files` 아래에 풀었거나 아래처럼 `icacls`로 권한을 줬을 때) AppContainer를 쓰고, 그때 윈도우가 AppContainer 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`와 HKCU의 등록)을 만들어요. 포터블판에는 제거 프로그램이 없으니, 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`을 한 번 실행해 그 프로필을 지워 주세요(아무것도 띄우지 않고 끝나요. 설치판도 함께 쓰고 있으면 설치판이 다음에 다시 만들어요). 포터블판은 설치판이나 다른 폴더의 포터블판과 따로 한 창을 써요(한쪽이 열려 있어도 다른 쪽 사진이 그 창으로 넘어가지 않아요).
 
 **SmartScreen 경고:** 코드 서명이 없는 릴리스는 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있어요. 아래처럼 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 누르면 돼요. zip에서 푼 파일에 경고가 뜨면 zip 파일의 속성에서 **차단 해제**를 체크하고 다시 풀어도 돼요.
 
@@ -39,7 +39,7 @@ M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub�
 전체 기능:
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
-- HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고, 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 설치판은 설치할 때 그 폴더에 이 권한을 줘요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요). 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
+- HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고, 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 설치판은 설치할 때 그 폴더에 이 권한을 줘요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요. 그러면 AppContainer 프로필이 생기니 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`으로 지워 주세요). 설치 파일은 정해진 설치 폴더(`%LOCALAPPDATA%\Programs\light-view`)에만 이 권한을 주고, `/DIR=`로 다른 폴더에 설치하면 권한을 주지 않아 낮은 무결성 샌드박스로 돌아요. 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
 - HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 무시). AVIF는 아직 열 수 없어요.
 - `lv-worker.exe`가 앱 옆에 없으면 HEIC만 "이 사진은 열 수 없어요"로 나오고 다른 형식은 그대로 열려요.
 - 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전, 다크 모드를 지원해요.
@@ -50,7 +50,7 @@ M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub�
 - **오른쪽 클릭 메뉴:** 창 안에 그리는 메뉴라 다크 모드를 그대로 따라요. 열기(Ctrl+O), 폴더에서 보기, 경로 복사, 기본 앱 설정 열기, 설정(Ctrl+,), 정보가 있어요. 메뉴 키나 Shift+F10으로도 열고, ↑↓·Enter·Esc로 써요. 사진이 없으면 폴더에서 보기와 경로 복사는 흐리게 나오고 건너뛰어요.
 - **열기와 빈 시작 화면:** 사진 없이 실행하면 "사진을 끌어다 놓거나 열어 주세요"와 [열기] 단추가 나와요. 열기 대화상자는 지원하는 사진만 보여 주는 "사진" 필터가 기본이고, 보던 사진의 폴더에서 시작해요. 사진이나 폴더를 창에 끌어다 놓아도 열려요(폴더면 첫 사진). 열 수 있는 사진이 없으면 "열 수 있는 사진이 없어요"라고 알려 줘요.
 - **정보:** 버전과 라이선스 요약을 창 안 대화상자로 보여 줘요. [오픈소스 고지]는 앱 폴더의 `THIRD_PARTY_NOTICES.md`를 기본 프로그램으로 열어요. 설치판과 포터블판에는 이 파일이 exe 옆에 들어 있어요(`cargo build`로 만든 개발 빌드에는 없어서 "열지 못했어요"가 나와요).
-- **설정 창(Ctrl+,):** 메인 창에 딸린 작은 창으로, 한 번에 하나만 열려요. 바꾸는 즉시 `%APPDATA%\light-view\settings.toml`에 저장해요(바꾼 항목만 다시 써서 다른 창의 변경을 지우지 않아요).
+- **설정 창(Ctrl+,):** 메인 창에 딸린 작은 창으로, 한 번에 하나만 열려요. 바꾸는 즉시 `settings.toml`에 저장해요(설치판은 `%APPDATA%\light-view\settings.toml`, 포터블판은 exe 옆 `data\settings.toml`. 바꾼 항목만 다시 써서 다른 창의 변경을 지우지 않아요). 저장 도중 앱이 죽어 남은 `settings.toml.<숫자>.tmp`는 다음 실행 때 지워요.
   - 언어: 자동 / 한국어 / English
   - 메뉴 고정
   - 다른 사진을 열 때: 같은 창 / 새 창 (다음에 사진을 열 때부터 적용)
@@ -213,9 +213,9 @@ HEIC 첫 화면은 400 ms 목표를 크게 넘어요. 한 번 열 때 시간이 
 
 위 표는 디코딩이 한 스레드로만 돌던 때 값이에요. 디코딩이 거의 전부이고 작업자 CPU 시간이 걸린 시간과 같았어요. 파이프 전송은 약 30 ms라 공유 메모리로 바꿔도 얻는 게 적어요(계획 R3 기준으로 지금은 바꾸지 않아요). JPEG 수치는 M1과 같은 범위라 이 컴퓨터가 느려진 건 아니에요.
 
-M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU 수의 절반, 1–4개. 작업자 두 개가 함께 디코딩하기 때문이에요. 이 컴퓨터는 16개라 작업자마다 4개). 다시 잰 날은 노트북이 배터리 전원이라 창 만들기 같은 시작 비용이 크게 늘었어요(같은 때 JPEG 첫 화면도 1651–2229 ms). 그래서 절대값보다 같은 때 같은 방법으로 잰 비교를 보세요. 앱이 요청을 보내고 디코딩된 사진을 받을 때까지(파일 읽기 + 디코딩 + 전송, `real_samples` 테스트로 6회)는 스레드 전 약 720–830 ms에서 약 295–370 ms로 줄었어요. 남은 일(화면에 맞춘 축소 디코딩, 썸네일 먼저 보여 주기)은 M5에서 다뤄요.
+M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU 수의 절반, 1–4개. 작업자 두 개가 함께 디코딩하기 때문이에요. 이 컴퓨터는 16개라 작업자마다 4개). 다시 잰 날은 노트북이 배터리 전원이라 창 만들기 같은 시작 비용이 크게 늘었어요(같은 때 JPEG 첫 화면도 1651–2229 ms). 그래서 절대값보다 같은 때 같은 방법으로 잰 비교를 보세요. 앱이 요청을 보내고 디코딩된 사진을 받을 때까지(파일 읽기 + 디코딩 + 전송, `real_samples` 테스트로 6회)는 스레드 전 약 720–830 ms에서 약 295–370 ms로 줄었어요. 화면에 맞춘 축소 디코딩과 썸네일 먼저 보여 주기는 M5에서도 하지 않아 아직 남은 일이에요(M5는 메모리 상한을 넘는 JPEG만 줄여서 열어요).
 
-JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 넘어요. 이것도 M5에서 다시 다뤄요. (M5 결과는 위 "M5 (lv-bench)" 표예요: 메모리는 목표 안, 첫 화면은 여전히 미달이에요.)
+그때 JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 목표를 넘었어요. M5에서 다시 다뤘고, 결과는 위 "M5 (lv-bench)"의 "M5 최종 수치" 표예요: 메모리는 목표 안에 들어왔고 첫 화면은 여전히 미달이에요.
 
 측정에 쓴 HEIC는 공개 샘플 `itool-sample-heic-4032x3024.heic`(출처 itool.co.kr 샘플 파일 모음, "free sample files for testing"이라고만 적혀 있고 라이선스 문구는 따로 없어서 저장소에는 올리지 않았어요)이에요. 단일 HEVC 이미지에 색 정보가 없어서, 그리드 타일과 P3 ICC가 있는 실제 아이폰 사진과는 달라요. 실제 아이폰 사진 수치는 아래 "확인할 것"의 샘플로 다시 재야 해요. JPEG는 M1 때보다 잡음이 많은 합성 이미지(약 2.5 MB)예요.
 
@@ -251,12 +251,13 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 - (M5) **설치 파일 실제 설치·제거:** CI가 만든 `light-view-x.y.z-setup.exe`로 관리자 권한 없이 `%LOCALAPPDATA%\Programs\light-view`에 설치되고, 시작 메뉴 바로가기가 생기고, 제거하면 프로그램 파일과 등록이 지워지고 `%APPDATA%\light-view\settings.toml`은 남나요(`.iss`는 로컬에서 컴파일·실행하지 않았어요)
 - (M5) **연결 프로그램 등록:** 설치 뒤 탐색기의 "연결 프로그램"에 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 모두 light-view가 나오고, 설치 마지막 화면의 **기본 앱 설정 열기**가 윈도우 설정의 light-view 페이지를 여나요. 제거하면 목록에서 사라지나요
 - (M5) **설치판 AppContainer:** 설치판으로 HEIC를 열었을 때 작업자가 AppContainer(`goodflow.LightView.Worker`) 안에서 도나요(Process Explorer 등으로 확인). 설치 폴더에 `ALL APPLICATION PACKAGES` 권한이 들어갔나요
+- (M5) **제거 뒤 AppContainer 프로필:** 설치판으로 HEIC를 한 번 연 뒤 제거하면 `%LOCALAPPDATA%\Packages\goodflow.lightview.worker` 폴더가 사라지나요(제거 프로그램이 `light-view.exe --uninstall-cleanup`을 실행해요). `%LOCALAPPDATA%\light-view\crashes`와 설정은 남는 게 맞아요
 - (M5) **SmartScreen:** 서명 없는 설치 파일과 zip에서 푼 `light-view.exe`를 처음 실행할 때 위 "SmartScreen 경고"의 방법으로 넘어가지나요
 - (M5) **내레이터:** 위 (M4) 내레이터 항목을 설치판으로 다시 확인해 주세요(새로 생긴 업데이트 질문 대화상자와 "축소해서 열었어요"도)
 - (M5) **NAS/UNC:** 네트워크 공유의 사진 열기, 넘기기, 회전 저장, 삭제(영구 삭제 확인)가 되나요
 - (M5) **실제 아이폰 샘플:** 12 MP 아이폰 HEIC로 `lv-bench --heic <파일>`을 돌려 첫 사진 시간(목표 400 ms)과 메모리를 재고, 위 표의 "heic12mp" 줄을 채워 주세요. 큰 파노라마 JPEG이 축소해서 열리는지도 봐 주세요
 - (M5) **CI 첫 실행:** GitHub에 올린 뒤 `ci.yml`(빌드·테스트·clippy·fmt·deny·audit·bench), `fuzz.yml`(주 2회 nightly 퍼징, 말뭉치 캐시(이어받기는 최선 노력)·아티팩트), `release.yml`(`v*` 태그 → 패키징 → Inno Setup 컴파일 → 체크섬 → 초안 릴리스)이 처음으로 통과하나요. `baseline.json`은 이 노트북 한 대의 값이라 CI 러너에서 다시 만들어야 해요
-- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요
+- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요. 서명을 붙일 때 설치 파일만이 아니라 Inno Setup이 만드는 제거 프로그램(`unins000.exe`)도 서명되게 해 주세요(지금은 `setup.exe`만 SignPath로 보내요)
 - (M5) **릴리스 노트:** "세그먼트 사이에 잘못된 바이트가 끼거나 SOI·SOF가 두 번 나오는 JPEG은 이제 열지 않아요(안전을 위해)" 한 줄을 넣어 주세요
 - (M5) **업데이트 확인 실제 응답:** 첫 릴리스를 게시한 뒤 "업데이트 확인"을 켜고 낮은 버전으로 실행하면 "새 버전(X)이 나왔어요 [보기]"가 나오고 [보기]가 그 릴리스 페이지를 여나요(지금은 저장소가 없어 404 → 조용히 넘어가요)
 - (M5) **개발 PC 정리:** 이 PC의 `%USERPROFILE%\.cargo\bin\rustup.exe`가 사라져 `cargo`·`rustc` 바로 가기가 동작하지 않아요(M5 중 rustup 자체 업데이트 때문). [rustup.rs](https://rustup.rs)의 `rustup-init.exe`로 다시 설치해 주세요(도구 체인은 그대로 있어요). 또 M5 Task 1 테스트에서 남은 `lv-worker.exe` 프로세스(PID 21140)가 `target\debug\lv-worker.exe`를 잠그고 있어서 M5는 `CARGO_TARGET_DIR=target\m5`로 빌드했어요. 그 프로세스를 끝내 주세요
