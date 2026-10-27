@@ -77,8 +77,8 @@ impl ToolButton {
         }
     }
 
-    /// Whether the button acts in this build. EXIF arrives in M4.
-    /// Disabled buttons are drawn in ink2.
+    /// Whether the button acts in this build. Disabled buttons are drawn in ink2.
+    /// (Every button acts since M4 brought the EXIF card.)
     pub fn enabled(self) -> bool {
         matches!(
             self,
@@ -89,6 +89,7 @@ impl ToolButton {
                 | ToolButton::RotateLeft
                 | ToolButton::RotateRight
                 | ToolButton::Save
+                | ToolButton::Exif
                 | ToolButton::Delete
                 | ToolButton::Pin
         )

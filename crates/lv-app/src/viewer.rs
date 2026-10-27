@@ -3,10 +3,12 @@
 //! reports.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
+use lv_core::exif_info::ExifData;
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use lv_core::listing::{same_path, FolderList};
 use lv_core::prefetch::{DecodeResult, Prefetcher};
@@ -898,6 +900,16 @@ impl Viewer {
     /// Width, height and file size of the shown image.
     pub fn info(&self) -> Option<(u32, u32, u64)> {
         self.image().map(|i| (i.width, i.height, i.byte_len))
+    }
+
+    /// The shown image's EXIF, read with its decode (ruling R5).
+    pub fn exif(&self) -> Option<&Arc<ExifData>> {
+        self.image()?.exif.as_ref()
+    }
+
+    /// The shown file's modification time (FILETIME ticks), as it was when decoded.
+    pub fn modified(&self) -> Option<u64> {
+        self.shown.as_ref()?.identity.as_ref().map(|id| id.modified)
     }
 
     pub fn zoom(&self) -> Option<f32> {

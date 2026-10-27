@@ -369,6 +369,16 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
         Command::RotateLeft | Command::RotateRight
             if app.try_borrow().map_or(true, |a| a.saving.is_some()) => {}
         Command::ToggleFullscreen => fullscreen::toggle(app, hwnd),
+        Command::ToggleExif => {
+            let Ok(mut a) = app.try_borrow_mut() else {
+                return;
+            };
+            if a.viewer.has_file() || a.exif_card.is_open() {
+                a.exif_card.toggle();
+                drop(a);
+                invalidate(hwnd);
+            }
+        }
         Command::Escape => {
             let Ok(full) = app.try_borrow().map(|a| a.fullscreen.is_some()) else {
                 return;

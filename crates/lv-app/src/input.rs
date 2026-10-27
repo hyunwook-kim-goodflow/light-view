@@ -19,8 +19,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
 };
 
+use crate::clipboard;
 use crate::commands;
+use crate::exif_card::CardAction;
 use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
+use crate::strings::{t, S};
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
 use crate::viewer::Redraw;
@@ -130,7 +133,12 @@ impl App {
 
     /// Whether the hand cursor applies at `px`: dragging, or over a pannable image.
     fn hand_at(&self, px: (i32, i32)) -> bool {
+        let (x, y) = self.to_dips(px);
+        let on_card = self
+            .card_layout()
+            .is_some_and(|m| self.exif_card.contains(x, y, &m));
         !self.overlay.dialog_open()
+            && !on_card
             && (self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px)))
     }
 
@@ -380,6 +388,15 @@ pub fn overlay(
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let (vk, mods) = (wparam.0 as u16, commands::mods());
             if !dialog {
+                // Auto-repeats only scroll the card's list; a held Esc or I does not
+                // close the card and then the window.
+                let repeat = lparam.0 & (1 << 30) != 0;
+                if !repeat || is_list_key(vk) {
+                    if let Some(action) = card_key(app, vk, mods) {
+                        card_action(app, hwnd, action);
+                        return Some(LRESULT(0));
+                    }
+                }
                 #[cfg(debug_assertions)]
                 return debug_overlay(app, hwnd, vk, mods);
                 #[cfg(not(debug_assertions))]
@@ -401,10 +418,32 @@ pub fn overlay(
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let mut a = app.try_borrow_mut().ok()?;
             let (x, y) = a.to_dips(point(lparam));
+            // The card is under a dialog (which takes every click) and over the photo.
+            if !dialog {
+                if let Some(m) = a.card_model() {
+                    if a.exif_card.press(x, y, &m) {
+                        return Some(LRESULT(0));
+                    }
+                }
+            }
             let (view, now) = (a.client(), a.pointer.now_ms());
             a.overlay.press(x, y, view, now).then_some(LRESULT(0))
         }
         WM_LBUTTONUP => {
+            if !dialog {
+                let card = {
+                    let mut a = app.try_borrow_mut().ok()?;
+                    let (x, y) = a.to_dips(point(lparam));
+                    let m = a.card_model();
+                    m.and_then(|m| a.exif_card.release(x, y, &m))
+                };
+                if let Some(action) = card {
+                    if let Some(action) = action {
+                        card_action(app, hwnd, action);
+                    }
+                    return Some(LRESULT(0));
+                }
+            }
             let (taken, event) = {
                 let mut a = app.try_borrow_mut().ok()?;
                 let (x, y) = a.to_dips(point(lparam));
@@ -418,6 +457,25 @@ pub fn overlay(
             Some(LRESULT(0))
         }
         WM_MOUSEMOVE | WM_MOUSEWHEEL if dialog => Some(LRESULT(0)),
+        // The wheel over the card scrolls its list; elsewhere it navigates as usual.
+        WM_MOUSEWHEEL => {
+            let px = cursor_in_client(hwnd)?;
+            {
+                let mut a = app.try_borrow_mut().ok()?;
+                let (x, y) = a.to_dips(px);
+                let m = a.card_model()?;
+                if !a.exif_card.contains(x, y, &m) {
+                    return None;
+                }
+                let delta = i32::from(((wparam.0 >> 16) & 0xFFFF) as u16 as i16);
+                a.pointer.wheel += delta;
+                let notches = a.pointer.wheel / WHEEL_DELTA as i32;
+                a.pointer.wheel -= notches * WHEEL_DELTA as i32;
+                a.exif_card.on_wheel(x, y, notches, &m);
+            }
+            invalidate(hwnd);
+            Some(LRESULT(0))
+        }
         WM_DROPFILES if dialog => {
             // SAFETY: the HDROP from WM_DROPFILES, released once and not used again.
             unsafe { DragFinish(HDROP(wparam.0 as *mut _)) };
@@ -441,6 +499,33 @@ pub fn overlay(
             Some(LRESULT(0))
         }
         _ => None,
+    }
+}
+
+/// Keys the card's list repeats while held.
+fn is_list_key(vk: u16) -> bool {
+    matches!(vk, 0x21..=0x24 | 0x26 | 0x28)
+}
+
+/// A key for the open EXIF card; `None` if it is not the card's (or no card is open).
+fn card_key(app: &RefCell<App>, vk: u16, mods: lv_core::command::Mods) -> Option<CardAction> {
+    let mut a = app.try_borrow_mut().ok()?;
+    let m = a.card_model()?;
+    a.exif_card.on_key(vk, mods, &m)
+}
+
+/// Repaints after the card took an input; a copy goes to the clipboard and says
+/// "복사했어요" (on failure only the log hears of it).
+fn card_action(app: &RefCell<App>, hwnd: HWND, action: CardAction) {
+    match action {
+        CardAction::Redraw => invalidate(hwnd),
+        CardAction::Copy(text) => match clipboard::set_text(hwnd, &text) {
+            Ok(()) => show_toast(app, hwnd, |now| Toast::new(t(S::ToastCopied), now)),
+            Err(e) => {
+                eprintln!("light-view: could not copy to the clipboard: {e}");
+                invalidate(hwnd);
+            }
+        },
     }
 }
 
@@ -479,7 +564,6 @@ fn debug_overlay(
     vk: u16,
     mods: lv_core::command::Mods,
 ) -> Option<LRESULT> {
-    use crate::strings::{t, S};
     if !mods.ctrl || !mods.shift || mods.alt {
         return None;
     }
