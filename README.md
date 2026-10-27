@@ -1,6 +1,6 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Since M5 it draws images larger than a GPU texture in tiles with mipmaps, opens JPEGs over the memory limit at reduced size (marked "Opened at reduced size"), runs the HEIC worker in an AppContainer where the install folder allows it, keeps local crash records, and has an opt-in update check (the only network use). M5 measurements on one laptop: 12 MP JPEG first pixel about 290 ms (target 200 ms, not met) and about 294 MB memory (target 300 MB); see "현재 수치". Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
@@ -26,7 +26,17 @@ Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
 
 **Visual C++ 런타임:** 설치판과 포터블판은 HEIC 디코더 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`)을 `lv-worker.exe` 옆에 함께 넣어요. 이렇게 앱 폴더에 둔 런타임은 Windows Update가 고쳐 주지 않아요. 런타임의 보안 수정은 light-view의 새 릴리스로 받아요.
 
-## 현재 상태 (M4)
+## 현재 상태 (M5)
+
+M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub에 올리거나 릴리스를 게시하지 않았어요. M5에서 더한 것:
+
+- **큰 사진:** 그래픽 카드의 비트맵 한계(보통 16384 px)보다 큰 사진도 타일로 나눠 그리고, 화면에 맞춰 줄여 볼 때는 백그라운드에서 만든 축소본(밉맵)으로 계단 없이 그려요(예: 18000×6000 PNG). 디코딩 상한(메모리 한도를 바이트로 센 값의 1/8 픽셀, 최대 약 268 MP. 메모리 한도 "자동"은 실제 메모리의 1/4, 최대 2 GB)을 넘는 PNG 등은 죽지 않고 "너무 커서 열 수 없어요 (30000×20000)"처럼 크기와 함께 알려 줘요.
+- **상한을 넘는 JPEG:** 원본으로는 상한을 넘는 JPEG도 1/2, 1/4, 1/8로 줄여서 열고, EXIF 카드의 해상도 옆에 "축소해서 열었어요"를 보여 줘요(해상도는 원본 크기). 1/8로도 넘으면 "너무 커서 열 수 없어요"예요. 회전 저장은 원본 파일을 무손실로 다루므로 그대로 돼요.
+- **악성 JPEG 방어:** 디코딩하기 전에 모든 JPEG의 스캔 구조와 작업량을 검사해서, 작은 파일로 디코더를 수십 초 붙잡는 파일을 거부해요. **릴리스 노트에 적을 것:** 세그먼트 사이에 잘못된 바이트가 끼어 있거나(0xFF 채움만 허용) SOI·SOF가 두 번 나오는 JPEG은 이제 "이 사진은 열 수 없어요"로 거부해요. 다른 뷰어에서는 열리는 망가진 파일일 수 있어요.
+- **작업자 격리 강화(AppContainer), 크래시 기록, 업데이트 확인(선택), 설치판·포터블판, 오픈소스 고지:** 아래 항목과 "설치와 포터블"을 보세요.
+- **개발:** `lv-bench` 측정 도구와 회귀 검사, GitHub Actions 워크플로(`ci.yml`, `fuzz.yml`, `release.yml`; 아직 한 번도 돌지 않았어요), `cargo-deny`·`cargo-audit` 설정, 퍼징 대상(`fuzz/`)과 말뭉치 재생 테스트, `SECURITY.md`.
+
+전체 기능:
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
 - HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고, 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 설치판은 설치할 때 그 폴더에 이 권한을 줘요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요). 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
@@ -39,7 +49,7 @@ Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
 - **EXIF 카드(I):** 오른쪽 위에 찍은 날짜, 시간·카메라, 노출, 해상도·용량, 위치(GPS가 있을 때 숫자로만)를 보여 줘요. EXIF가 없으면 "EXIF 정보가 없어요"와 파일 정보·수정 날짜를 보여 줘요. [전체 보기]를 누르면 카드 안에서 모든 태그를 스크롤 목록으로 보고, 고른 값을 [복사]나 Ctrl+C로 복사해요. 카드가 열려 있어도 사진을 넘길 수 있고, 카드는 넘긴 사진을 따라가요. EXIF는 사진을 디코딩할 때 같은 바이트에서 백그라운드로 읽고, 값은 태그당 512자, 태그는 2,000개까지만 읽어요. 지도나 네트워크는 쓰지 않아요.
 - **오른쪽 클릭 메뉴:** 창 안에 그리는 메뉴라 다크 모드를 그대로 따라요. 열기(Ctrl+O), 폴더에서 보기, 경로 복사, 기본 앱 설정 열기, 설정(Ctrl+,), 정보가 있어요. 메뉴 키나 Shift+F10으로도 열고, ↑↓·Enter·Esc로 써요. 사진이 없으면 폴더에서 보기와 경로 복사는 흐리게 나오고 건너뛰어요.
 - **열기와 빈 시작 화면:** 사진 없이 실행하면 "사진을 끌어다 놓거나 열어 주세요"와 [열기] 단추가 나와요. 열기 대화상자는 지원하는 사진만 보여 주는 "사진" 필터가 기본이고, 보던 사진의 폴더에서 시작해요. 사진이나 폴더를 창에 끌어다 놓아도 열려요(폴더면 첫 사진). 열 수 있는 사진이 없으면 "열 수 있는 사진이 없어요"라고 알려 줘요.
-- **정보:** 버전과 라이선스 요약을 창 안 대화상자로 보여 줘요. [오픈소스 고지]는 앱 폴더의 `THIRD_PARTY_NOTICES.md`를 기본 프로그램으로 열어요(개발 빌드에는 이 파일이 exe 옆에 없어서 "열지 못했어요"가 나와요. 배포 단계 M5에서 함께 넣어요).
+- **정보:** 버전과 라이선스 요약을 창 안 대화상자로 보여 줘요. [오픈소스 고지]는 앱 폴더의 `THIRD_PARTY_NOTICES.md`를 기본 프로그램으로 열어요. 설치판과 포터블판에는 이 파일이 exe 옆에 들어 있어요(`cargo build`로 만든 개발 빌드에는 없어서 "열지 못했어요"가 나와요).
 - **설정 창(Ctrl+,):** 메인 창에 딸린 작은 창으로, 한 번에 하나만 열려요. 바꾸는 즉시 `%APPDATA%\light-view\settings.toml`에 저장해요(바꾼 항목만 다시 써서 다른 창의 변경을 지우지 않아요).
   - 언어: 자동 / 한국어 / English
   - 메뉴 고정
@@ -51,9 +61,9 @@ Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
 - **언어:** 한국어와 영어예요. "자동"이면 윈도우 표시 언어가 한국어일 때 한국어, 그 밖에는 영어예요. 설정에서 바꾸면 창 제목, 버튼 줄 도움말, 메뉴, 대화상자, 알림, EXIF 카드까지 바로 바뀌어요. 열기 대화상자의 단추와 제목은 윈도우가 그리는 것이라 윈도우 언어를 따라요.
 - **화면 읽기 프로그램:** UI Automation으로 버튼 줄, 시작 화면 [열기], 메뉴, 대화상자, 알림, EXIF 카드와 목록, 설정 창의 이름·역할·상태(사용 안 함, 고정됨, 선택됨)를 알려 주고, 포커스 이동과 알림을 읽어 줘요.
 - **USB 안전 제거:** 보던 사진이 있는 이동식 드라이브를 "하드웨어 안전 제거"로 빼려고 하면 폴더 감시를 놓아서 제거가 막히지 않아요. 화면의 사진은 그대로 남고, 그 뒤 저장·삭제는 파일이 바뀌었다고 알려 줘요. 제거가 취소되면 감시를 다시 시작하고, 드라이브를 다시 꽂고 같은 폴더의 사진을 열면 다시 감시해요.
-- 아직 없는 것: 설치 파일, 단축키 편집. 아래 로드맵을 보세요.
+- 아직 없는 것: 단축키 편집, AVIF, 코드 서명(SignPath 신청 전). 아래 로드맵을 보세요.
 - **업데이트 확인(선택):** 네트워크를 쓰는 기능은 이것 하나예요. 사진을 처음 연 뒤 "새 버전이 나오면 알려 드릴까요?"라고 한 번 묻고, [알려 주세요]를 고를 때만 켜져요(Enter와 Esc는 [괜찮아요]). 켜면 하루 한 번 백그라운드에서 `https://api.github.com/repos/goodflow/light-view/releases/latest`를 HTTPS로 조회해요(리디렉션·쿠키 없음, 인증서 해지 확인, 10초 제한, 응답 1 MB까지). 새 버전이 있으면 "새 버전(X)이 나왔어요 [보기]"를 보여 주고, [보기]는 그 릴리스 페이지(`https://github.com/goodflow/light-view/releases/tag/...`)만 브라우저로 열어요. 다운로드·설치는 하지 않아요. 윈도우의 자동 프록시 설정을 따르므로 조회할 때 프록시 자동 검색(WPAD)이나 PAC 파일 요청이 함께 일어날 수 있어요. 설정의 "업데이트 확인"으로 끌 수 있어요.
-- **크래시 기록:** 앱이 비정상 종료되면 `%LOCALAPPDATA%\light-view\crashes\`에 로그와 미니덤프를 남겨요(최근 10개만). 어디로도 보내지 않아요. 원하면 GitHub 이슈에 직접 첨부해 주세요.
+- **크래시 기록:** 앱이 비정상 종료되면 `%LOCALAPPDATA%\light-view\crashes\`(포터블판은 exe 옆 `data\crashes\`)에 로그와 미니덤프를 남겨요(최근 10개만). 어디로도 보내지 않아요. 원하면 GitHub 이슈에 직접 첨부해 주세요.
 
 ## 빌드
 
@@ -142,20 +152,44 @@ target\release\lv-bench.exe [--runs 5] [--case jpeg12mp]... [--heic 12MP.heic] [
 
 `first_pixel_ms`는 프로세스 시작부터 첫 사진이 그려질 때까지(`--bench`는 단일 창 확인을 건너뛰므로 그 시간은 빠져요. 평소 실행에서는 `--timing` 줄의 `instance-ms`로 볼 수 있어요), `decode_ms`는 그 사진의 디코딩, `private_mb`는 메모리가 가라앉은 뒤(이웃 사진 미리 읽기까지 끝난 뒤) 앱과 작업자의 개인 메모리 합이에요. `-v`는 매 실행의 구간별 시간(`d2d-ms`, `decode.decode` 등)을 함께 찍어요. `--check`는 기준 파일 값의 1.5배와 기준 + 50 ms(시간)·+ 30 MB(메모리) 중 큰 쪽을 넘는 값이 있거나, 기준에 있는 경우를 돌렸는데 결과가 없으면 종료 코드 1이에요(여기서 돌릴 수 없어 건너뛴 경우는 건너뛰었다고 찍고 넘어가요). `heic12mp`는 12 MP HEIC 파일을 `--heic`로 줘야 돌아요(저장소에 넣을 수 있는 샘플이 없어요).
 
-측정 환경: i7-1360P, Windows 11, release 빌드, **AC 전원**(배터리 22%, 충전 중), 2026-10-27.
+**M5 최종 수치** — 측정 환경: i7-1360P, Windows 11, release 빌드(`target\…\release`, AppContainer 없이 낮은 무결성 샌드박스), **AC 전원**(배터리 100%), 2026-10-28, `lv-bench --runs 5`를 두 번 돌린 중앙값(두 번째 값은 괄호). `--check crates\lv-bench\baseline.json`은 통과했어요(종료 코드 0).
 
-| 경우 | 첫 사진(ms) | 디코딩(ms) | 개인 메모리(MB) | 목표 |
-|---|---|---|---|---|
-| jpeg12mp (4032×3024) | 394 | 247 | 299 | 200 ms / 300 MB |
-| jpeg24mp (6000×4000, 타일·밉맵) | 561 | 474 | 560 | — |
-| png_large (8000×6000) | 627 | 501 | 980 | — |
-| HEIC 451×461 (작은 샘플, 12 MP 아님) | 296 | 44 | 61 | (12 MP: 400 ms) |
+| 경우 | 첫 사진(ms) | 디코딩(ms) | 개인 메모리(MB) | 목표 | 판정 |
+|---|---|---|---|---|---|
+| jpeg12mp (4032×3024) | 290 (286) | 257 (257) | 294 (294) | 200 ms / 300 MB | 첫 사진 **미달**, 메모리 달성(여유 약 6 MB) |
+| jpeg24mp (6000×4000, 타일·밉맵) | 595 (654) | 506 (540) | 560 (560) | — | — |
+| png_large (8000×6000) | 639 (653) | 506 (525) | 990 (990) | — | — |
+| heic12mp | 측정 못 함 | — | — | 400 ms | **HEIC not measured — no sample** (12 MP HEIC 샘플이 없어요) |
+| HEIC 451×461 (`testdata/heif`의 작은 샘플, 12 MP 아님) | 246 | 58 | 61 | — | 참고용 |
+| 포터블판 압축 해제 크기 | 7.57 MB (zip 3.05 MB) | | | 30 MB | 달성 |
 
-같은 때 바꾸기 전 빌드와 번갈아 잰 jpeg12mp: AC에서 첫 사진 중앙값 543 → 375 ms, 메모리 350 → 298 MB. 배터리(절전으로 CPU가 느려진 상태)에서는 3196 → 2055 ms, 304 → 244 MB.
+`png_large`는 사진 한 장이 RGBA로 192 MB라 디코딩 결과·GPU 타일·밉맵이 겹쳐 약 1 GB를 써요(목표 없음). 포터블판 smoke(아래 "M5 smoke")에서 18000×6000 PNG는 약 1.17 GB, 메모리 한도 256 MB에서 축소해서 연 8000×6000 JPEG은 약 195 MB였어요.
+
+Task 3(2026-10-27, AC, 배터리 22% 충전 중)에 잰 값은 jpeg12mp 394 ms / 247 ms / 299 MB, jpeg24mp 561 / 474 / 560, png_large 627 / 501 / 980이었어요(이 값이 `baseline.json`이에요). 같은 때 바꾸기 전 빌드와 번갈아 잰 jpeg12mp: AC에서 첫 사진 중앙값 543 → 375 ms, 메모리 350 → 298 MB. 배터리(절전으로 CPU가 느려진 상태)에서는 3196 → 2055 ms, 304 → 244 MB.
 
 바꾼 것: 첫 사진 디코딩을 창·Direct2D를 만들기 전에 시작해 둘이 겹치게, HEIF 작업자 시작을 UI 스레드 밖으로, 미리 읽기를 진행 방향 2장에서 1장으로(앞뒤 한 장씩), 밉맵을 한 단계씩 올리고 바로 해제(창이 작아지면 더 깊은 단계를 새로 만듦).
 
-**남은 원인(목표 미달):** 이제 첫 사진의 대부분은 Direct2D 렌더 타깃(D3D 장치) 만들기예요. AC에서 약 250–400 ms, 배터리에서 0.8–1.9 s이고, 작은 HEIC도 첫 사진이 약 280–300 ms라 사진 크기와 상관없는 바닥이에요. 200 ms를 맞추려면 장치를 만드는 방식을 바꿔야 해요(예: D3D11 장치와 스왑 체인을 직접 만들고 통합 GPU를 고르기). 12 MP JPEG 메모리는 목표 근처(AC 299 MB, 배터리 244 MB)이고 사진 3장(현재 + 앞뒤)의 디코딩 결과 약 140 MB, GPU 비트맵 약 47 MB(통합 GPU라 개인 메모리로 잡혀요), 나머지가 기본이에요. 12 MP HEIC는 이 PC에서 쓸 수 있는 샘플이 없어 다시 재지 못했어요.
+**남은 원인(목표 미달):** 12 MP JPEG 첫 사진은 Task 3 때 약 375 ms, 최종 측정에서 약 290 ms로 여전히 200 ms 목표에 못 미쳐요(측정마다 수십 ms씩 달라요). 이제 첫 사진의 대부분은 Direct2D 렌더 타깃(D3D 장치) 만들기예요. AC에서 약 250–400 ms, 배터리에서 0.8–1.9 s이고, 작은 HEIC도 첫 사진이 약 280–300 ms라 사진 크기와 상관없는 바닥이에요. 200 ms를 맞추려면 장치를 만드는 방식을 바꿔야 해요(예: D3D11 장치와 스왑 체인을 직접 만들고 통합 GPU를 고르기). 12 MP JPEG 메모리는 목표 근처(AC 299 MB, 배터리 244 MB)이고 사진 3장(현재 + 앞뒤)의 디코딩 결과 약 140 MB, GPU 비트맵 약 47 MB(통합 GPU라 개인 메모리로 잡혀요), 나머지가 기본이에요. 12 MP HEIC는 이 PC에서 쓸 수 있는 샘플이 없어 다시 재지 못했어요.
+
+### M5 smoke (포터블판)
+
+2026-10-28에 `scripts/package.ps1 -Version 0.1.0`으로 만든 포터블 zip을 임시 폴더에 풀어, 합성 사진으로 확인했어요. 앱은 그 창에 보낸 창 메시지(PostMessage)와 UI Automation으로만 조작했어요.
+
+| 확인 | 결과 |
+|---|---|
+| 12 MP JPEG 열기 | 통과 |
+| HEIC 열기(작은 샘플, 작업자 DLL과 Visual C++ 런타임을 포터블 폴더에서 읽음) | 통과 |
+| 업데이트 질문 대화상자(첫 사진 뒤 한 번, Esc = [괜찮아요] → `update_check = false`) | 통과 |
+| 회전 저장(오른쪽 회전 → 저장, 4032×3024 → 3024×4032, 수정 날짜 유지, 임시 파일 없음) | 통과 |
+| 삭제 → 토스트 [실행 취소](목록 3 → 2 → 3, 파일 그대로) | 통과 |
+| 설정 창(메뉴 → 설정, 바꾼 값이 `data\settings.toml`에 저장) | 통과 |
+| 영어 전환(설정 창, 버튼 줄, 메뉴, 정보 대화상자가 바로 영어로) | 통과 |
+| 상한 초과 JPEG(메모리 한도 256 MB에서 8000×6000 → EXIF 카드 "Opened at reduced size") | 통과 |
+| 30000×20000 PNG("너무 커서 열 수 없어요 (30000×20000)", 죽지 않음) | 통과(설계대로 타일로 그리지 않음: 600 MP가 디코딩 상한을 넘어요) |
+| 18000×6000 PNG(타일로 그림) | 통과 |
+| 포터블판이 `%APPDATA%\light-view\settings.toml`을 건드리지 않음(해시 비교) | 통과 |
+| 정보 → [오픈소스 고지] 누르기 | 실행 안 함(사용자의 기본 .md 프로그램을 띄우게 돼서). 파일이 exe 옆에 있는 것만 확인 |
+| 새 버전 토스트 | 실행 안 함(저장소와 릴리스가 아직 없어요) |
 
 ### 이전 측정 (M1–M2)
 
@@ -181,7 +215,7 @@ HEIC 첫 화면은 400 ms 목표를 크게 넘어요. 한 번 열 때 시간이 
 
 M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU 수의 절반, 1–4개. 작업자 두 개가 함께 디코딩하기 때문이에요. 이 컴퓨터는 16개라 작업자마다 4개). 다시 잰 날은 노트북이 배터리 전원이라 창 만들기 같은 시작 비용이 크게 늘었어요(같은 때 JPEG 첫 화면도 1651–2229 ms). 그래서 절대값보다 같은 때 같은 방법으로 잰 비교를 보세요. 앱이 요청을 보내고 디코딩된 사진을 받을 때까지(파일 읽기 + 디코딩 + 전송, `real_samples` 테스트로 6회)는 스레드 전 약 720–830 ms에서 약 295–370 ms로 줄었어요. 남은 일(화면에 맞춘 축소 디코딩, 썸네일 먼저 보여 주기)은 M5에서 다뤄요.
 
-JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 넘어요. 이것도 M5에서 다시 다뤄요.
+JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 넘어요. 이것도 M5에서 다시 다뤄요. (M5 결과는 위 "M5 (lv-bench)" 표예요: 메모리는 목표 안, 첫 화면은 여전히 미달이에요.)
 
 측정에 쓴 HEIC는 공개 샘플 `itool-sample-heic-4032x3024.heic`(출처 itool.co.kr 샘플 파일 모음, "free sample files for testing"이라고만 적혀 있고 라이선스 문구는 따로 없어서 저장소에는 올리지 않았어요)이에요. 단일 HEVC 이미지에 색 정보가 없어서, 그리드 타일과 P3 ICC가 있는 실제 아이폰 사진과는 달라요. 실제 아이폰 사진 수치는 아래 "확인할 것"의 샘플로 다시 재야 해요. JPEG는 M1 때보다 잡음이 많은 합성 이미지(약 2.5 MB)예요.
 
@@ -214,6 +248,18 @@ JPEG 첫 화면(200 ms 목표)과 메모리(300 MB 목표)도 아직 목표를 �
 - (M4) **창 두 개에서 설정:** "새 창"으로 창을 두 개 띄우고 각각 다른 설정(예: 한쪽은 언어, 다른 쪽은 메모리 한도)을 바꾼 뒤 둘 다 닫아도, `settings.toml`에 두 변경이 모두 남아 있나요
 - (M4) 실제 카메라·아이폰·갤럭시 사진(HEIC 포함)에서 EXIF 카드의 날짜, 카메라, 노출, 위치가 맞게 나오나요(HEIC의 EXIF는 EXIF가 든 샘플이 없어 자동 테스트로 확인하지 못했어요)
 - (M4) 다크 모드에서 메뉴, EXIF 카드, 정보 대화상자, 설정 창의 색과 테두리가 자연스럽나요
+- (M5) **설치 파일 실제 설치·제거:** CI가 만든 `light-view-x.y.z-setup.exe`로 관리자 권한 없이 `%LOCALAPPDATA%\Programs\light-view`에 설치되고, 시작 메뉴 바로가기가 생기고, 제거하면 프로그램 파일과 등록이 지워지고 `%APPDATA%\light-view\settings.toml`은 남나요(`.iss`는 로컬에서 컴파일·실행하지 않았어요)
+- (M5) **연결 프로그램 등록:** 설치 뒤 탐색기의 "연결 프로그램"에 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 모두 light-view가 나오고, 설치 마지막 화면의 **기본 앱 설정 열기**가 윈도우 설정의 light-view 페이지를 여나요. 제거하면 목록에서 사라지나요
+- (M5) **설치판 AppContainer:** 설치판으로 HEIC를 열었을 때 작업자가 AppContainer(`goodflow.LightView.Worker`) 안에서 도나요(Process Explorer 등으로 확인). 설치 폴더에 `ALL APPLICATION PACKAGES` 권한이 들어갔나요
+- (M5) **SmartScreen:** 서명 없는 설치 파일과 zip에서 푼 `light-view.exe`를 처음 실행할 때 위 "SmartScreen 경고"의 방법으로 넘어가지나요
+- (M5) **내레이터:** 위 (M4) 내레이터 항목을 설치판으로 다시 확인해 주세요(새로 생긴 업데이트 질문 대화상자와 "축소해서 열었어요"도)
+- (M5) **NAS/UNC:** 네트워크 공유의 사진 열기, 넘기기, 회전 저장, 삭제(영구 삭제 확인)가 되나요
+- (M5) **실제 아이폰 샘플:** 12 MP 아이폰 HEIC로 `lv-bench --heic <파일>`을 돌려 첫 사진 시간(목표 400 ms)과 메모리를 재고, 위 표의 "heic12mp" 줄을 채워 주세요. 큰 파노라마 JPEG이 축소해서 열리는지도 봐 주세요
+- (M5) **CI 첫 실행:** GitHub에 올린 뒤 `ci.yml`(빌드·테스트·clippy·fmt·deny·audit·bench), `fuzz.yml`(주 1회 nightly 퍼징, 말뭉치 캐시·아티팩트), `release.yml`(`v*` 태그 → 패키징 → Inno Setup 컴파일 → 체크섬 → 초안 릴리스)이 처음으로 통과하나요. `baseline.json`은 이 노트북 한 대의 값이라 CI 러너에서 다시 만들어야 해요
+- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요
+- (M5) **릴리스 노트:** "세그먼트 사이에 잘못된 바이트가 끼거나 SOI·SOF가 두 번 나오는 JPEG은 이제 열지 않아요(안전을 위해)" 한 줄을 넣어 주세요
+- (M5) **업데이트 확인 실제 응답:** 첫 릴리스를 게시한 뒤 "업데이트 확인"을 켜고 낮은 버전으로 실행하면 "새 버전(X)이 나왔어요 [보기]"가 나오고 [보기]가 그 릴리스 페이지를 여나요(지금은 저장소가 없어 404 → 조용히 넘어가요)
+- (M5) **개발 PC 정리:** 이 PC의 `%USERPROFILE%\.cargo\bin\rustup.exe`가 사라져 `cargo`·`rustc` 바로 가기가 동작하지 않아요(M5 중 rustup 자체 업데이트 때문). [rustup.rs](https://rustup.rs)의 `rustup-init.exe`로 다시 설치해 주세요(도구 체인은 그대로 있어요). 또 M5 Task 1 테스트에서 남은 `lv-worker.exe` 프로세스(PID 21140)가 `target\debug\lv-worker.exe`를 잠그고 있어서 M5는 `CARGO_TARGET_DIR=target\m5`로 빌드했어요. 그 프로세스를 끝내 주세요
 
 ## 라이선스
 
