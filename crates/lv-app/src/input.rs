@@ -15,14 +15,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, KillTimer, LoadCursorW, SetCursor, SetTimer, HTCLIENT, IDC_HAND, WHEEL_DELTA,
-    WM_CAPTURECHANGED, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use crate::clipboard;
 use crate::commands;
 use crate::exif_card::CardAction;
+use crate::menu;
 use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
+use crate::start;
 use crate::strings::{t, S};
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
@@ -87,6 +89,18 @@ impl Pointer {
     pub fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
+
+    /// The pointer position in DIPs while it is over the client area.
+    pub fn cursor(&self) -> Option<(f32, f32)> {
+        self.cursor
+    }
+
+    /// Forgets a toolbar press and ends a drag; true if a drag ended (the caller then
+    /// releases the capture, with no App borrow held).
+    pub fn cancel_press(&mut self) -> bool {
+        self.pressed = None;
+        self.drag.take().is_some()
+    }
 }
 
 impl App {
@@ -118,7 +132,7 @@ impl App {
         hit_test(&layout(&self.toolbar_input()?), x, y).filter(|b| b.enabled())
     }
 
-    fn to_dips(&self, (x, y): (i32, i32)) -> (f32, f32) {
+    pub fn to_dips(&self, (x, y): (i32, i32)) -> (f32, f32) {
         (x as f32 * self.dip, y as f32 * self.dip)
     }
 
@@ -138,6 +152,7 @@ impl App {
             .card_layout()
             .is_some_and(|m| self.exif_card.contains(x, y, &m));
         !self.overlay.dialog_open()
+            && !self.menu.is_open()
             && !on_card
             && (self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px)))
     }
@@ -282,10 +297,7 @@ pub fn handle(
                 (clicked, dragged)
             };
             if dragged {
-                // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
-                unsafe {
-                    let _ = ReleaseCapture();
-                }
+                release_capture();
             }
             if let Some(b) = clicked {
                 on_button(app, hwnd, b);
@@ -338,18 +350,23 @@ pub fn show_dialog(app: &RefCell<App>, hwnd: HWND, prompt: Prompt, target: Dialo
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
     };
+    a.menu.close();
     a.overlay.show_dialog(prompt, target);
-    a.pointer.pressed = None;
-    let dragging = a.pointer.drag.take().is_some();
+    let dragging = a.pointer.cancel_press();
     drop(a);
     if dragging {
-        // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        release_capture();
     }
     sync_tooltips(app, hwnd);
     invalidate(hwnd);
+}
+
+/// Ends mouse capture (a drag). No App borrow may be held: WM_CAPTURECHANGED re-enters.
+pub fn release_capture() {
+    // SAFETY: plain call.
+    unsafe {
+        let _ = ReleaseCapture();
+    }
 }
 
 /// Whether a dialog is open. Anything that would change the current photo outside
@@ -384,6 +401,12 @@ pub fn overlay(
     lparam: LPARAM,
 ) -> Option<LRESULT> {
     let dialog = app.try_borrow().ok()?.overlay.dialog_open();
+    // The right-click menu sits under a dialog and over everything else.
+    if !dialog {
+        if let Some(result) = menu::route(app, hwnd, msg, wparam, lparam) {
+            return Some(result);
+        }
+    }
     match msg {
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let (vk, mods) = (wparam.0 as u16, commands::mods());
@@ -415,13 +438,20 @@ pub fn overlay(
             overlay_changed(app, hwnd, event);
             Some(LRESULT(0))
         }
+        WM_CONTEXTMENU if dialog => Some(LRESULT(0)),
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let mut a = app.try_borrow_mut().ok()?;
             let (x, y) = a.to_dips(point(lparam));
-            // The card is under a dialog (which takes every click) and over the photo.
+            // The card and the start screen's button are under a dialog (which takes
+            // every click) and over the photo.
             if !dialog {
                 if let Some(m) = a.card_model() {
                     if a.exif_card.press(x, y, &m) {
+                        return Some(LRESULT(0));
+                    }
+                }
+                if let Some(l) = a.start_layout() {
+                    if a.start.press(x, y, &l) {
                         return Some(LRESULT(0));
                     }
                 }
@@ -431,6 +461,18 @@ pub fn overlay(
         }
         WM_LBUTTONUP => {
             if !dialog {
+                let start = {
+                    let mut a = app.try_borrow_mut().ok()?;
+                    let (x, y) = a.to_dips(point(lparam));
+                    let l = a.start_layout();
+                    l.and_then(|l| a.start.release(x, y, &l))
+                };
+                if let Some(clicked) = start {
+                    if clicked {
+                        start::open_dialog(app, hwnd);
+                    }
+                    return Some(LRESULT(0));
+                }
                 let card = {
                     let mut a = app.try_borrow_mut().ok()?;
                     let (x, y) = a.to_dips(point(lparam));
@@ -654,7 +696,7 @@ fn cursor_in_client(hwnd: HWND) -> Option<(i32, i32)> {
 }
 
 /// Client coordinates from a mouse message's lparam (signed 16-bit each).
-fn point(lparam: LPARAM) -> (i32, i32) {
+pub fn point(lparam: LPARAM) -> (i32, i32) {
     let x = (lparam.0 & 0xFFFF) as u16 as i16;
     let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16;
     (i32::from(x), i32::from(y))

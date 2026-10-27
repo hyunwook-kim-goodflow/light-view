@@ -111,11 +111,34 @@ pub enum S {
     ToastCopied,
     TimeAm,
     TimePm,
+    // Right-click menu. The shortcut keys are shown at the right of their items.
+    MenuOpen,
+    MenuShowInFolder,
+    MenuCopyPath,
+    MenuDefaultApps,
+    MenuSettings,
+    MenuAbout,
+    ShortcutOpen,
+    ShortcutSettings,
+    // Empty start screen, the Open dialog and drops.
+    StartHint,
+    BtnOpen,
+    FilterPhotos,
+    FilterAll,
+    ToastNoPhotos,
+    ToastPathCopied,
+    ToastOpenFailed,
+    // About dialog. `AboutVersion` is followed by the version number.
+    AboutTitle,
+    AboutVersion,
+    AboutLicense,
+    BtnNotices,
+    BtnClose,
 }
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 46] = [
+const ALL: [S; 66] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -162,6 +185,26 @@ const ALL: [S; 46] = [
     S::ToastCopied,
     S::TimeAm,
     S::TimePm,
+    S::MenuOpen,
+    S::MenuShowInFolder,
+    S::MenuCopyPath,
+    S::MenuDefaultApps,
+    S::MenuSettings,
+    S::MenuAbout,
+    S::ShortcutOpen,
+    S::ShortcutSettings,
+    S::StartHint,
+    S::BtnOpen,
+    S::FilterPhotos,
+    S::FilterAll,
+    S::ToastNoPhotos,
+    S::ToastPathCopied,
+    S::ToastOpenFailed,
+    S::AboutTitle,
+    S::AboutVersion,
+    S::AboutLicense,
+    S::BtnNotices,
+    S::BtnClose,
 ];
 
 /// The text for `key` in `lang`.
@@ -246,6 +289,32 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::ToastCopied => ("복사했어요", "Copied"),
         S::TimeAm => ("오전", "AM"),
         S::TimePm => ("오후", "PM"),
+        S::MenuOpen => ("열기", "Open"),
+        S::MenuShowInFolder => ("폴더에서 보기", "Show in folder"),
+        S::MenuCopyPath => ("경로 복사", "Copy path"),
+        S::MenuDefaultApps => ("기본 앱 설정 열기", "Default apps settings"),
+        S::MenuSettings => ("설정", "Settings"),
+        S::MenuAbout => ("정보", "About"),
+        S::ShortcutOpen => ("Ctrl+O", "Ctrl+O"),
+        S::ShortcutSettings => ("Ctrl+,", "Ctrl+,"),
+        S::StartHint => (
+            "사진을 끌어다 놓거나 열어 주세요",
+            "Drop a photo here or open one",
+        ),
+        S::BtnOpen => ("열기", "Open"),
+        S::FilterPhotos => ("사진", "Photos"),
+        S::FilterAll => ("모든 파일", "All files"),
+        S::ToastNoPhotos => ("열 수 있는 사진이 없어요", "No photos to open"),
+        S::ToastPathCopied => ("경로를 복사했어요", "Path copied"),
+        S::ToastOpenFailed => ("열지 못했어요", "Couldn't open it"),
+        S::AboutTitle => ("light-view", "light-view"),
+        S::AboutVersion => ("버전 ", "Version "),
+        S::AboutLicense => (
+            "MIT 또는 Apache-2.0 라이선스로 배포해요",
+            "Licensed under MIT or Apache-2.0",
+        ),
+        S::BtnNotices => ("오픈소스 고지", "Open source notices"),
+        S::BtnClose => ("닫기", "Close"),
     };
     match lang {
         Lang::Ko => ko,
@@ -319,7 +388,7 @@ mod tests {
     fn all_lists_every_key_once() {
         // The last variant is the sentinel: a key added to `S` after it must be
         // added to `ALL` too, or the tests above would skip it.
-        assert_eq!(ALL.last(), Some(&S::TimePm));
+        assert_eq!(ALL.last(), Some(&S::BtnClose));
         for (i, a) in ALL.iter().enumerate() {
             assert!(!ALL[i + 1..].contains(a), "{a:?} listed twice");
         }
@@ -373,6 +442,18 @@ mod tests {
         assert_eq!(text(Lang::Ko, S::ExifShowAll), "전체 보기");
         assert_eq!(text(Lang::Ko, S::ExifCopy), "복사");
         assert_eq!(text(Lang::Ko, S::ToastCopied), "복사했어요");
+    }
+
+    #[test]
+    fn menu_start_and_about_texts() {
+        assert_eq!(
+            text(Lang::Ko, S::StartHint),
+            "사진을 끌어다 놓거나 열어 주세요"
+        );
+        assert_eq!(text(Lang::Ko, S::ToastNoPhotos), "열 수 있는 사진이 없어요");
+        assert_eq!(text(Lang::Ko, S::MenuShowInFolder), "폴더에서 보기");
+        assert_eq!(text(Lang::Ko, S::MenuDefaultApps), "기본 앱 설정 열기");
+        assert_eq!(text(Lang::En, S::MenuAbout), "About");
     }
 
     /// The Korean text the app shipped with through M3, byte for byte (the constants

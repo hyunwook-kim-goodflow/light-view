@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ENDSESSION, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
+use crate::about;
 use crate::delete;
 use crate::fullscreen;
 use crate::input;
@@ -38,6 +39,7 @@ use crate::instance;
 use crate::overlay::{DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, ToastAction};
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
+use crate::start;
 use crate::strings::{t, tf, S};
 use crate::viewer::{LeaveDecision, LeaveReason, Redraw, Viewer};
 use crate::watch::{self, WM_APP_FOLDER_CHANGED, WM_APP_RESCAN_DONE};
@@ -369,6 +371,8 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
         Command::RotateLeft | Command::RotateRight
             if app.try_borrow().map_or(true, |a| a.saving.is_some()) => {}
         Command::ToggleFullscreen => fullscreen::toggle(app, hwnd),
+        Command::Open => start::open_dialog(app, hwnd),
+        Command::Settings => open_settings(app, hwnd),
         Command::ToggleExif => {
             let Ok(mut a) = app.try_borrow_mut() else {
                 return;
@@ -458,12 +462,26 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             delete::on_permanent_answer(app, hwnd, result, &target);
             true
         }
+        OverlayEvent::Dialog {
+            prompt: Prompt::About,
+            result,
+            ..
+        } => {
+            if result == PromptResult::Notices {
+                about::open_notices(app, hwnd);
+            }
+            true
+        }
         OverlayEvent::Toast(ToastAction::Undo) => {
             delete::request_undo(app, hwnd);
             true
         }
     }
 }
+
+/// Ctrl+, and the menu's 설정. The settings window comes with its own task; until then
+/// this does nothing.
+pub fn open_settings(_app: &RefCell<App>, _hwnd: HWND) {}
 
 /// [저장] saves (and with the checkbox, from now on without asking), [저장 안 함] drops
 /// the rotation, and either then does what the user tried to do; [취소] stays. An answer
@@ -506,7 +524,10 @@ fn on_save_prompt(
             }
             !closing
         }
-        PromptResult::Cancel | PromptResult::Confirm => {
+        PromptResult::Cancel
+        | PromptResult::Confirm
+        | PromptResult::Notices
+        | PromptResult::Close => {
             a.viewer.cancel_leave();
             true
         }
@@ -617,8 +638,10 @@ pub fn handle(
             Some(LRESULT(0))
         }
         WM_DROPFILES => {
-            if let Some(path) = first_dropped(HDROP(wparam.0 as *mut _)) {
-                open(app, hwnd, &path);
+            let dropped = dropped_paths(HDROP(wparam.0 as *mut _));
+            match start::pick_drop(&dropped) {
+                Some(path) => open(app, hwnd, &path),
+                None => input::show_toast(app, hwnd, |now| Toast::new(t(S::ToastNoPhotos), now)),
             }
             Some(LRESULT(0))
         }
@@ -639,16 +662,23 @@ pub fn mods() -> Mods {
     }
 }
 
-/// The first dropped path; releases the drop handle.
-fn first_dropped(drop: HDROP) -> Option<PathBuf> {
+/// The dropped paths, in order; releases the drop handle.
+fn dropped_paths(drop: HDROP) -> Vec<PathBuf> {
     // SAFETY: `drop` is the HDROP from WM_DROPFILES, released exactly once below;
     // `buf` is a live buffer whose length is passed with it.
     unsafe {
-        let len = DragQueryFileW(drop, 0, None);
-        let mut buf = vec![0u16; len as usize + 1];
-        let got = DragQueryFileW(drop, 0, Some(&mut buf));
+        let count = DragQueryFileW(drop, u32::MAX, None);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let len = DragQueryFileW(drop, i, None);
+            let mut buf = vec![0u16; len as usize + 1];
+            let got = DragQueryFileW(drop, i, Some(&mut buf));
+            if got > 0 {
+                paths.push(PathBuf::from(OsString::from_wide(&buf[..got as usize])));
+            }
+        }
         DragFinish(drop);
-        (got > 0).then(|| PathBuf::from(OsString::from_wide(&buf[..got as usize])))
+        paths
     }
 }
 

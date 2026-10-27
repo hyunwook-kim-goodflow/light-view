@@ -34,9 +34,11 @@ use crate::exif_card::{self, CardInfo, CardView, ExifCard};
 use crate::fullscreen::Fullscreen;
 use crate::input::{self, Pointer};
 use crate::instance;
+use crate::menu::{self, Menu, MenuView};
 use crate::overlay::{self, Overlay, OverlayView};
 use crate::placement;
 use crate::render::{Align, Renderer, TextRun};
+use crate::start::{self, StartScreen};
 use crate::strings::{t, S};
 use crate::theme::{self, palette, system_prefers_dark, Palette};
 use crate::toolbar::{self, pinned_bar_height, ToolbarInput, ToolbarView};
@@ -72,6 +74,10 @@ pub struct App {
     pub overlay: Overlay,
     /// The EXIF card (spec §4.6), drawn under the overlay.
     pub exif_card: ExifCard,
+    /// The right-click menu, drawn over the card and under the overlay.
+    pub menu: Menu,
+    /// The empty start screen's [열기] button.
+    pub start: StartScreen,
     /// The HEIF decode and JPEG rotation workers, shared with the prefetcher.
     pub pool: Option<Arc<WorkerPool>>,
     /// The prefetcher's decode limits; a save checks its result within them.
@@ -118,6 +124,8 @@ pub fn run(
         pointer: Pointer::default(),
         overlay: Overlay::default(),
         exif_card: ExifCard::default(),
+        menu: Menu::default(),
+        start: StartScreen::default(),
         pool,
         decode_limits,
         saving: None,
@@ -327,6 +335,11 @@ impl App {
         )
     }
 
+    /// The empty start screen's layout, shown while no file is open.
+    pub fn start_layout(&self) -> Option<start::StartLayout> {
+        (!self.viewer.has_file()).then(|| start::start_layout(self.client_dips))
+    }
+
     /// Pins or unpins the toolbar, saves the choice and resizes the image area.
     pub fn toggle_pin(&mut self, hwnd: HWND) {
         self.settings.toolbar_pinned = !self.settings.toolbar_pinned;
@@ -351,6 +364,8 @@ impl App {
         let now_ms = self.pointer.now_ms();
         let pinned_bar = self.toolbar_input().is_some_and(|i| i.pinned);
         let card = self.card_model();
+        let start = self.start_layout();
+        let menu = self.menu.layout(self.client_dips);
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -365,6 +380,9 @@ impl App {
             }
             Scene::Message(text) if !loading => r.draw_text_center(text, p.ink2),
             Scene::Message(_) | Scene::Empty => {}
+        }
+        if let Some(l) = &start {
+            start::draw(r, l, p);
         }
         if saving {
             draw_pill(r, p, self.dark, (view_w, view_h), t(S::Saving));
@@ -389,6 +407,13 @@ impl App {
                 icon_family: self.icon_family,
             };
             exif_card::draw(r, &self.exif_card, m, &view);
+        }
+        if let Some(l) = &menu {
+            let view = MenuView {
+                palette: p,
+                dark: self.dark,
+            };
+            menu::draw(r, &self.menu, l, &view);
         }
         let view = OverlayView {
             client: self.client_dips,

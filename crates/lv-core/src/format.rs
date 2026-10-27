@@ -65,7 +65,8 @@ pub fn sniff_format(head: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-const EXTENSIONS: [&str; 12] = [
+/// Supported file extensions, lowercase, without the dot.
+pub const EXTENSIONS: [&str; 12] = [
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "dib", "heic", "heif", "hif",
 ];
 
