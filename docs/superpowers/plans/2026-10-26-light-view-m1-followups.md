@@ -122,3 +122,11 @@ Checked against the M3 branch (`m3-file-ops`) in Task 9. The history above is ke
 | M1 item | Status | Note |
 |---|---|---|
 | Final review #2 / R17: folder refresh unwired (external changes not seen) | **M3에서 해결** (b03c4ec, 92cb75b) | `ReadDirectoryChangesW` watch with a 200 ms debounce; the rescan runs off the UI thread and calls `FolderList::refresh`; the current photo is kept by path, and a pending delete stays hidden. |
+
+# M4 status of the parked M1 items
+
+Checked against the M4 branch (`m4-info-settings`) in Task 8. The history above is kept as it was.
+
+| M1 item | Status | Note |
+|---|---|---|
+| R12 (T9): toolbar accessible names (spec §4.2 UIA) deferred to M4 | **M4에서 해결** (83aeb77) | A UI Automation fragment provider exposes the toolbar as a ToolBar with Buttons named by their tooltips, the counter as Text and the pin button with a Toggle state; an auto-hidden toolbar stays in the tree as offscreen. Checked with a UIA client; Narrator itself is on the README user-check list. |
