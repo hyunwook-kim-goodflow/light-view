@@ -1,11 +1,12 @@
 //! Saving a view rotation into the photo's own file, losslessly and atomically (spec
 //! §5.6, ruling R16).
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{Read, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use lv_core::decode::{decode_bytes, max_file_bytes, DecodeError, DecodeLimits};
@@ -15,13 +16,21 @@ use lv_core::heif_edit;
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use lv_core::jpeg_check::{inspect, is_mcu_aligned};
 use lv_core::jpeg_extent::check_single_image;
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HRESULT, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, ERROR_UNABLE_TO_MOVE_REPLACEMENT,
+    ERROR_UNABLE_TO_MOVE_REPLACEMENT_2,
+};
 use windows::Win32::Storage::FileSystem::{
-    ReplaceFileW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_WRITE_ATTRIBUTES, REPLACEFILE_IGNORE_MERGE_ERRORS,
+    MoveFileExW, ReplaceFileW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH,
+    REPLACEFILE_IGNORE_MERGE_ERRORS,
+};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use crate::worker::{PoolError, Reply, WorkerPool, NOT_RESPONDING};
+use crate::worker::{PoolError, Reply, WorkerPool};
 
 /// How a save ended. Only `Saved` and `SavedAsOrientationTag` changed the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +41,9 @@ pub enum SaveOutcome {
     Changed,
     ReadOnly,
     Failed(String),
+    /// The original vanished during the replace and the new file could not take its
+    /// place: it stays, unhidden, at this path (the only copy).
+    KeptCopy(PathBuf),
 }
 
 /// What the save needs from the sandboxed workers: the lossless JPEG rotation and, to
@@ -46,7 +58,7 @@ impl RotateService for WorkerPool {
         match WorkerPool::rotate_jpeg(self, quarters, data)? {
             Reply::Bytes { data } => Ok(data),
             // The pool only lets a `Bytes` answer through for a rotation.
-            Reply::Image { .. } => Err(DecodeError::Corrupt(NOT_RESPONDING.into()).into()),
+            Reply::Image { .. } => Err(PoolError::WorkerUnavailable),
         }
     }
 
@@ -83,6 +95,9 @@ impl RotateService for NoWorker {
 ///   `heif_edit` refuses are `Unsupported`.
 /// - Anything else is `Unsupported`.
 ///
+/// `limits` are the viewer's decode limits: the file size cap and the in-process check
+/// decode stay within the memory the app budgets for one image.
+///
 /// The result is written atomically ([`replace`]). Whatever fails, the original keeps
 /// its bytes and no temporary file stays behind.
 pub fn save_rotation(
@@ -90,8 +105,9 @@ pub fn save_rotation(
     id: &FileIdentity,
     user_quarters: u8,
     worker: &dyn RotateService,
+    limits: &DecodeLimits,
 ) -> SaveOutcome {
-    match try_save(path, id, user_quarters % 4, worker) {
+    match try_save(path, id, user_quarters % 4, worker, limits) {
         Ok(outcome) | Err(outcome) => outcome,
     }
 }
@@ -101,13 +117,14 @@ fn try_save(
     id: &FileIdentity,
     quarters: u8,
     worker: &dyn RotateService,
+    limits: &DecodeLimits,
 ) -> Result<SaveOutcome, SaveOutcome> {
     // `Missing` may also be a transient error (a sharing violation): never write then.
     if identity::verify(path, id) != Verify::Same {
         return Err(SaveOutcome::Changed);
     }
     let target = to_extended_path(path);
-    let data = read_capped(&target)?;
+    let data = read_capped(&target, limits)?;
     let format = sniff_format(&data[..data.len().min(SNIFF_LEN)]);
     if !matches!(format, Some(ImageFormat::Jpeg | ImageFormat::Heif)) {
         return Err(SaveOutcome::Unsupported);
@@ -126,7 +143,7 @@ fn try_save(
         Some(ImageFormat::Jpeg) => edit_jpeg(&data, quarters, worker)?,
         _ => edit_heif(&data, quarters, worker)?,
     };
-    replace(path, &target, id, &edit, worker)?;
+    replace(path, &target, id, &edit, worker, limits)?;
     Ok(edit.outcome)
 }
 
@@ -135,8 +152,8 @@ fn failed(e: impl std::fmt::Display) -> SaveOutcome {
 }
 
 /// The whole file, if it is within the decoder's file size limit.
-fn read_capped(path: &Path) -> Result<Vec<u8>, SaveOutcome> {
-    let cap = max_file_bytes(&DecodeLimits::default());
+fn read_capped(path: &Path, limits: &DecodeLimits) -> Result<Vec<u8>, SaveOutcome> {
+    let cap = max_file_bytes(limits);
     let file = File::open(path).map_err(failed)?;
     let mut data = Vec::new();
     file.take(cap + 1).read_to_end(&mut data).map_err(failed)?;
@@ -199,14 +216,14 @@ fn edit_jpeg(data: &[u8], quarters: u8, worker: &dyn RotateService) -> Result<Ed
     }
     let rotated = match worker.rotate_jpeg(data.to_vec(), pixel_turns) {
         Ok(rotated) => rotated,
-        // Lossless refusals: the tag keeps every byte. A hung or missing worker is not
-        // a verdict on the file.
-        Err(PoolError::NotPerfect | PoolError::HasTrailingData) => {
-            return tag_only(SaveOutcome::SavedAsOrientationTag)
-        }
-        Err(PoolError::Failed(DecodeError::Corrupt(msg))) if msg != NOT_RESPONDING => {
-            return tag_only(SaveOutcome::SavedAsOrientationTag)
-        }
+        // Lossless refusals (the worker could not turn this file): the tag keeps every
+        // byte. A hung or missing worker (`WorkerUnavailable`, `Unsupported`) is no
+        // verdict on the file, so nothing is written (ruling R17).
+        Err(
+            PoolError::NotPerfect
+            | PoolError::HasTrailingData
+            | PoolError::Failed(DecodeError::Corrupt(_)),
+        ) => return tag_only(SaveOutcome::SavedAsOrientationTag),
         Err(e) => return Err(failed(e)),
     };
     // The worker's output is checked like any untrusted file.
@@ -265,7 +282,12 @@ fn edit_heif(data: &[u8], quarters: u8, worker: &dyn RotateService) -> Result<Ed
 
 /// Checks a new file as read back from disk: its structure and size, its orientation,
 /// and that it decodes (JPEG in this process, HEIF in a worker) to the expected size.
-fn check(check: &Check, bytes: &[u8], worker: &dyn RotateService) -> Result<(), String> {
+fn check(
+    check: &Check,
+    bytes: &[u8],
+    worker: &dyn RotateService,
+    limits: &DecodeLimits,
+) -> Result<(), String> {
     match *check {
         Check::Jpeg {
             width,
@@ -283,7 +305,7 @@ fn check(check: &Check, bytes: &[u8], worker: &dyn RotateService) -> Result<(), 
             if read_orientation(bytes) != orientation {
                 return Err("the new JPEG has the wrong orientation".into());
             }
-            let shown = decode_bytes(bytes, &DecodeLimits::default()).map_err(|e| e.to_string())?;
+            let shown = decode_bytes(bytes, limits).map_err(|e| e.to_string())?;
             let (w, h) = (u32::from(width), u32::from(height));
             let expected = if orientation >= 5 { (h, w) } else { (w, h) };
             if (shown.width, shown.height) != expected {
@@ -311,22 +333,24 @@ fn check(check: &Check, bytes: &[u8], worker: &dyn RotateService) -> Result<(), 
 }
 
 /// Replaces the file at `target` (the extended form of `path`) with `edit.bytes`:
-/// identity check → hidden temp file `.<name>.lvtmp-<pid>` in the same folder → flush →
-/// read back and [`check`] → identity check → `ReplaceFileW` (the result keeps the
-/// original's attributes and security) → creation and modification times restored. On
-/// failure the original is untouched and the temp file is removed.
+/// stale temp files of this photo swept ([`sweep_stale_temps`]) → identity check → hidden
+/// temp file `.<name>.lvtmp-<pid>` in the same folder → flush → read back and [`check`] →
+/// identity check → `ReplaceFileW` (the result keeps the original's attributes and
+/// security) → creation and modification times restored. On failure (a panic included)
+/// the original is untouched and the temp file is removed, except in the one case where
+/// it is the only copy left ([`after_replace_error`]).
 fn replace(
     path: &Path,
     target: &Path,
     id: &FileIdentity,
     edit: &Edit,
     worker: &dyn RotateService,
+    limits: &DecodeLimits,
 ) -> Result<(), SaveOutcome> {
     let name = target.file_name().ok_or_else(|| failed("no file name"))?;
-    let mut temp_name = OsString::from(".");
-    temp_name.push(name);
-    temp_name.push(format!(".lvtmp-{}", std::process::id()));
-    let temp = target.with_file_name(temp_name);
+    let own = std::process::id();
+    let temp_path = target.with_file_name(temp_name(name, own));
+    sweep_stale_temps(target, own);
 
     if identity::verify(path, id) != Verify::Same {
         return Err(SaveOutcome::Changed);
@@ -338,75 +362,208 @@ fn replace(
         .write(true)
         .create_new(true)
         .attributes(FILE_ATTRIBUTE_HIDDEN.0)
-        .open(&temp)
+        .open(&temp_path)
         .map_err(failed)?;
-    let written = (|| {
-        file.write_all(&edit.bytes).map_err(failed)?;
-        // FlushFileBuffers.
-        file.sync_all().map_err(failed)?;
-        drop(file);
-        let back = fs::read(&temp).map_err(failed)?;
-        if back != edit.bytes {
-            return Err(failed("the temporary file reads back differently"));
-        }
-        check(&edit.check, &back, worker).map_err(SaveOutcome::Failed)?;
-        if identity::verify(path, id) != Verify::Same {
-            return Err(SaveOutcome::Changed);
-        }
-        Ok(())
-    })();
-    if let Err(outcome) = written {
-        remove_temp(&temp);
-        return Err(outcome);
+    // From here on the temp file is removed on every way out, unwinding included.
+    let mut temp = TempFile {
+        path: temp_path,
+        keep: false,
+    };
+    file.write_all(&edit.bytes).map_err(failed)?;
+    // FlushFileBuffers.
+    file.sync_all().map_err(failed)?;
+    drop(file);
+    let back = fs::read(&temp.path).map_err(failed)?;
+    if back != edit.bytes {
+        return Err(failed("the temporary file reads back differently"));
     }
-    replace_file(target, &temp)?;
-    restore_times(target, times);
-    Ok(())
-}
-
-/// `ReplaceFileW` without a backup. Should it fail with the original already gone, the
-/// temp file holds the only copy, so it is renamed into place instead of removed.
-fn replace_file(target: &Path, temp: &Path) -> Result<(), SaveOutcome> {
+    check(&edit.check, &back, worker, limits).map_err(SaveOutcome::Failed)?;
+    if identity::verify(path, id) != Verify::Same {
+        return Err(SaveOutcome::Changed);
+    }
     // SAFETY: both strings are NUL-terminated and live for the whole call; there is no
     // backup name and the reserved pointers are null.
     let replaced = unsafe {
         ReplaceFileW(
             &HSTRING::from(target.as_os_str()),
-            &HSTRING::from(temp.as_os_str()),
+            &HSTRING::from(temp.path.as_os_str()),
             PCWSTR::null(),
             REPLACEFILE_IGNORE_MERGE_ERRORS,
             None,
             None,
         )
     };
-    let Err(e) = replaced else {
-        return Ok(());
-    };
-    if fs::symlink_metadata(target).is_ok() {
-        remove_temp(temp);
-        return Err(failed(format!("ReplaceFileW: {e}")));
+    match replaced {
+        // The temp file is now the photo.
+        Ok(()) => temp.keep = true,
+        Err(e) => after_replace_error(e.code(), target, &mut temp)?,
     }
-    fs::rename(temp, target).map_err(|r| {
-        eprintln!(
-            "light-view: ReplaceFileW failed ({e}); the new file stays at {}: {r}",
-            temp.display()
-        );
-        failed(format!("ReplaceFileW: {e}"))
-    })?;
-    // The temp file was hidden; the photo must not be.
-    if let Ok(meta) = fs::metadata(target) {
-        let attrs = FILE_FLAGS_AND_ATTRIBUTES(meta.file_attributes() & !FILE_ATTRIBUTE_HIDDEN.0);
-        // SAFETY: the string is NUL-terminated and lives for the whole call.
-        if let Err(e) = unsafe { SetFileAttributesW(&HSTRING::from(target.as_os_str()), attrs) } {
-            eprintln!("light-view: {} stays hidden: {e}", target.display());
+    restore_times(target, times);
+    Ok(())
+}
+
+/// `.<name>.lvtmp-<pid>`.
+fn temp_name(name: &OsStr, pid: u32) -> OsString {
+    let mut temp = OsString::from(".");
+    temp.push(name);
+    temp.push(format!(".lvtmp-{pid}"));
+    temp
+}
+
+/// A save's temp file: removed when dropped unless `keep` is set (it became the photo,
+/// or it is the only copy left).
+struct TempFile {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if !self.keep {
+            remove_temp(&self.path);
         }
     }
-    Ok(())
+}
+
+/// Acts on a failed `ReplaceFileW` (`code`). Without a backup name, the error
+/// ERROR_UNABLE_TO_MOVE_REPLACEMENT (or its `_2` form) means the original is already gone
+/// and the temp file holds the only copy: it is moved into place (never over a file that
+/// appeared meanwhile), or, if that fails too, kept, unhidden, as `KeptCopy`. Any other
+/// failure removes the temp file: `Changed` if the photo is gone (deleted or moved
+/// meanwhile; it is never recreated), else `Failed`.
+fn after_replace_error(
+    code: HRESULT,
+    target: &Path,
+    temp: &mut TempFile,
+) -> Result<(), SaveOutcome> {
+    let gone = fs::symlink_metadata(target).is_err();
+    let moved_away = [
+        ERROR_UNABLE_TO_MOVE_REPLACEMENT,
+        ERROR_UNABLE_TO_MOVE_REPLACEMENT_2,
+    ]
+    .iter()
+    .any(|e| HRESULT::from_win32(e.0) == code);
+    if !(moved_away && gone) {
+        return Err(if gone {
+            SaveOutcome::Changed
+        } else {
+            failed(format!(
+                "ReplaceFileW: {}",
+                windows::core::Error::from(code)
+            ))
+        });
+    }
+    temp.keep = true;
+    // SAFETY: both strings are NUL-terminated and live for the whole call. Without
+    // MOVEFILE_REPLACE_EXISTING an existing file at `target` is never replaced.
+    let moved = unsafe {
+        MoveFileExW(
+            &HSTRING::from(temp.path.as_os_str()),
+            &HSTRING::from(target.as_os_str()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    match moved {
+        Ok(()) => {
+            unhide(target);
+            Ok(())
+        }
+        Err(e) => {
+            unhide(&temp.path);
+            eprintln!(
+                "light-view: the original is gone and the new file could not take its place \
+                 ({e}); the only copy stays at {}",
+                temp.path.display()
+            );
+            Err(SaveOutcome::KeptCopy(temp.path.clone()))
+        }
+    }
+}
+
+/// Clears the hidden attribute the temp file was created with.
+fn unhide(path: &Path) {
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    let attrs = FILE_FLAGS_AND_ATTRIBUTES(meta.file_attributes() & !FILE_ATTRIBUTE_HIDDEN.0);
+    // SAFETY: the string is NUL-terminated and lives for the whole call.
+    if let Err(e) = unsafe { SetFileAttributesW(&HSTRING::from(path.as_os_str()), attrs) } {
+        eprintln!("light-view: {} stays hidden: {e}", path.display());
+    }
 }
 
 fn remove_temp(temp: &Path) {
     if let Err(e) = fs::remove_file(temp) {
         eprintln!("light-view: could not remove {}: {e}", temp.display());
+    }
+}
+
+/// The pid in `file`, if it is exactly the temp name `.<photo>.lvtmp-<pid>`.
+fn temp_pid(file: &OsStr, photo: &OsStr) -> Option<u32> {
+    let prefix: Vec<u16> = temp_name(photo, 0).encode_wide().collect();
+    let prefix = &prefix[..prefix.len() - 1]; // without the "0"
+    let file: Vec<u16> = file.encode_wide().collect();
+    let digits = file.strip_prefix(prefix)?;
+    if digits.is_empty()
+        || !digits
+            .iter()
+            .all(|&c| (u16::from(b'0')..=u16::from(b'9')).contains(&c))
+    {
+        return None;
+    }
+    String::from_utf16(digits).ok()?.parse().ok()
+}
+
+/// Whether a temp file named for process `pid` was left behind by a save that never
+/// finished (a crash or power loss): it is still hidden (a kept copy is not), and it is
+/// either this process's name (saves run one at a time, and a crashed earlier process may
+/// have had the same pid) or no running process has that pid.
+fn is_stale(pid: u32, own: u32, hidden: bool, running: impl Fn(u32) -> bool) -> bool {
+    hidden && (pid == own || !running(pid))
+}
+
+/// Removes the stale temp files of the photo at `target`: only regular files named
+/// exactly `.<name>.lvtmp-<pid>` in its folder ([`temp_pid`], [`is_stale`]).
+fn sweep_stale_temps(target: &Path, own: u32) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = temp_pid(&entry.file_name(), name) else {
+            continue;
+        };
+        // `symlink_metadata`: a link or a folder is never a temp file of ours.
+        let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let hidden = meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0;
+        if meta.is_file() && is_stale(pid, own, hidden, process_running) {
+            eprintln!("light-view: removing a stale {}", entry.path().display());
+            remove_temp(&entry.path());
+        }
+    }
+}
+
+/// Whether a process with this pid exists; when that cannot be told (access denied),
+/// it counts as running.
+fn process_running(pid: u32) -> bool {
+    const STILL_ACTIVE: u32 = 259;
+    // SAFETY: plain call; the handle is closed below.
+    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => {
+            let mut code = 0u32;
+            // SAFETY: `handle` is a live process handle with query access; `code` is a
+            // writable local. The handle is closed once.
+            unsafe {
+                let read = GetExitCodeProcess(handle, &mut code);
+                let _ = CloseHandle(handle);
+                read.is_err() || code == STILL_ACTIVE
+            }
+        }
+        Err(e) => e.code() != HRESULT::from_win32(ERROR_INVALID_PARAMETER.0),
     }
 }
 
@@ -452,11 +609,15 @@ mod tests {
     use lv_core::jpeg_check::inspect;
 
     use crate::worker::tests::worker_exe;
-    use crate::worker::{WorkerPool, NOT_RESPONDING};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use crate::worker::WorkerPool;
 
     /// Quadrant colours: top left, top right, bottom left, bottom right.
     const COLORS: [[u8; 3]; 4] = [[220, 30, 30], [30, 200, 30], [30, 30, 220], [235, 235, 235]];
     const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
 
     /// A `w`×`h` JPEG (4:2:0, 16×16 MCUs) of four flat quadrants with EXIF `orientation`.
     fn jpeg(w: u32, h: u32, orientation: u16) -> Vec<u8> {
@@ -653,7 +814,7 @@ mod tests {
 
     impl Fixture {
         fn save(&self, q: u8, worker: &dyn RotateService) -> SaveOutcome {
-            save_rotation(&self.path, &self.id, q, worker)
+            save_rotation(&self.path, &self.id, q, worker, &DecodeLimits::default())
         }
 
         fn bytes(&self) -> Vec<u8> {
@@ -817,7 +978,7 @@ mod tests {
         let old = jpeg(64, 32, 1);
         let failures: [fn() -> PoolError; 3] = [
             || PoolError::Failed(DecodeError::Unsupported),
-            || PoolError::Failed(DecodeError::Corrupt(NOT_RESPONDING.into())),
+            || PoolError::WorkerUnavailable,
             || PoolError::Failed(DecodeError::FileTooLarge { bytes: 1 }),
         ];
         // The worker fails (no worker, a hung one, a refusal that is not a fallback).
@@ -891,6 +1052,225 @@ mod tests {
         ));
         assert_eq!(f.bytes(), old);
         assert!(blocker.is_dir());
+
+        // The check decode is held to the viewer's limits (here 2048 px > 1000).
+        let f = fixture("f.jpg", &old);
+        let small = DecodeLimits { max_pixels: 1000 };
+        let outcome = save_rotation(&f.path, &f.id, 1, &Fake::new(Behavior::Honest), &small);
+        assert!(matches!(outcome, SaveOutcome::Failed(_)), "{outcome:?}");
+        assert_eq!(f.bytes(), old);
+        f.assert_no_temp();
+
+        // ReplaceFileW fails: another program holds the original open without
+        // FILE_SHARE_DELETE (a sharing violation).
+        let f = fixture("f.jpg", &old);
+        let holder = fs::File::options()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&f.path)
+            .unwrap();
+        let outcome = f.save(1, &Fake::new(Behavior::Honest));
+        assert!(matches!(outcome, SaveOutcome::Failed(_)), "{outcome:?}");
+        drop(holder);
+        assert_eq!(f.bytes(), old);
+        f.assert_no_temp();
+    }
+
+    /// A HEIF service that answers the original's size, then panics checking the temp.
+    struct PanicsInCheck {
+        calls: Cell<usize>,
+    }
+
+    impl RotateService for PanicsInCheck {
+        fn rotate_jpeg(&self, _data: Vec<u8>, _quarters: u8) -> Result<Vec<u8>, PoolError> {
+            panic!("not a JPEG test");
+        }
+
+        fn heif_dims(&self, _data: Vec<u8>) -> Result<(u32, u32), DecodeError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == 2 {
+                panic!("the check panicked");
+            }
+            Ok((451, 461))
+        }
+    }
+
+    #[test]
+    fn a_panic_after_the_temp_file_removes_it() {
+        let old = heic_sample();
+        let f = fixture("p.heic", &old);
+        let service = PanicsInCheck {
+            calls: Cell::new(0),
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| f.save(1, &service)));
+        assert!(result.is_err());
+        assert_eq!(service.calls.get(), 2);
+        assert_eq!(f.bytes(), old);
+        f.assert_no_temp();
+    }
+
+    /// A hidden temp file holding `bytes`, as the save makes it.
+    fn hidden_file(path: &Path, bytes: &[u8]) {
+        let mut file = fs::File::options()
+            .write(true)
+            .create_new(true)
+            .attributes(FILE_ATTRIBUTE_HIDDEN)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+    }
+
+    fn hidden(path: &Path) -> bool {
+        fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+    }
+
+    const UNABLE_TO_MOVE: u32 = 1176;
+    const FILE_NOT_FOUND: u32 = 2;
+
+    #[test]
+    fn replace_error_with_the_original_gone_moves_the_copy_into_place() {
+        let dir = tempfile::Builder::new()
+            .prefix("lv-m3-save")
+            .tempdir()
+            .unwrap();
+        let target = dir.path().join("x.jpg");
+        let temp_path = dir.path().join(".x.jpg.lvtmp-1");
+        hidden_file(&temp_path, b"new");
+        let mut temp = TempFile {
+            path: temp_path.clone(),
+            keep: false,
+        };
+        let code = HRESULT::from_win32(UNABLE_TO_MOVE);
+        assert_eq!(after_replace_error(code, &target, &mut temp), Ok(()));
+        drop(temp);
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!hidden(&target));
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn replace_error_after_the_photo_was_deleted_never_recreates_it() {
+        let dir = tempfile::Builder::new()
+            .prefix("lv-m3-save")
+            .tempdir()
+            .unwrap();
+        let target = dir.path().join("x.jpg");
+        let temp_path = dir.path().join(".x.jpg.lvtmp-1");
+        hidden_file(&temp_path, b"new");
+        let mut temp = TempFile {
+            path: temp_path.clone(),
+            keep: false,
+        };
+        let code = HRESULT::from_win32(FILE_NOT_FOUND);
+        assert_eq!(
+            after_replace_error(code, &target, &mut temp),
+            Err(SaveOutcome::Changed)
+        );
+        drop(temp);
+        assert!(!target.exists());
+        assert!(!temp_path.exists());
+
+        // With the photo still there, any error removes the temp file and fails.
+        fs::write(&target, b"old").unwrap();
+        hidden_file(&temp_path, b"new");
+        let mut temp = TempFile {
+            path: temp_path.clone(),
+            keep: false,
+        };
+        let code = HRESULT::from_win32(UNABLE_TO_MOVE);
+        let outcome = after_replace_error(code, &target, &mut temp);
+        assert!(
+            matches!(outcome, Err(SaveOutcome::Failed(_))),
+            "{outcome:?}"
+        );
+        drop(temp);
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn replace_error_keeps_the_only_copy_when_it_cannot_move() {
+        let dir = tempfile::Builder::new()
+            .prefix("lv-m3-save")
+            .tempdir()
+            .unwrap();
+        let target = dir.path().join("x.jpg");
+        let temp_path = dir.path().join(".x.jpg.lvtmp-1");
+        hidden_file(&temp_path, b"new");
+        // Nobody may share the temp file: it cannot be moved.
+        let lock = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&temp_path)
+            .unwrap();
+        let mut temp = TempFile {
+            path: temp_path.clone(),
+            keep: false,
+        };
+        let code = HRESULT::from_win32(UNABLE_TO_MOVE);
+        assert_eq!(
+            after_replace_error(code, &target, &mut temp),
+            Err(SaveOutcome::KeptCopy(temp_path.clone()))
+        );
+        drop(temp);
+        drop(lock);
+        assert_eq!(fs::read(&temp_path).unwrap(), b"new");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn temp_names_are_matched_exactly() {
+        let photo = OsStr::new("a.jpg");
+        let pid = |name: &str| temp_pid(OsStr::new(name), photo);
+        assert_eq!(pid(".a.jpg.lvtmp-1234"), Some(1234));
+        assert_eq!(pid(".a.jpg.lvtmp-0"), Some(0));
+        for other in [
+            "a.jpg",
+            ".a.jpg.lvtmp-",
+            ".a.jpg.lvtmp-12a",
+            ".a.jpg.lvtmp-+12",
+            ".a.jpg.lvtmp-12.jpg",
+            ".a.jpg.lvtmp-99999999999",
+            ".b.jpg.lvtmp-12",
+            ".aa.jpg.lvtmp-12",
+            "a.jpg.lvtmp-12",
+            ".A.JPG.lvtmp-12",
+            "..a.jpg.lvtmp-12",
+        ] {
+            assert_eq!(pid(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn only_hidden_temps_of_dead_or_own_pids_are_stale() {
+        let running = |pid: u32| pid == 8;
+        assert!(is_stale(5, 7, true, running), "no such process");
+        assert!(is_stale(7, 7, true, running), "this process: a reused pid");
+        assert!(
+            !is_stale(8, 7, true, running),
+            "another live process may be saving"
+        );
+        assert!(!is_stale(5, 7, false, running), "a kept copy is not hidden");
+        assert!(process_running(std::process::id()));
+    }
+
+    #[test]
+    fn stale_temps_of_the_photo_are_swept_before_saving() {
+        let old = jpeg(64, 32, 1);
+        let f = fixture("s.jpg", &old);
+        let dir = f.dir.path();
+        let own = dir.join(format!(".s.jpg.lvtmp-{}", std::process::id()));
+        hidden_file(&own, b"left by a crash");
+        // Pid 4 is the System process: running, so its file stays.
+        let live = dir.join(".s.jpg.lvtmp-4");
+        hidden_file(&live, b"x");
+        let kept = dir.join(".s.jpg.lvtmp-99999999");
+        fs::write(&kept, b"a kept copy").unwrap();
+        let other = dir.join(".t.jpg.lvtmp-99999999");
+        hidden_file(&other, b"another photo's");
+        assert_eq!(f.save(1, &Fake::new(Behavior::Honest)), SaveOutcome::Saved);
+        assert!(!own.exists());
+        assert!(live.exists() && kept.exists() && other.exists());
     }
 
     #[test]
@@ -960,7 +1340,13 @@ mod tests {
         fs::write(to_extended_path(&path), &old).unwrap();
         let id = capture(&path).unwrap();
         assert_eq!(
-            save_rotation(&path, &id, 1, &Fake::new(Behavior::Honest)),
+            save_rotation(
+                &path,
+                &id,
+                1,
+                &Fake::new(Behavior::Honest),
+                &DecodeLimits::default()
+            ),
             SaveOutcome::Saved
         );
         let new = fs::read(to_extended_path(&path)).unwrap();

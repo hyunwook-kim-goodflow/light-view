@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use lv_core::command::Command;
 use lv_core::decode::{DecodeError, DecodedImage};
-use lv_core::identity::{self, FileIdentity};
+use lv_core::identity::FileIdentity;
 use lv_core::listing::FolderList;
 use lv_core::prefetch::{DecodeResult, Prefetcher};
 use lv_core::viewport::{Viewport, ZOOM_STEP};
@@ -52,8 +52,8 @@ struct Shown {
     content: Content,
     /// The view rotation it is drawn with; kept while the next photo loads.
     quarters: u8,
-    /// The file as it was when shown (or as the app last saved it); saves and deletes
-    /// act only on that file. `None` if it could not be read.
+    /// The file as it was right before its decode read it (or as the app last saved it);
+    /// saves and deletes act only on that file. `None` if it could not be read.
     identity: Option<FileIdentity>,
     /// The file was saved since it was decoded: it stays drawn (with its old rotation,
     /// which the saved file now holds) until the new decode replaces it.
@@ -358,7 +358,7 @@ impl Viewer {
         let Some(path) = self.list.current().map(Path::to_path_buf) else {
             return Redraw::None;
         };
-        let Some(result) = self.prefetcher.get(&path) else {
+        let Some((result, identity)) = self.prefetcher.get_with_identity(&path) else {
             return Redraw::None;
         };
         let content = match result.as_ref() {
@@ -369,9 +369,6 @@ impl Viewer {
             Ok(_) => Content::Message(CANNOT_OPEN.to_owned()),
             Err(e) => Content::Message(error_message(e)),
         };
-        // The identity is read after the decode: a change in between goes unnoticed, as
-        // the decode may have read either version.
-        let identity = identity::capture(&path).ok();
         self.shown = Some(Shown {
             path,
             content,
@@ -961,6 +958,34 @@ mod tests {
         assert!(v.generation() > generation);
         assert!(matches!(v.scene(), Scene::Image { quarters: 0, .. }));
         assert_eq!(v.title(), "c.jpg · 3 / 5");
+    }
+
+    #[test]
+    fn a_file_changed_after_its_decode_is_not_saved() {
+        use crate::save::{save_rotation, NoWorker, SaveOutcome};
+        use lv_core::decode::DecodeLimits;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, b"as decoded").unwrap();
+        let (tx, rx) = channel();
+        let prefetcher = Prefetcher::new(FakeDecoder { gate: None }, 1, u64::MAX, move |p| {
+            let _ = tx.send(p);
+        });
+        let mut v = Viewer::new(prefetcher);
+        v.set_view(VIEW, 1.0);
+        v.open_list(FolderList::from_paths(vec![path.clone()], &path));
+        // Decoded (and cached) first; the file then changes before it is shown.
+        let ready = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::fs::write(&path, b"changed after the decode").unwrap();
+        v.on_image_ready(ready);
+        assert!(v.showing_current());
+        v.apply(Command::RotateRight);
+        let request = v.save_request().unwrap();
+        let id = request.identity.expect("read before the decode");
+        let outcome = save_rotation(&path, &id, 1, &NoWorker, &DecodeLimits::default());
+        assert_eq!(outcome, SaveOutcome::Changed);
+        assert_eq!(std::fs::read(&path).unwrap(), b"changed after the decode");
     }
 
     #[test]

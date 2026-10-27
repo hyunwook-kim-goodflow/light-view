@@ -51,6 +51,9 @@ pub enum PoolError {
     /// rotation would lose what follows the first image (MPF images, gain maps, motion-photo
     /// video), so the save must fall back to the EXIF orientation and keep the bytes.
     HasTrailingData,
+    /// No worker answered: it hung, died, broke the protocol or no slot came free in time
+    /// ("작업자가 응답하지 않아요"). Says nothing about the file.
+    WorkerUnavailable,
 }
 
 impl From<DecodeError> for PoolError {
@@ -65,6 +68,7 @@ impl std::fmt::Display for PoolError {
             PoolError::Failed(e) => e.fmt(f),
             PoolError::NotPerfect => write!(f, "the JPEG cannot be rotated losslessly"),
             PoolError::HasTrailingData => write!(f, "the JPEG holds more than one image"),
+            PoolError::WorkerUnavailable => write!(f, "{NOT_RESPONDING}"),
         }
     }
 }
@@ -123,7 +127,8 @@ impl WorkerPool {
             }) => Ok((width, height, bgra)),
             Err(PoolError::Failed(e)) => Err(e),
             // `check` only lets an `Image` answer or a decode failure through for a decode.
-            Ok(Reply::Bytes { .. })
+            Err(PoolError::WorkerUnavailable)
+            | Ok(Reply::Bytes { .. })
             | Err(PoolError::NotPerfect)
             | Err(PoolError::HasTrailingData) => Err(DecodeError::Corrupt(NOT_RESPONDING.into())),
         }

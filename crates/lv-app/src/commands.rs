@@ -11,6 +11,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lv_core::command::{command_for_key, Command, Mods};
 use lv_core::decode::DecodeLimits;
@@ -26,16 +27,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, PostMessageW, SetTimer, SetWindowTextW, WM_APP, WM_CLOSE, WM_DROPFILES, WM_KEYDOWN,
-    WM_SYSKEYDOWN, WM_TIMER,
+    KillTimer, PostMessageW, SetTimer, SetWindowTextW, WM_APP, WM_CLOSE, WM_DROPFILES,
+    WM_ENDSESSION, WM_KEYDOWN, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use crate::fullscreen;
 use crate::input;
 use crate::instance;
 use crate::overlay::{
-    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, TOAST_FILE_CHANGED, TOAST_READ_ONLY,
-    TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
+    DialogTarget, OverlayEvent, Prompt, PromptResult, Toast, TOAST_FILE_CHANGED, TOAST_KEPT_COPY,
+    TOAST_READ_ONLY, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
 };
 use crate::routing::RoutingDecoder;
 use crate::save::{save_rotation, NoWorker, SaveOutcome};
@@ -51,6 +52,8 @@ const ANIMATION_TIMER: usize = 2;
 const LOADING_TIMER: usize = 3;
 /// One-shot: a save still running after `LOADING_DELAY_MS` shows "저장하는 중…".
 const SAVING_TIMER: usize = 5;
+/// How long a running save may hold up the end of a Windows session.
+const END_SESSION_WAIT: Duration = Duration::from_secs(5);
 /// How long the previous photo stays up before "불러오는 중…" replaces it.
 const LOADING_DELAY_MS: u32 = 150;
 const PREFETCH_WORKERS: usize = 2;
@@ -83,10 +86,14 @@ pub struct SaveDone {
     identity: Option<identity::FileIdentity>,
 }
 
-/// The viewer with its prefetcher, and the worker pool. HEIF workers (one per prefetch
-/// thread, ruling R2) start here, before the window shows; a missing or failing worker
-/// only affects HEIF and JPEG pixel rotation.
-pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> (Viewer, Option<Arc<WorkerPool>>) {
+/// The viewer with its prefetcher, the worker pool and the decode limits (also used to
+/// check saved files). HEIF workers (one per prefetch thread, ruling R2) start here,
+/// before the window shows; a missing or failing worker only affects HEIF and JPEG pixel
+/// rotation.
+pub fn new_viewer(
+    settings: &Settings,
+    hwnd: HwndCell,
+) -> (Viewer, Option<Arc<WorkerPool>>, DecodeLimits) {
     let budget = memory_budget(settings);
     let limits = DecodeLimits {
         max_pixels: max_pixels_for_budget(budget),
@@ -104,7 +111,7 @@ pub fn new_viewer(settings: &Settings, hwnd: HwndCell) -> (Viewer, Option<Arc<Wo
     });
     let mut viewer = Viewer::new(prefetcher);
     viewer.set_auto_save(settings.auto_save_rotation);
-    (viewer, pool)
+    (viewer, pool, limits)
 }
 
 /// The decode pixel limit for a prefetch memory budget. Decoding peaks at about twice
@@ -241,14 +248,15 @@ fn start_save(app: &RefCell<App>, hwnd: HWND) {
     }
     a.saving = Some(Saving { overdue: false });
     let pool = a.pool.clone();
+    let limits = a.decode_limits;
     let tx = a.save_tx.clone();
     drop(a);
     let target = hwnd.0 as isize;
     std::thread::spawn(move || {
         let path = request.path;
         let save = || match &pool {
-            Some(pool) => save_rotation(&path, &id, request.quarters, &**pool),
-            None => save_rotation(&path, &id, request.quarters, &NoWorker),
+            Some(pool) => save_rotation(&path, &id, request.quarters, &**pool, &limits),
+            None => save_rotation(&path, &id, request.quarters, &NoWorker, &limits),
         };
         let outcome = catch_unwind(AssertUnwindSafe(save))
             .unwrap_or_else(|_| SaveOutcome::Failed("the save panicked".into()));
@@ -285,13 +293,17 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
     }
     let toast = match &done.outcome {
         SaveOutcome::Saved => None,
-        SaveOutcome::SavedAsOrientationTag => Some(TOAST_SAVED_AS_TAG),
-        SaveOutcome::Unsupported => Some(TOAST_UNSUPPORTED_FORMAT),
-        SaveOutcome::Changed => Some(TOAST_FILE_CHANGED),
-        SaveOutcome::ReadOnly => Some(TOAST_READ_ONLY),
+        SaveOutcome::SavedAsOrientationTag => Some(TOAST_SAVED_AS_TAG.to_owned()),
+        SaveOutcome::Unsupported => Some(TOAST_UNSUPPORTED_FORMAT.to_owned()),
+        SaveOutcome::Changed => Some(TOAST_FILE_CHANGED.to_owned()),
+        SaveOutcome::ReadOnly => Some(TOAST_READ_ONLY.to_owned()),
         SaveOutcome::Failed(e) => {
             eprintln!("light-view: could not save {}: {e}", done.path.display());
-            Some(TOAST_SAVE_FAILED)
+            Some(TOAST_SAVE_FAILED.to_owned())
+        }
+        SaveOutcome::KeptCopy(copy) => {
+            let name = copy.file_name().unwrap_or_default().to_string_lossy();
+            Some(format!("{TOAST_KEPT_COPY}{name}"))
         }
     };
     let pending = {
@@ -314,7 +326,7 @@ fn on_save_done(app: &RefCell<App>, hwnd: HWND, done: SaveDone) {
         }
     };
     if let Some(text) = toast {
-        input::show_toast(app, hwnd, |now| Toast::new(text, now));
+        input::show_toast(app, hwnd, |now| Toast::new(&text, now));
     }
     after(app, hwnd, Redraw::Full);
     if let Some(reason) = pending {
@@ -516,6 +528,16 @@ pub fn handle(
                 let done = app.try_borrow().ok()?.save_rx.try_recv();
                 let Ok(done) = done else { break };
                 on_save_done(app, hwnd, done);
+            }
+            Some(LRESULT(0))
+        }
+        // Windows is ending the session: the process may be ended once this returns, so
+        // a running save gets up to `END_SESSION_WAIT` to finish its replace (blocking
+        // the shutdown with WM_QUERYENDSESSION would be worse).
+        WM_ENDSESSION if wparam.0 != 0 => {
+            let a = app.try_borrow().ok()?;
+            if a.saving.is_some() {
+                let _ = a.save_rx.recv_timeout(END_SESSION_WAIT);
             }
             Some(LRESULT(0))
         }
