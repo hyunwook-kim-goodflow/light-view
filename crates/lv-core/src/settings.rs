@@ -74,10 +74,22 @@ pub fn save_settings(path: &Path, s: &Settings) -> std::io::Result<()> {
     }
     let text =
         toml::to_string(s).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = with_suffix(path, ".tmp");
-    std::fs::write(&tmp, text)?;
-    // Windows에서도 std::fs::rename은 기존 대상을 덮어쓴다.
-    std::fs::rename(&tmp, path)
+    let tmp = temp_path(path);
+    let written = std::fs::write(&tmp, text).and_then(|()| {
+        // Windows에서도 std::fs::rename은 기존 대상을 덮어쓴다.
+        std::fs::rename(&tmp, path)
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// The temp file a save writes before renaming it into place: one per process
+/// (`settings.toml.<pid>.tmp`), so windows in separate processes saving at once never
+/// write into or rename each other's.
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    with_suffix(path, &format!(".{}.tmp", std::process::id()))
 }
 
 /// Changes only what `change` sets: reads the file as it is now (another window in
@@ -143,6 +155,28 @@ mod tests {
         let path = dir.path().join("settings.toml");
         save_settings(&path, &sample()).unwrap();
         assert_eq!(load_settings(&path), sample());
+    }
+
+    /// Windows in separate processes may save at the same moment: each writes its own
+    /// temp file (`settings.toml.<pid>.tmp`), so neither renames the other's half-written
+    /// one into place, and a temp file of another process is left alone.
+    #[test]
+    fn each_process_saves_through_its_own_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let own = dir
+            .path()
+            .join(format!("settings.toml.{}.tmp", std::process::id()));
+        assert_eq!(temp_path(&path), own);
+        let other = dir.path().join("settings.toml.4294967295.tmp");
+        std::fs::write(&other, b"another process, mid-write").unwrap();
+        save_settings(&path, &sample()).unwrap();
+        assert_eq!(load_settings(&path), sample());
+        assert!(!own.exists());
+        assert_eq!(
+            std::fs::read(&other).unwrap(),
+            b"another process, mid-write"
+        );
     }
 
     /// Two windows in separate processes ("새 창") each keep their own Settings: a
