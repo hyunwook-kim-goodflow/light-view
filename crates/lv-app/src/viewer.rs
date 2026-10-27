@@ -422,13 +422,15 @@ impl Viewer {
         }
     }
 
-    /// Asks the prefetcher for the current photo and its neighbours, in the direction
-    /// of the last move first.
+    /// Asks the prefetcher for the current photo and one neighbour each side, the one in
+    /// the direction of the last move first (spec §5.2). A second photo ahead was
+    /// dropped in M5: it cost a decoded 12 MP photo (~46 MB) and kept the app over the
+    /// 300 MB target, while one decode (~0.3 s) is quicker than normal paging.
     fn request_wanted(&mut self) {
-        let offsets: [isize; 4] = if self.backward {
-            [0, -1, 1, -2]
+        let offsets: [isize; 3] = if self.backward {
+            [0, -1, 1]
         } else {
-            [0, 1, -1, 2]
+            [0, 1, -1]
         };
         self.wanted = offsets
             .iter()
@@ -1085,10 +1087,32 @@ mod tests {
     }
 
     #[test]
+    fn opened_before_the_window_exists_shows_once_checked_and_sized() {
+        // At start-up the first photo is opened before the window exists, so its decode
+        // runs while the window and renderer are made; the ready message posted then is
+        // lost and the window checks for the photo itself.
+        let (tx, rx) = channel();
+        let prefetcher = Prefetcher::new(FakeDecoder { gate: None }, 1, u64::MAX, move |path| {
+            let _ = tx.send(path);
+        });
+        let mut v = Viewer::new(prefetcher);
+        let names = ["a.jpg", "b.jpg", "c.jpg"];
+        v.open_list(FolderList::from_paths(names.map(p).to_vec(), &p("b.jpg")));
+        let first = rx.recv_timeout(Duration::from_secs(5)).expect("a decode");
+        assert_eq!(first, p("b.jpg"), "the opened photo decodes first");
+        assert_eq!(v.check_current(), Redraw::Full);
+        v.set_view(VIEW, 1.0);
+        match v.scene() {
+            Scene::Image { rect, .. } => assert_eq!((rect.2, rect.3), (400.0, 300.0)),
+            _ => panic!("the photo should be shown"),
+        }
+    }
+
+    #[test]
     fn prev_requests_prefetch_backwards() {
         let (mut v, _rx) = viewer_at("d.jpg");
         v.apply(Command::Prev);
-        assert_eq!(v.wanted, [p("c.jpg"), p("b.jpg"), p("d.jpg"), p("a.jpg")]);
+        assert_eq!(v.wanted, [p("c.jpg"), p("b.jpg"), p("d.jpg")]);
     }
 
     #[test]

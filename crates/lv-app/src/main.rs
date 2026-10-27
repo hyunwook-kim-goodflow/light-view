@@ -59,22 +59,25 @@ fn main() -> anyhow::Result<()> {
         eprintln!("light-view: could not set the AppUserModelID: {e}");
     }
     let mut args = std::env::args_os().skip(1).peekable();
-    if args.peek().is_some_and(|a| a == "--timing") {
-        args.next();
+    let mut bench = false;
+    while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
         timing::enable(start);
+        bench |= flag == "--bench";
     }
     let initial = args.next().map(PathBuf::from);
-    let settings_path = window::settings_path();
+    // `--bench` (lv-bench): default settings, nothing saved, no single-instance check,
+    // so a measurement neither depends on nor changes the user's settings and windows.
+    let settings_path = if bench { None } else { window::settings_path() };
     let settings = settings_path
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
     strings::set(settings.language);
     // Held until the window closes, so later launches forward to it.
-    let _guard = if settings.open_in_new_window {
+    let _guard = if settings.open_in_new_window || bench {
         None
     } else {
-        match acquire_or_forward(initial.as_deref()) {
+        match timing::step("instance-ms", || acquire_or_forward(initial.as_deref())) {
             Launch::Forwarded => return Ok(()),
             Launch::Primary(guard) => Some(guard),
         }

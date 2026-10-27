@@ -15,6 +15,7 @@ use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, Limits};
 use crate::color::{premultiply_to_bgra, ColorSource, SrgbConverter};
 use crate::exif_info::ExifData;
 use crate::format::{sniff_format, ImageFormat, SNIFF_LEN};
+use crate::profile::phase;
 
 mod jpeg_budget;
 pub mod scaled_jpeg;
@@ -161,7 +162,8 @@ pub fn decode_file(path: &Path, limits: &DecodeLimits) -> Result<DecodedImage, D
     if to_image_format(image.format).is_none() {
         return Err(DecodeError::Unsupported);
     }
-    decode_bytes(&image.read_all(limits)?, limits)
+    let bytes = phase("read", || image.read_all(limits))?;
+    decode_bytes(&bytes, limits)
 }
 
 /// An image file whose first bytes were sniffed and nothing more read.
@@ -249,9 +251,10 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     let format = sniff_format(head).ok_or(DecodeError::Unsupported)?;
     let img_format = to_image_format(format).ok_or(DecodeError::Unsupported)?;
 
-    let (width, height) = ImageReader::with_format(Cursor::new(bytes), img_format)
-        .into_dimensions()
-        .map_err(corrupt)?;
+    let (width, height) = phase("header", || {
+        ImageReader::with_format(Cursor::new(bytes), img_format).into_dimensions()
+    })
+    .map_err(corrupt)?;
     let over_limit = u64::from(width) * u64::from(height) > limits.max_pixels;
     if over_limit && format != ImageFormat::Jpeg {
         return Err(DecodeError::TooLarge { width, height });
@@ -259,12 +262,12 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     // Every JPEG, full or reduced, is checked for work out of proportion to its size
     // before any decoder sees it (rulings R10, R11).
     let jpeg_frame = match format {
-        ImageFormat::Jpeg => jpeg_budget::check(bytes)?,
+        ImageFormat::Jpeg => phase("jpeg_check", || jpeg_budget::check(bytes))?,
         _ => None,
     };
 
     let byte_len = bytes.len() as u64;
-    let exif = ExifData::read(bytes).map(Arc::new);
+    let exif = phase("exif", || ExifData::read(bytes).map(Arc::new));
     let output = |frames: Vec<RgbaFrame>, (w, h), icc: Option<Vec<u8>>, orientation: u16| {
         let (frames, width, height) = to_output(frames, w, h, icc.as_deref(), orientation);
         DecodedImage {
@@ -282,7 +285,9 @@ fn decode_inner(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedImage, Dec
     if over_limit {
         // A JPEG over the limit opens at reduced size (ruling R1), oriented and color
         // converted like the full one.
-        let scaled = scaled_jpeg::decode(bytes, width, height, limits, jpeg_frame)?;
+        let scaled = phase("decode", || {
+            scaled_jpeg::decode(bytes, width, height, limits, jpeg_frame)
+        })?;
         let orientation = exif_orientation(bytes);
         let mut image = output(
             vec![scaled.frame],
@@ -356,22 +361,26 @@ fn to_output(
     icc: Option<&[u8]>,
     orientation: u16,
 ) -> (Vec<Frame>, u32, u32) {
-    let converter = SrgbConverter::new(icc.map_or(ColorSource::Srgb, ColorSource::Icc));
-    let frames = frames
-        .into_iter()
-        .map(|mut f| {
-            converter.apply(&mut f.rgba);
-            f
-        })
-        .collect();
-    let (frames, w, h) = orient_frames(frames, w, h, orientation);
-    let frames = frames
-        .into_iter()
-        .map(|f| Frame {
-            bgra: premultiply_to_bgra(f.rgba),
-            delay_ms: f.delay_ms,
-        })
-        .collect();
+    let frames = phase("color", || {
+        let converter = SrgbConverter::new(icc.map_or(ColorSource::Srgb, ColorSource::Icc));
+        frames
+            .into_iter()
+            .map(|mut f| {
+                converter.apply(&mut f.rgba);
+                f
+            })
+            .collect()
+    });
+    let (frames, w, h) = phase("orient", || orient_frames(frames, w, h, orientation));
+    let frames = phase("premultiply", || {
+        frames
+            .into_iter()
+            .map(|f| Frame {
+                bgra: premultiply_to_bgra(f.rgba),
+                delay_ms: f.delay_ms,
+            })
+            .collect()
+    });
     (frames, w, h)
 }
 
@@ -436,9 +445,10 @@ fn collect_frames(
 /// Decode a still image to one straight-alpha RGBA8 frame.
 fn decode_still(dec: impl ImageDecoder) -> Result<RgbaFrame, DecodeError> {
     let (w0, h0) = dec.dimensions();
-    let img = DynamicImage::from_decoder(dec).map_err(|e| decode_err(e, w0, h0))?;
+    let img =
+        phase("decode", || DynamicImage::from_decoder(dec)).map_err(|e| decode_err(e, w0, h0))?;
     Ok(RgbaFrame {
-        rgba: img.into_rgba8().into_raw(),
+        rgba: phase("to_rgba", || img.into_rgba8().into_raw()),
         delay_ms: 0,
     })
 }

@@ -53,46 +53,62 @@ pub fn halve(src: &[u8], width: u32, height: u32, cancelled: &dyn Fn() -> bool) 
     Some(out)
 }
 
-/// Levels 1 to `levels - 1` of `bgra`, each halved from the one before. `None` if
-/// cancelled.
-fn build(
+/// Levels `first` to `levels - 1` of `bgra`, each halved from the one before, given to
+/// `emit` in order with their level number. A level is handed over once the next one
+/// has been made from it (or it is the last), so at most two levels are held here at a
+/// time and the receiver can free each after uploading it. Stops, returning false, if
+/// cancelled or when `emit` returns false.
+fn build_each(
     bgra: &[u8],
-    width: u32,
-    height: u32,
-    levels: u8,
+    (width, height): (u32, u32),
+    (first, levels): (u8, u8),
     cancelled: &dyn Fn() -> bool,
-) -> Option<Vec<MipLevel>> {
-    let mut out: Vec<MipLevel> = Vec::new();
-    for _ in 1..levels {
-        let (src, w, h) = match out.last() {
+    emit: &mut dyn FnMut(u8, MipLevel) -> bool,
+) -> bool {
+    let mut prev: Option<MipLevel> = None;
+    for level in 1..levels {
+        let (src, w, h) = match &prev {
             Some(l) => (&l.bgra[..], l.width, l.height),
             None => (bgra, width, height),
         };
-        let half = halve(src, w, h, cancelled)?;
-        let (width, height) = mip_dims(w, h, 1);
-        out.push(MipLevel {
-            width,
-            height,
+        let Some(half) = halve(src, w, h, cancelled) else {
+            return false;
+        };
+        let (w, h) = mip_dims(w, h, 1);
+        let made = MipLevel {
+            width: w,
+            height: h,
             bgra: half,
-        });
+        };
+        if let Some(done) = prev.replace(made) {
+            if level > first && !emit(level - 1, done) {
+                return false;
+            }
+        }
     }
-    Some(out)
+    match prev {
+        Some(last) if levels > first => emit(levels - 1, last),
+        _ => true,
+    }
 }
 
 /// A mip build running on its own thread. Dropping it cancels the build.
 pub struct MipJob {
-    rx: Receiver<Vec<MipLevel>>,
+    rx: Receiver<(u8, MipLevel)>,
     cancel: Arc<AtomicBool>,
+    /// Levels the build goes down to, counting level 0 (so the last is `levels - 1`).
+    levels: u8,
 }
 
 impl MipJob {
-    /// Builds levels 1 to `levels - 1` of `frame` of `source`, then calls `wake`
-    /// (from the build thread) unless the job was dropped first.
+    /// Builds levels `first` to `levels - 1` of `frame` of `source` (`first` ≥ 1; the
+    /// levels before it are made only as steps), calling `wake` from the build thread
+    /// after each level is ready, unless the job was dropped first.
     pub fn spawn(
         source: DecodeResult,
         frame: usize,
-        levels: u8,
-        wake: impl FnOnce() + Send + 'static,
+        (first, levels): (u8, u8),
+        wake: impl Fn() + Send + 'static,
     ) -> MipJob {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -105,22 +121,31 @@ impl MipJob {
                     return;
                 };
                 let cancelled = || flag.load(Ordering::Relaxed);
-                if let Some(mips) = build(&f.bgra, img.width, img.height, levels, &cancelled) {
-                    if !cancelled() && tx.send(mips).is_ok() {
-                        wake();
+                let mut emit = |level, mip| {
+                    if cancelled() || tx.send((level, mip)).is_err() {
+                        return false;
                     }
-                }
+                    wake();
+                    true
+                };
+                let size = (img.width, img.height);
+                build_each(&f.bgra, size, (first.max(1), levels), &cancelled, &mut emit);
             });
         if let Err(e) = spawned {
             // The image still draws from its full-size tiles.
             eprintln!("light-view: mip thread failed to start: {e}");
         }
-        MipJob { rx, cancel }
+        MipJob { rx, cancel, levels }
     }
 
-    /// The finished levels, once.
-    pub fn try_take(&self) -> Option<Vec<MipLevel>> {
-        self.rx.try_recv().ok()
+    /// The levels finished since the last call, in order, with their level numbers.
+    pub fn take_ready(&self) -> Vec<(u8, MipLevel)> {
+        self.rx.try_iter().collect()
+    }
+
+    /// The level count (counting level 0) this build goes down to.
+    pub fn levels(&self) -> u8 {
+        self.levels
     }
 }
 
@@ -167,21 +192,54 @@ mod tests {
         assert_eq!(out, vec![20, 30, 40, 50]);
     }
 
+    /// Every level `build_each` hands over, with its number.
+    fn built(src: &[u8], size: (u32, u32), range: (u8, u8)) -> Vec<(u8, MipLevel)> {
+        let mut out = Vec::new();
+        let done = build_each(src, size, range, &never, &mut |level, mip| {
+            out.push((level, mip));
+            true
+        });
+        assert!(done);
+        out
+    }
+
     #[test]
     fn build_chains_levels_down_to_the_requested_one() {
         let (w, h) = (37u32, 5u32);
         let src = vec![200u8; (w * h * 4) as usize];
-        let levels = build(&src, w, h, 4, &never).unwrap();
-        let dims: Vec<_> = levels.iter().map(|l| (l.width, l.height)).collect();
+        let levels = built(&src, (w, h), (1, 4));
+        let numbers: Vec<_> = levels.iter().map(|l| l.0).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        let dims: Vec<_> = levels.iter().map(|l| (l.1.width, l.1.height)).collect();
         assert_eq!(
             dims,
             vec![mip_dims(w, h, 1), mip_dims(w, h, 2), mip_dims(w, h, 3)]
         );
         assert!(levels
             .iter()
-            .all(|l| l.bgra.len() == (l.width * l.height * 4) as usize
+            .all(|(_, l)| l.bgra.len() == (l.width * l.height * 4) as usize
                 && l.bgra.iter().all(|&v| v == 200)));
-        assert!(build(&src, w, h, 1, &never).unwrap().is_empty());
+        assert!(built(&src, (w, h), (1, 1)).is_empty());
+        assert!(built(&src, (w, h), (1, 0)).is_empty());
+    }
+
+    #[test]
+    fn build_hands_over_from_first_and_stops_when_told() {
+        let (w, h) = (64u32, 64u32);
+        let src = vec![9u8; (w * h * 4) as usize];
+        // Levels before `first` are made as steps only.
+        let levels = built(&src, (w, h), (3, 5));
+        let got: Vec<_> = levels.iter().map(|(n, l)| (*n, l.width)).collect();
+        assert_eq!(got, [(3, 8), (4, 4)]);
+        assert!(built(&src, (w, h), (5, 5)).is_empty());
+        // A receiver that refuses stops the build.
+        let mut calls = 0;
+        let done = build_each(&src, (w, h), (1, 5), &never, &mut |_, _| {
+            calls += 1;
+            false
+        });
+        assert!(!done);
+        assert_eq!(calls, 1);
     }
 
     fn image(width: u32, height: u32) -> DecodeResult {
@@ -200,24 +258,31 @@ mod tests {
     }
 
     #[test]
-    fn job_builds_off_thread_and_wakes() {
+    fn job_builds_off_thread_and_wakes_per_level() {
         let (woke_tx, woke_rx) = channel();
-        let job = MipJob::spawn(image(64, 32), 0, 3, move || {
+        let job = MipJob::spawn(image(64, 32), 0, (1, 3), move || {
             let _ = woke_tx.send(std::thread::current().name().map(str::to_owned));
         });
-        let thread = woke_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert_eq!(thread.as_deref(), Some("lv-mips"));
-        let levels = job.try_take().expect("levels after the wake-up");
-        assert_eq!(levels.len(), 2);
-        assert_eq!((levels[1].width, levels[1].height), (16, 8));
-        assert!(job.try_take().is_none());
+        assert_eq!(job.levels(), 3);
+        let mut levels = Vec::new();
+        while levels.len() < 2 {
+            let thread = woke_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(thread.as_deref(), Some("lv-mips"));
+            levels.extend(job.take_ready());
+        }
+        let got: Vec<_> = levels
+            .iter()
+            .map(|(n, l)| (*n, l.width, l.height))
+            .collect();
+        assert_eq!(got, [(1, 32, 16), (2, 16, 8)]);
+        assert!(job.take_ready().is_empty());
     }
 
     #[test]
     fn dropped_job_never_wakes() {
         let (woke_tx, woke_rx) = channel::<()>();
         // Big enough that the build is still running when the job is dropped.
-        let job = MipJob::spawn(image(4096, 4096), 0, 6, move || {
+        let job = MipJob::spawn(image(4096, 4096), 0, (1, 6), move || {
             let _ = woke_tx.send(());
         });
         drop(job);

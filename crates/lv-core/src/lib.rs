@@ -14,6 +14,7 @@ pub mod jpeg_extent;
 mod jpeg_markers;
 pub mod listing;
 pub mod prefetch;
+pub mod profile;
 pub mod settings;
 #[cfg(test)]
 pub(crate) mod test_fixtures;

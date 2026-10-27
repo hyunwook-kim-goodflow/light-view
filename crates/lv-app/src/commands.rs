@@ -113,7 +113,9 @@ pub fn new_viewer(
     let limits = DecodeLimits {
         max_pixels: max_pixels_for_budget(budget),
     };
-    let decoder = RoutingDecoder::start(limits, PREFETCH_WORKERS);
+    let decoder = crate::timing::step("pool-ms", || {
+        RoutingDecoder::start(limits, PREFETCH_WORKERS)
+    });
     let pool = decoder.pool();
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
         hwnd.post(WM_APP_IMAGE_READY);
@@ -149,15 +151,18 @@ fn memory_budget(settings: &Settings) -> u64 {
 /// Opens a file, or the first supported file of a folder. Nothing is moved or deleted.
 /// Every open (start-up, drops, forwarded launches) goes through the save prompt.
 pub fn open(app: &RefCell<App>, hwnd: HWND, path: &Path) {
-    let file = if path.is_dir() {
-        match first_supported_in(path) {
-            Ok(Some(file)) => file,
-            _ => return,
-        }
+    if let Some(file) = file_to_open(path) {
+        leave(app, hwnd, LeaveReason::Open(file));
+    }
+}
+
+/// `path` itself, or for a folder its first supported file (`None` if it has none).
+pub fn file_to_open(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        first_supported_in(path).ok().flatten()
     } else {
-        path.to_path_buf()
-    };
-    leave(app, hwnd, LeaveReason::Open(file));
+        Some(path.to_path_buf())
+    }
 }
 
 /// WM_CLOSE (no dialog open): closes, after the save prompt or save if needed.
