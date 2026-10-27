@@ -21,10 +21,11 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
     IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
@@ -271,6 +272,65 @@ impl Renderer {
         }
     }
 
+    /// Fills `rect` (x, y, w, h in DIPs) with `color` at `alpha` opacity.
+    pub fn fill_rect_alpha(&mut self, rect: (f32, f32, f32, f32), color: Rgb, alpha: f32) {
+        let Some(d) = &self.device else { return };
+        let c = D2D1_COLOR_F {
+            a: alpha,
+            ..color.to_d2d()
+        };
+        // SAFETY: the rect and color are live locals.
+        unsafe {
+            d.brush.SetColor(&c);
+            d.target.FillRectangle(&to_rect_f(rect), &d.brush);
+        }
+    }
+
+    /// Semibold `text` wrapped at word boundaries inside `rect`, from its top-left
+    /// corner, clipped to the rect.
+    pub fn draw_wrapped(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        text: &str,
+        family: &str,
+        size: f32,
+        color: Rgb,
+    ) {
+        let Some(d) = &self.device else { return };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        // SAFETY: plain calls on live COM objects; `wide`, the family string, the
+        // rect and the color are live locals that outlive the calls using them.
+        let result = unsafe {
+            self.dwrite
+                .CreateTextFormat(
+                    &HSTRING::from(family),
+                    None,
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    w!("ko-KR"),
+                )
+                .and_then(|f| {
+                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+                    f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+                    d.brush.SetColor(&color.to_d2d());
+                    d.target.DrawText(
+                        &wide,
+                        &f,
+                        &to_rect_f(rect),
+                        &d.brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    Ok(())
+                })
+        };
+        if let Err(e) = result {
+            eprintln!("light-view: text drawing failed: {e}");
+        }
+    }
+
     /// A `width`-DIP outline whose stroke lies inside `rect`.
     pub fn stroke_round_rect(
         &mut self,
@@ -350,7 +410,19 @@ impl Renderer {
     /// Draws `runs` as one unwrapped line in `rect` (x, y, w, h in DIPs), vertically
     /// centered and clipped to the rect.
     pub fn draw_runs(&mut self, rect: (f32, f32, f32, f32), runs: &[TextRun], align: Align) {
-        if let Err(e) = self.try_draw_runs(rect, runs, align, false) {
+        if let Err(e) = self.try_draw_runs(rect, runs, align, false, false) {
+            eprintln!("light-view: text drawing failed: {e}");
+        }
+    }
+
+    /// Like `draw_runs`, but text wider than the rect ends in an ellipsis (…).
+    pub fn draw_runs_ellipsis(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        runs: &[TextRun],
+        align: Align,
+    ) {
+        if let Err(e) = self.try_draw_runs(rect, runs, align, false, true) {
             eprintln!("light-view: text drawing failed: {e}");
         }
     }
@@ -373,7 +445,7 @@ impl Renderer {
             bold: false,
             color,
         };
-        if let Err(e) = self.try_draw_runs(rect, &[run], Align::Center, mirrored) {
+        if let Err(e) = self.try_draw_runs(rect, &[run], Align::Center, mirrored, false) {
             eprintln!("light-view: glyph drawing failed: {e}");
         }
     }
@@ -384,6 +456,7 @@ impl Renderer {
         runs: &[TextRun],
         align: Align,
         mirrored: bool,
+        ellipsis: bool,
     ) -> Result<()> {
         let (Some(d), Some(first)) = (&self.device, runs.first()) else {
             return Ok(());
@@ -392,7 +465,7 @@ impl Renderer {
         if w <= 0.0 || h <= 0.0 {
             return Ok(());
         }
-        let layout = self.text_layout(runs, align, (w, h), Some(&d.target))?;
+        let layout = self.text_layout(runs, align, (w, h), Some(&d.target), ellipsis)?;
         // SAFETY: plain calls on live COM objects; the transform, color and layout
         // are live locals.
         unsafe {
@@ -426,7 +499,7 @@ impl Renderer {
             return Some(0.0);
         }
         let layout = self
-            .text_layout(runs, Align::Leading, (f32::MAX, f32::MAX), None)
+            .text_layout(runs, Align::Leading, (f32::MAX, f32::MAX), None, false)
             .ok()?;
         let mut metrics = DWRITE_TEXT_METRICS::default();
         // SAFETY: `metrics` is a live local the layout writes into.
@@ -435,13 +508,15 @@ impl Renderer {
     }
 
     /// One unwrapped, vertically centered line of `runs` in a `size` box. With a
-    /// `target`, each run gets a brush of its color as its drawing effect.
+    /// `target`, each run gets a brush of its color as its drawing effect. With
+    /// `ellipsis`, text past the box's width is trimmed to an ellipsis.
     fn text_layout(
         &self,
         runs: &[TextRun],
         align: Align,
         (w, h): (f32, f32),
         target: Option<&ID2D1HwndRenderTarget>,
+        ellipsis: bool,
     ) -> Result<IDWriteTextLayout> {
         let first = runs[0];
         let text: String = runs.iter().map(|r| r.text).collect();
@@ -461,6 +536,15 @@ impl Renderer {
             format.SetTextAlignment(text_alignment(align))?;
             format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            if ellipsis {
+                let sign = self.dwrite.CreateEllipsisTrimmingSign(&format)?;
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                };
+                format.SetTrimming(&trimming, &sign)?;
+            }
             let layout = self.dwrite.CreateTextLayout(&wide, &format, w, h)?;
             let mut start = 0u32;
             for run in runs {

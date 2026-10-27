@@ -1,5 +1,6 @@
 //! Pointer input: toolbar auto-hide, hover, button clicks and tooltips; the wheel,
-//! double-click zoom and drag-to-pan on the image.
+//! double-click zoom and drag-to-pan on the image. Also routes input to the in-window
+//! dialog and toast first (`overlay`).
 
 use std::cell::RefCell;
 use std::time::Instant;
@@ -11,19 +12,24 @@ use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
+use windows::Win32::UI::Shell::{DragFinish, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, KillTimer, LoadCursorW, SetCursor, SetTimer, HTCLIENT, IDC_HAND, WHEEL_DELTA,
-    WM_CAPTURECHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_SETCURSOR, WM_TIMER,
+    WM_CAPTURECHANGED, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use crate::commands;
+use crate::overlay::{DialogTarget, OverlayEvent, Prompt, Toast};
 use crate::toolbar::{bar_rect, hit_test, layout, AutoHide, ToolButton};
 use crate::tooltip::{self, Tool};
 use crate::viewer::Redraw;
+use crate::watch;
 use crate::window::{invalidate, App};
 
 const TIMER_ID: usize = 1;
+/// One-shot: drops the toast when its six seconds are up.
+const TOAST_TIMER: usize = 4;
 /// How often visibility is re-evaluated while the floating toolbar is shown.
 const TIMER_MS: u32 = 250;
 
@@ -75,7 +81,7 @@ impl Pointer {
         self.tooltip
     }
 
-    fn now_ms(&self) -> u64 {
+    pub fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
 }
@@ -124,14 +130,17 @@ impl App {
 
     /// Whether the hand cursor applies at `px`: dragging, or over a pannable image.
     fn hand_at(&self, px: (i32, i32)) -> bool {
-        self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px))
+        !self.overlay.dialog_open()
+            && (self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px)))
     }
 
     /// The tooltip tools for the current layout, if they changed: (tooltip, old count, tools).
+    /// None while a dialog is open.
     fn changed_tools(&mut self) -> Option<(HWND, usize, Vec<Tool>)> {
         let px = |v: f32| (v / self.dip).round() as i32;
         let tools: Vec<Tool> = self
             .toolbar_input()
+            .filter(|_| !self.overlay.dialog_open())
             .map(|i| layout(&i))
             .unwrap_or_default()
             .into_iter()
@@ -312,6 +321,197 @@ pub fn handle(
         }
         _ => None,
     }
+}
+
+/// Shows a dialog about `target`. Until it closes it takes every key, click and wheel
+/// turn, cancels WM_CLOSE and defers forwarded opens; its answer, with `target`, goes
+/// to `commands::on_overlay_event`. A drag in progress ends.
+pub fn show_dialog(app: &RefCell<App>, hwnd: HWND, prompt: Prompt, target: DialogTarget) {
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return;
+    };
+    a.overlay.show_dialog(prompt, target);
+    a.pointer.pressed = None;
+    let dragging = a.pointer.drag.take().is_some();
+    drop(a);
+    if dragging {
+        // SAFETY: plain call; no App borrow is held (WM_CAPTURECHANGED re-enters).
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+    }
+    sync_tooltips(app, hwnd);
+    invalidate(hwnd);
+}
+
+/// Whether a dialog is open. Anything that would change the current photo outside
+/// the user's own input (a forwarded open, a folder refresh) waits while it is.
+pub fn dialog_open(app: &RefCell<App>) -> bool {
+    app.try_borrow().is_ok_and(|a| a.overlay.dialog_open())
+}
+
+/// Shows a toast for six seconds, replacing any toast already up. `make` gets the
+/// current time, e.g. `show_toast(app, hwnd, Toast::recycled)`.
+pub fn show_toast(app: &RefCell<App>, hwnd: HWND, make: impl FnOnce(u64) -> Toast) {
+    let Ok(mut a) = app.try_borrow_mut() else {
+        return;
+    };
+    let toast = make(a.pointer.now_ms());
+    let ms = toast.duration_ms;
+    a.overlay.show_toast(toast);
+    drop(a);
+    // SAFETY: plain call on our window; setting the same id again restarts the timer.
+    unsafe { SetTimer(hwnd, TOAST_TIMER, ms as u32, None) };
+    invalidate(hwnd);
+}
+
+/// Input for the overlay, seen before everything else. An open dialog takes keys
+/// (except Alt combinations, so Alt+F4 reaches WM_CLOSE), clicks, the wheel, pointer
+/// moves and drops; a toast takes clicks on itself. `None` passes the message on.
+pub fn overlay(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
+    let dialog = app.try_borrow().ok()?.overlay.dialog_open();
+    match msg {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let (vk, mods) = (wparam.0 as u16, commands::mods());
+            if !dialog {
+                #[cfg(debug_assertions)]
+                return debug_overlay(app, hwnd, vk, mods);
+                #[cfg(not(debug_assertions))]
+                return None;
+            }
+            if mods.alt {
+                return None;
+            }
+            // Auto-repeats (a key held since before the dialog) never answer it.
+            let repeat = lparam.0 & (1 << 30) != 0;
+            let event = if repeat {
+                None
+            } else {
+                app.try_borrow_mut().ok()?.overlay.on_key(vk, mods)
+            };
+            overlay_changed(app, hwnd, event);
+            Some(LRESULT(0))
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+            let mut a = app.try_borrow_mut().ok()?;
+            let (x, y) = a.to_dips(point(lparam));
+            let (view, now) = (a.client(), a.pointer.now_ms());
+            a.overlay.press(x, y, view, now).then_some(LRESULT(0))
+        }
+        WM_LBUTTONUP => {
+            let (taken, event) = {
+                let mut a = app.try_borrow_mut().ok()?;
+                let (x, y) = a.to_dips(point(lparam));
+                let (view, now) = (a.client(), a.pointer.now_ms());
+                a.overlay.release(x, y, view, now)
+            };
+            if !taken {
+                return None;
+            }
+            overlay_changed(app, hwnd, event);
+            Some(LRESULT(0))
+        }
+        WM_MOUSEMOVE | WM_MOUSEWHEEL if dialog => Some(LRESULT(0)),
+        WM_DROPFILES if dialog => {
+            // SAFETY: the HDROP from WM_DROPFILES, released once and not used again.
+            unsafe { DragFinish(HDROP(wparam.0 as *mut _)) };
+            Some(LRESULT(0))
+        }
+        WM_TIMER if wparam.0 == TOAST_TIMER => {
+            // SAFETY: plain call on our window's timer (one-shot).
+            unsafe {
+                let _ = KillTimer(hwnd, TOAST_TIMER);
+            }
+            let mut a = app.try_borrow_mut().ok()?;
+            let now = a.pointer.now_ms();
+            if a.overlay.expire(now) {
+                invalidate(hwnd);
+            } else if let Some(t) = &a.overlay.toast {
+                // Fired early: wait out the rest.
+                let left = (t.shown_at_ms + t.duration_ms).saturating_sub(now).max(1);
+                // SAFETY: plain call on our window.
+                unsafe { SetTimer(hwnd, TOAST_TIMER, left as u32, None) };
+            }
+            Some(LRESULT(0))
+        }
+        _ => None,
+    }
+}
+
+/// After the overlay handled input: repaint and, once a dialog closed or a toast
+/// action was used, restore the toolbar tooltips and act on it. Then a path forwarded
+/// while the dialog was open is opened, after the answer was applied to its target,
+/// unless the answer closes the window.
+fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEvent>) {
+    invalidate(hwnd);
+    let Some(event) = event else {
+        return;
+    };
+    sync_tooltips(app, hwnd);
+    if !commands::on_overlay_event(app, hwnd, event) {
+        return;
+    }
+    let deferred = app
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut a| a.overlay.take_deferred_open());
+    if let Some(path) = deferred {
+        commands::open(app, hwnd, &path);
+    }
+    // Then a rescan held back by the dialog (of the newly opened folder, if any; it
+    // waits again if the open asks to save first).
+    watch::rescan_if_due(app, hwnd);
+}
+
+/// Debug builds only: Ctrl+Shift+1 and 3 to 7 show the save prompt and each toast, for
+/// smoke tests. The prompt targets the current photo. (2, the permanent-delete question,
+/// is gone: its [삭제] now deletes the photo for good.)
+#[cfg(debug_assertions)]
+fn debug_overlay(
+    app: &RefCell<App>,
+    hwnd: HWND,
+    vk: u16,
+    mods: lv_core::command::Mods,
+) -> Option<LRESULT> {
+    use crate::overlay::{
+        TOAST_FILE_CHANGED, TOAST_SAVED_AS_TAG, TOAST_SAVE_FAILED, TOAST_UNSUPPORTED_FORMAT,
+    };
+    if !mods.ctrl || !mods.shift || mods.alt {
+        return None;
+    }
+    let target = {
+        let a = app.try_borrow().ok()?;
+        DialogTarget {
+            path: a
+                .viewer
+                .current_path()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            generation: a.viewer.generation(),
+        }
+    };
+    let texts = [
+        TOAST_SAVED_AS_TAG,
+        TOAST_FILE_CHANGED,
+        TOAST_SAVE_FAILED,
+        TOAST_UNSUPPORTED_FORMAT,
+    ];
+    match vk {
+        0x31 => show_dialog(app, hwnd, Prompt::SaveRotation, target),
+        0x33 => show_toast(app, hwnd, Toast::recycled),
+        0x34..=0x37 => {
+            let text = texts[usize::from(vk - 0x34)];
+            show_toast(app, hwnd, |now| Toast::new(text, now));
+        }
+        _ => return None,
+    }
+    Some(LRESULT(0))
 }
 
 fn on_button(app: &RefCell<App>, hwnd: HWND, b: ToolButton) {

@@ -1,8 +1,8 @@
-# Build environment for libheif-sys (via the `vcpkg` crate).
+# Build environment for libheif-sys (via the `vcpkg` crate) and lv-jpegtran's build script.
 # Run `powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1` once before building.
 # .vcpkg\installed is a junction to vcpkg_installed\ created by that script.
 # `force = true`: a global VCPKG_ROOT (e.g. a VS Developer Prompt) must not make libheif-sys
-# link another vcpkg tree's libheif, which could include x265.
+# or lv-jpegtran link another vcpkg tree's libraries (its libheif could include x265).
 [env]
 VCPKG_ROOT = { value = ".vcpkg", relative = true, force = true }
 VCPKGRS_TRIPLET = { value = "x64-windows", force = true }

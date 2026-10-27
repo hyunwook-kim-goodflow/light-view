@@ -27,6 +27,8 @@ impl Rgb {
 pub struct Palette {
     pub paper: Rgb,
     pub surface: Rgb,
+    /// Secondary buttons and the dark-mode toast.
+    pub surface2: Rgb,
     pub ink: Rgb,
     pub ink2: Rgb,
     pub hairline: Rgb,
@@ -38,6 +40,7 @@ pub struct Palette {
 pub const LIGHT: Palette = Palette {
     paper: Rgb(0xFB, 0xFA, 0xF6),
     surface: Rgb(0xFF, 0xFF, 0xFF),
+    surface2: Rgb(0xF2, 0xF0, 0xEA),
     ink: Rgb(0x1C, 0x1B, 0x19),
     ink2: Rgb(0x69, 0x65, 0x5D),
     hairline: Rgb(0xE9, 0xE6, 0xDE),
@@ -49,6 +52,7 @@ pub const LIGHT: Palette = Palette {
 pub const DARK: Palette = Palette {
     paper: Rgb(0x13, 0x13, 0x11),
     surface: Rgb(0x1E, 0x1D, 0x1A),
+    surface2: Rgb(0x2A, 0x29, 0x25),
     ink: Rgb(0xF3, 0xF1, 0xEA),
     ink2: Rgb(0xA7, 0xA3, 0x99),
     hairline: Rgb(0x2A, 0x29, 0x25),
@@ -118,26 +122,30 @@ pub fn apply_title_bar(hwnd: HWND, dark: bool) {
 }
 
 #[cfg(test)]
+fn linear(c: u8) -> f64 {
+    let c = f64::from(c) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[cfg(test)]
+fn luminance(c: Rgb) -> f64 {
+    0.2126 * linear(c.0) + 0.7152 * linear(c.1) + 0.0722 * linear(c.2)
+}
+
+/// WCAG contrast ratio between two opaque colors.
+#[cfg(test)]
+pub fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    fn linear(c: u8) -> f64 {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    fn luminance(c: Rgb) -> f64 {
-        0.2126 * linear(c.0) + 0.7152 * linear(c.1) + 0.0722 * linear(c.2)
-    }
-
-    fn contrast(a: Rgb, b: Rgb) -> f64 {
-        let (la, lb) = (luminance(a), luminance(b));
-        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
-    }
 
     #[test]
     fn on_highlighter_contrast_at_least_4_5() {

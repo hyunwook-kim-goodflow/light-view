@@ -67,3 +67,15 @@ Final review: With fixes. Important: #1 caps vs MAX_PAYLOAD (≈1GiB hostile fil
 - Ruling R14 (final fix): Job memory floor max(12N, 256MiB + 4N) accepted (libheif block floor 256MiB + worker 4N copy must fit; identical to old rule for N ≥ ~22.4M) — cost if wrong: none.
 Final fix wave: re-review all addressed (commits 7c62389..3c50585).
 - Ruling R15 (final residuals, parked): lv-heif/lv-ipc memory doc comments overstate "never Job-killed" under parallel tile decode; stale routing.rs decode() cap comment; 10-bit near-limit HEIC may fail Corrupt via 16-bit intermediate (~200MP+); README worker memory row measured single-threaded — re-measure on AC power with user samples — cost if wrong: misleading comments, rare huge-HEIC failures.
+
+# M3 status of the items deferred to M3
+
+Checked against the M3 branch (`m3-file-ops`) in Task 9. The history above is kept as it was.
+
+| M2 item (R13 deferrals) | Status | Note |
+|---|---|---|
+| Generic pool request API | **M3에서 해결** | The worker pool takes JPEG-rotation requests as well as HEIC decodes, with per-kind time limits (decode 10 s; JPEG rotate 10 s + 10 s per 100 MP). |
+| Validate transupp output in the app | **M3에서 해결** | The app re-checks the worker's JPEG with `jpeg_check` (structure, expected size) and decodes it again before writing; on failure the original is untouched. |
+| Allow libjpeg-turbo, forbid libheif's `jpeg` feature instead | **M3에서 해결** | `setup-deps.ps1` allows libjpeg-turbo and fails if libheif was built with `jpeg`. |
+
+Still open for M5 (unchanged): AppContainer, sibling-worker isolation, deny-only Administrators SID, per-kind caps and the "accepted" handshake beyond the time limits above.

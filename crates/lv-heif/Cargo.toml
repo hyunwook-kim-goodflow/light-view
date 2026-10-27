@@ -8,3 +8,6 @@ description = "Safe libheif wrapper for light-view's HEIC worker (links libheif/
 [dependencies]
 lv-ipc = { path = "../lv-ipc" }
 libheif-rs = { version = "3.0.0", default-features = false, features = ["v1_23"] }
+
+[dev-dependencies]
+lv-core = { path = "../lv-core" }

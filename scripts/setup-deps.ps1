@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-    Fetches and builds the C dependencies of light-view (libheif + libde265) with vcpkg
-    and copies their DLLs next to the cargo build outputs.
+    Fetches and builds the C dependencies of light-view (libheif + libde265 for HEIF decoding,
+    libjpeg-turbo for lossless JPEG rotation; lv-worker alone links them) with vcpkg and
+    copies their DLLs next to the cargo build outputs.
 
 .DESCRIPTION
     Runs under Windows PowerShell 5.1:
@@ -9,20 +10,27 @@
 
     1. Clones vcpkg at a pinned commit into .vcpkg\ and bootstraps it.
     2. Runs `vcpkg install --triplet x64-windows` in manifest mode (vcpkg.json).
-    3. Fails if any forbidden codec (x265, aom, dav1d, x264, kvazaar, openjpeg, libjpeg-turbo)
-       was installed.
+    3. Fails if any forbidden codec (x265, aom, dav1d, x264, kvazaar, openjpeg) was installed,
+       or if libheif was built with its 'jpeg' feature. libjpeg-turbo itself is allowed: it
+       serves lv-worker's TurboJPEG transforms, never libheif.
     4. Copies the runtime DLLs into target\debug and target\release, next to the executables.
-       (`cargo test`/`cargo run` also find them through libheif-sys's OUT_DIR, which cargo
-       puts on PATH.)
+       (`cargo test`/`cargo run` also find them through libheif-sys's and lv-jpegtran's
+       OUT_DIR, which cargo puts on PATH.)
     5. Prints the environment the build uses (pinned in .cargo\config.toml [env]).
 
     With -CopyOnly it only does step 4, from an existing vcpkg_installed\ (for example after
     `cargo clean`):
         powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
+
+    With -CheckOnly it only does step 3, against an existing install tree (-InstallRoot,
+    vcpkg_installed\ by default), so the check can also be tried on a doctored copy:
+        powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CheckOnly
 #>
 [CmdletBinding()]
 param(
-    [switch]$CopyOnly
+    [switch]$CopyOnly,
+    [switch]$CheckOnly,
+    [string]$InstallRoot
 )
 
 Set-StrictMode -Version 2.0
@@ -36,7 +44,7 @@ $Triplet = 'x64-windows'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $VcpkgDir = Join-Path $RepoRoot '.vcpkg'
 $VcpkgExe = Join-Path $VcpkgDir 'vcpkg.exe'
-$InstallRoot = Join-Path $RepoRoot 'vcpkg_installed'
+if (-not $InstallRoot) { $InstallRoot = Join-Path $RepoRoot 'vcpkg_installed' }
 $TripletDir = Join-Path $InstallRoot $Triplet
 
 function Invoke-Native {
@@ -47,10 +55,11 @@ function Invoke-Native {
     }
 }
 
-# Copies heif.dll, libde265.dll and the other DLLs they need next to the executables.
+# Copies heif.dll, libde265.dll, turbojpeg.dll and the other DLLs they need (turbojpeg.dll
+# imports spng.dll, which imports zlib's z.dll) next to the executables.
 function Copy-RuntimeDlls {
     $binDir = Join-Path $TripletDir 'bin'
-    foreach ($required in @('heif.dll', 'libde265.dll')) {
+    foreach ($required in @('heif.dll', 'libde265.dll', 'turbojpeg.dll', 'spng.dll', 'z.dll')) {
         if (-not (Test-Path (Join-Path $binDir $required))) {
             throw "$required not found in $binDir"
         }
@@ -65,8 +74,62 @@ function Copy-RuntimeDlls {
     Write-Host "Copied $(($dlls | ForEach-Object { $_.Name }) -join ', ') to $($targets -join ', ')"
 }
 
+# Fails if a GPL encoder (x265, x264) or a codec light-view does not ship (aom, dav1d,
+# kvazaar, openjpeg) is part of the installed tree, or if libheif was built with its 'jpeg'
+# feature. libjpeg-turbo is installed for lv-worker's TurboJPEG transforms only; through
+# libheif it would become one more codec parsing untrusted HEIF content.
+function Assert-AllowedCodecs {
+    $forbidden = @('x265', 'aom', 'dav1d', 'x264', 'kvazaar', 'openjpeg')
+    $violations = @()
+    foreach ($name in $forbidden) {
+        $hits = @()
+        $hits += @(Get-ChildItem -Path (Join-Path $InstallRoot 'vcpkg\info') -Filter "${name}_*.list" -ErrorAction SilentlyContinue)
+        $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'share') -Filter $name -Directory -ErrorAction SilentlyContinue)
+        $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'include') -Filter "$name*" -ErrorAction SilentlyContinue)
+        $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'bin') -Filter "*$name*.dll" -ErrorAction SilentlyContinue)
+        foreach ($hit in $hits) { $violations += $hit.FullName }
+    }
+
+    # vcpkg records each installed feature as its own paragraph in vcpkg\status
+    # ("Package: libheif" + "Feature: jpeg"), and the feature list of the build in the
+    # port's vcpkg_abi_info.txt ("features core;jpeg;..."). Either one is enough to fail.
+    $status = Join-Path $InstallRoot 'vcpkg\status'
+    if (-not (Test-Path $status)) { throw "$status not found: is $InstallRoot a vcpkg install tree?" }
+    $paragraphs = ((Get-Content -Raw $status) -replace "`r", '') -split "`n`n"
+    foreach ($paragraph in $paragraphs) {
+        $fields = @{}
+        foreach ($line in ($paragraph -split "`n")) {
+            if ($line -match '^([A-Za-z-]+):\s*(.*)$') { $fields[$Matches[1]] = $Matches[2].Trim() }
+        }
+        if ($fields['Package'] -ne 'libheif') { continue }
+        $isJpegFeature = $fields['Feature'] -eq 'jpeg'
+        $dependsOnJpeg = $fields.ContainsKey('Depends') -and ($fields['Depends'] -split ',\s*' | Where-Object { $_ -match '^libjpeg-turbo\b' })
+        if ($isJpegFeature -or $dependsOnJpeg) {
+            $violations += "$status (libheif paragraph: Feature '$($fields['Feature'])', Depends '$($fields['Depends'])')"
+        }
+    }
+    $abiInfo = Join-Path $TripletDir 'share\libheif\vcpkg_abi_info.txt'
+    if (Test-Path $abiInfo) {
+        foreach ($line in (Get-Content $abiInfo)) {
+            if ($line -match '^features\s+(.*)$' -and ($Matches[1] -split ';') -contains 'jpeg') {
+                $violations += "$abiInfo ($line)"
+            }
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        $violations | ForEach-Object { Write-Host "forbidden: $_" }
+        throw 'Forbidden codec artifacts found in vcpkg_installed (see above). Check vcpkg.json features.'
+    }
+    Write-Host "Forbidden-codec check passed ($($forbidden -join ', ') absent; libheif without 'jpeg')."
+}
+
 if ($CopyOnly) {
     Copy-RuntimeDlls
+    return
+}
+if ($CheckOnly) {
+    Assert-AllowedCodecs
     return
 }
 
@@ -129,23 +192,7 @@ if (-not $linkTarget -or ((@($linkTarget)[0]).TrimEnd('\') -ne $InstallRoot.Trim
 }
 
 # --- 3. Forbidden codecs ------------------------------------------------------------------
-# GPL encoders (x265, x264) and codecs light-view does not ship (aom, dav1d, kvazaar,
-# openjpeg, libjpeg-turbo) must never be part of the installed tree.
-$forbidden = @('x265', 'aom', 'dav1d', 'x264', 'kvazaar', 'openjpeg', 'libjpeg-turbo')
-$violations = @()
-foreach ($name in $forbidden) {
-    $hits = @()
-    $hits += @(Get-ChildItem -Path (Join-Path $InstallRoot 'vcpkg\info') -Filter "${name}_*.list" -ErrorAction SilentlyContinue)
-    $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'share') -Filter $name -Directory -ErrorAction SilentlyContinue)
-    $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'include') -Filter "$name*" -ErrorAction SilentlyContinue)
-    $hits += @(Get-ChildItem -Path (Join-Path $TripletDir 'bin') -Filter "*$name*.dll" -ErrorAction SilentlyContinue)
-    foreach ($hit in $hits) { $violations += $hit.FullName }
-}
-if ($violations.Count -gt 0) {
-    $violations | ForEach-Object { Write-Host "forbidden: $_" }
-    throw 'Forbidden codec artifacts found in vcpkg_installed (see above). Check vcpkg.json features.'
-}
-Write-Host "Forbidden-codec check passed ($($forbidden -join ', ') absent)."
+Assert-AllowedCodecs
 
 # --- 4. Runtime DLLs ----------------------------------------------------------------------
 Copy-RuntimeDlls

@@ -42,6 +42,13 @@ impl RoutingDecoder {
     }
 }
 
+impl RoutingDecoder {
+    /// The worker pool, shared with the rotation save; `None` without `lv-worker.exe`.
+    pub fn pool(&self) -> Option<Arc<WorkerPool>> {
+        self.pool.clone()
+    }
+}
+
 /// `lv-worker.exe` in `dir`, if it is there.
 fn worker_exe_in(dir: &Path) -> Option<PathBuf> {
     let exe = dir.join(WORKER_EXE);
