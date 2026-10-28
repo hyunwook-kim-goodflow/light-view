@@ -455,20 +455,8 @@ fn is_hidden(path: &Path) -> bool {
 /// Returns how many backups were handled either way.
 pub fn recover_backups(dir: &Path) -> usize {
     let dir = to_extended_path(dir);
-    let own = std::process::id();
     let mut handled = 0;
-    for (file, attrs) in find_files(&dir.join(".*.lvbak-*")) {
-        let Some((name, pid)) = parse_backup_name(&file) else {
-            continue;
-        };
-        // A link or a folder is never a backup of ours.
-        if attrs & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {
-            continue;
-        }
-        // This process's backups, and a running one's, wait for their commit or undo.
-        if pid == own || process_running(pid) {
-            continue;
-        }
+    for (file, name) in ended_backups(&dir) {
         let (backup, original) = (dir.join(&file), dir.join(&name));
         if !taken(&original) {
             match move_no_replace(&backup, &original) {
@@ -488,6 +476,40 @@ pub fn recover_backups(dir: &Path) -> usize {
         handled += 1;
     }
     handled
+}
+
+/// The backups in `dir` (extended) left by processes that are no longer running, as
+/// (file name, original name). Only regular files named exactly as
+/// [`backup_name`] makes count; this process's backups, and a running one's, wait for
+/// their commit or undo.
+fn ended_backups(dir: &Path) -> Vec<(OsString, OsString)> {
+    let own = std::process::id();
+    find_files(&dir.join(".*.lvbak-*"))
+        .into_iter()
+        .filter_map(|(file, attrs)| {
+            let (name, pid) = parse_backup_name(&file)?;
+            // A link or a folder is never a backup of ours.
+            let regular =
+                attrs & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) == 0;
+            (regular && pid != own && !process_running(pid)).then_some((file, name))
+        })
+        .collect()
+}
+
+/// [`recover_backups`] for a folder on the crash-recovery list ([`live`]): `None` when
+/// the folder cannot be reached now (an unplugged disk, a locked drive, a network folder
+/// not up yet), so its entry stays for a later start. Otherwise how many backups were
+/// handled and how many of ended processes are still under their backup names
+/// afterwards (one that could be neither put back nor moved to a `(원본)` name keeps the
+/// entry, so the next start tries again).
+pub fn recover_folder(dir: &Path) -> Option<live::Recovered> {
+    let ext = to_extended_path(dir);
+    if !fs::metadata(&ext).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let handled = recover_backups(dir);
+    let left = ended_backups(&ext).len();
+    Some(live::Recovered { handled, left })
 }
 
 #[cfg(test)]
