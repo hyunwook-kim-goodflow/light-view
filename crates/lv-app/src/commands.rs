@@ -32,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::about;
 use crate::delete;
+use crate::explorer_sort::{ExplorerSort, WM_APP_EXPLORER_SORT};
 use crate::fullscreen;
 use crate::input;
 use crate::overlay::{OverlayEvent, Prompt, PromptResult, Toast, ToastAction};
@@ -106,10 +107,12 @@ pub fn new_viewer(
         RoutingDecoder::start(limits, PREFETCH_WORKERS)
     });
     let pool = decoder.pool();
+    let hwnd_sort = hwnd.clone();
     let prefetcher = Prefetcher::new(decoder, PREFETCH_WORKERS, budget, move |_path| {
         hwnd.post(WM_APP_IMAGE_READY);
     });
     let mut viewer = Viewer::new(prefetcher);
+    viewer.set_sort_source(Box::new(ExplorerSort::new(hwnd_sort)));
     viewer.set_auto_save(settings.auto_save_rotation);
     (viewer, pool, limits)
 }
@@ -383,6 +386,11 @@ pub fn handle(
         }
         WM_APP_DELETE_DONE => {
             delete::on_reports(app, hwnd);
+            Some(LRESULT(0))
+        }
+        WM_APP_EXPLORER_SORT => {
+            let redraw = app.try_borrow_mut().ok()?.viewer.take_sort_answers();
+            after(app, hwnd, redraw);
             Some(LRESULT(0))
         }
         WM_APP_RESCAN_DONE => {

@@ -5,6 +5,7 @@ pub mod command;
 pub mod decode;
 pub mod exif_edit;
 pub mod exif_info;
+pub mod explorer_sort;
 pub mod format;
 #[doc(hidden)]
 pub mod fuzzing;

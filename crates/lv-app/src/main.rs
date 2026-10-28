@@ -7,9 +7,12 @@ mod commands;
 mod crash;
 mod delete;
 mod exif_card;
+mod explorer_sort;
 mod fullscreen;
 mod input;
 mod instance;
+#[cfg(test)]
+mod long_paths;
 mod menu;
 mod overlay;
 mod placement;
@@ -174,9 +177,9 @@ fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Args {
         parsed.bench |= flag == "--bench";
     }
     if args.next_if(|a| a == RESIZE).is_some() {
-        parsed.resize = args.map(PathBuf::from).collect();
+        parsed.resize = args.map(|a| shell::long_form(Path::new(&a))).collect();
     } else {
-        parsed.initial = args.next().map(PathBuf::from);
+        parsed.initial = args.next().map(|a| shell::long_form(Path::new(&a)));
     }
     parsed
 }
