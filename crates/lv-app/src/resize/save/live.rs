@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::save::atomic::process_running;
@@ -71,14 +72,25 @@ impl LiveFolders {
             .join(format!("{pid}-{:016x}.{EXTENSION}", hash(&key(folder))))
     }
 
+    /// Writes the entry whole: to a temp file (not an entry: another extension), then
+    /// renamed over the entry's name, so a reader never sees it half written.
     fn write(&self, folder: &Path) -> std::io::Result<()> {
+        static TEMP: AtomicU32 = AtomicU32::new(0);
         fs::create_dir_all(&self.dir)?;
         let bytes: Vec<u8> = folder
             .as_os_str()
             .encode_wide()
             .flat_map(u16::to_le_bytes)
             .collect();
-        fs::write(self.entry_path(std::process::id(), folder), bytes)
+        let pid = std::process::id();
+        let temp = self.dir.join(format!(
+            "{pid}-{}.tmp",
+            TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&temp, bytes)?;
+        fs::rename(&temp, self.entry_path(pid, folder)).inspect_err(|_| {
+            let _ = fs::remove_file(&temp);
+        })
     }
 }
 
@@ -90,8 +102,10 @@ pub struct Entry {
     pub file: PathBuf,
 }
 
-/// Every entry in list folder `dir` (none when it does not exist).
+/// Every entry in list folder `dir` (none when it does not exist). An entry of an ended
+/// process that is cut short is removed; a running copy's entries are never touched.
 pub fn entries(dir: &Path) -> Vec<Entry> {
+    let own = std::process::id();
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -110,8 +124,10 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
             continue;
         };
         if bytes.is_empty() || bytes.len() % 2 != 0 {
-            // Cut short: nothing to recover from it.
-            let _ = fs::remove_file(&file);
+            // Cut short: nothing to recover from it, once its writer has ended.
+            if pid != own && !process_running(pid) {
+                let _ = fs::remove_file(&file);
+            }
             continue;
         }
         let wide: Vec<u16> = bytes
@@ -127,22 +143,49 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
     found
 }
 
+/// What recovery did in a folder it reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recovered {
+    /// Backups put back or shown.
+    pub handled: usize,
+    /// Backups of ended processes still under their backup names afterwards.
+    pub left: usize,
+}
+
 /// Start-up: every folder listed by a process that is no longer running gets `recover`
-/// ([`recover_backups`](super::recover_backups)), then its entry goes. Entries of
-/// running copies (this one included) are left to them. Returns the folders recovered.
-pub fn recover_listed(dir: &Path, recover: impl Fn(&Path) -> usize) -> Vec<PathBuf> {
+/// ([`recover_folder`](super::recover_folder)). Its entry goes only once recovery
+/// reached the folder and left no backup under its backup name; otherwise it stays for
+/// a later start.
+/// Entries of running copies (this one included) are left to them. Returns the folders
+/// whose entries went.
+pub fn recover_listed(dir: &Path, recover: impl Fn(&Path) -> Option<Recovered>) -> Vec<PathBuf> {
     let own = std::process::id();
     let mut done = Vec::new();
     for entry in entries(dir) {
         if entry.pid == own || process_running(entry.pid) {
             continue;
         }
-        let handled = recover(&entry.folder);
-        if handled > 0 {
+        let Some(r) = recover(&entry.folder) else {
             eprintln!(
-                "light-view: recovered {handled} backup(s) in {}",
+                "light-view: {} is not reachable; its backups are recovered later",
                 entry.folder.display()
             );
+            continue;
+        };
+        if r.handled > 0 {
+            eprintln!(
+                "light-view: recovered {} backup(s) in {}",
+                r.handled,
+                entry.folder.display()
+            );
+        }
+        if r.left > 0 {
+            eprintln!(
+                "light-view: {} backup(s) in {} stay; tried again at the next start",
+                r.left,
+                entry.folder.display()
+            );
+            continue;
         }
         let _ = fs::remove_file(&entry.file);
         done.push(entry.folder);
@@ -274,7 +317,10 @@ mod tests {
         let asked = std::cell::RefCell::new(Vec::new());
         let done = recover_listed(dir.path(), |f| {
             asked.borrow_mut().push(f.to_path_buf());
-            1
+            Some(Recovered {
+                handled: 1,
+                left: 0,
+            })
         });
         assert_eq!(asked.into_inner(), std::slice::from_ref(&dead_folder));
         assert_eq!(done, [dead_folder]);
@@ -302,11 +348,100 @@ mod tests {
         fs::write(&backup, b"the original").unwrap();
         leave_entry(lists.path(), dead, 7, photos.path());
 
-        let done = recover_listed(lists.path(), super::super::recover_backups);
+        let done = recover_listed(lists.path(), super::super::recover_folder);
         assert_eq!(done, [photos.path().to_path_buf()]);
         assert_eq!(fs::read(&original).unwrap(), b"the original");
         assert!(!backup.exists());
         assert!(entries(lists.path()).is_empty(), "the entry goes");
+    }
+
+    #[test]
+    fn an_unreachable_folder_keeps_its_entry() {
+        let lists = list();
+        let dead = ended_pid();
+        // An unplugged disk, a locked drive: the folder is not there at this start.
+        let gone = list().path().join("not here");
+        leave_entry(lists.path(), dead, 1, &gone);
+
+        let done = recover_listed(lists.path(), super::super::recover_folder);
+        assert!(done.is_empty());
+        let left: Vec<_> = entries(lists.path())
+            .into_iter()
+            .map(|e| e.folder)
+            .collect();
+        assert_eq!(left, [gone], "tried again at the next start");
+    }
+
+    #[test]
+    fn an_entry_stays_while_a_backup_is_left() {
+        let (lists, photos) = (list(), list());
+        let dead = ended_pid();
+        leave_entry(lists.path(), dead, 1, photos.path());
+        // A backup that could be neither put back nor shown (held open at boot, say).
+        let recovered = recover_listed(lists.path(), |_| {
+            Some(Recovered {
+                handled: 0,
+                left: 1,
+            })
+        });
+        assert!(recovered.is_empty());
+        assert_eq!(entries(lists.path()).len(), 1);
+        // Once nothing hidden is left it goes.
+        recover_listed(lists.path(), |_| {
+            Some(Recovered {
+                handled: 1,
+                left: 0,
+            })
+        });
+        assert!(entries(lists.path()).is_empty());
+    }
+
+    #[test]
+    fn a_backup_held_open_keeps_its_folder_listed() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (lists, photos) = (list(), list());
+        let dead = ended_pid();
+        let backup = photos.path().join(super::super::backup_name(
+            std::ffi::OsStr::new("a.jpg"),
+            dead,
+            0,
+        ));
+        fs::write(&backup, b"the original").unwrap();
+        super::super::set_hidden(&lv_core::identity::to_extended_path(&backup), true);
+        leave_entry(lists.path(), dead, 1, photos.path());
+        {
+            // Opened without FILE_SHARE_DELETE: it can be neither put back nor renamed.
+            let _held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x1 | 0x2)
+                .open(&backup)
+                .unwrap();
+            assert!(recover_listed(lists.path(), super::super::recover_folder).is_empty());
+            assert_eq!(
+                entries(lists.path()).len(),
+                1,
+                "kept while the backup is left"
+            );
+        }
+        let done = recover_listed(lists.path(), super::super::recover_folder);
+        assert_eq!(done, [photos.path().to_path_buf()]);
+        assert_eq!(
+            fs::read(photos.path().join("a.jpg")).unwrap(),
+            b"the original"
+        );
+    }
+
+    #[test]
+    fn a_running_copys_short_entry_is_left_alone() {
+        let lists = list();
+        // This process is running: its (possibly half written) entry is not removed.
+        let own = lists
+            .path()
+            .join(format!("{}-9.folder", std::process::id()));
+        fs::write(&own, [1u8]).unwrap();
+        assert!(entries(lists.path()).is_empty());
+        assert!(own.exists());
     }
 
     #[test]
