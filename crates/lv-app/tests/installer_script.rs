@@ -212,3 +212,77 @@ fn installer_never_ships_the_portable_marker() {
     let delete = section(&s, "InstallDelete");
     assert!(has_line(&delete, &[r#"Name: "{app}\portable.txt""#]));
 }
+
+#[test]
+fn installer_registers_resize_verb_for_all_extensions() {
+    let s = script();
+    let registry = section(&s, "Registry");
+    for ext in EXTENSIONS {
+        let verb = format!(
+            r"Software\Classes\SystemFileAssociations\.{ext}\shell\goodflow.lightview.resize"
+        );
+        let key = format!(r#"Subkey: "{verb}""#);
+        let command = format!(r#"Subkey: "{verb}\command""#);
+        // Default value is the menu text ({cm:}, Korean or English); the key goes on uninstall.
+        assert!(
+            has_line(
+                &registry,
+                &[
+                    &key,
+                    r#"ValueName: """#,
+                    "{cm:ResizeVerb}",
+                    "uninsdeletekey"
+                ]
+            ),
+            ".{ext} verb text"
+        );
+        assert!(
+            has_line(
+                &registry,
+                &[
+                    &key,
+                    r#"ValueName: "MultiSelectModel""#,
+                    r#"ValueData: "Player""#
+                ]
+            ),
+            ".{ext} MultiSelectModel"
+        );
+        assert!(
+            has_line(
+                &registry,
+                &[
+                    &key,
+                    r#"ValueName: "Icon""#,
+                    r#"ValueData: "{app}\{#AppExe}""#
+                ]
+            ),
+            ".{ext} icon"
+        );
+        // Run once per file: `"<exe>" --resize "%1"`.
+        assert!(
+            has_line(
+                &registry,
+                &[
+                    &command,
+                    r#"ValueData: """{app}\{#AppExe}"" --resize ""%1""""#
+                ]
+            ),
+            ".{ext} command"
+        );
+    }
+    // Only our own verb keys are deleted, never a shared SystemFileAssociations key.
+    for line in &registry {
+        if line.contains("SystemFileAssociations") {
+            assert!(line.contains("goodflow.lightview.resize"), "{line}");
+        }
+    }
+    let messages = section(&s, "CustomMessages");
+    assert!(has_line(
+        &messages,
+        &["korean.ResizeVerb=", "light-view로 크기 조정"]
+    ));
+    assert!(has_line(
+        &messages,
+        &["english.ResizeVerb=Resize with light-view"]
+    ));
+}
