@@ -49,8 +49,8 @@ use save::{longest_replace_path, ItemResult};
 pub use saving::{defer_close, flush_at_exit, on_saved};
 use saving::{Event, SaveSummary};
 pub use session::{
-    drop_action, estimate_order, return_target, DropAction, Estimate, ReplaceBlock, ResizeItem,
-    ResizeSession,
+    drop_action, estimate_order, DropAction, Estimate, ReplaceBlock, ResizeItem, ResizeSession,
+    Return,
 };
 
 /// Posted by an estimate thread once its result is in `ResizeState`'s estimator.
@@ -543,7 +543,7 @@ pub fn leave(app: &RefCell<App>, hwnd: HWND) {
     }
 }
 
-/// Ends the session; the viewer shows [`return_target`] (or the empty screen). Photos
+/// Ends the session; the viewer shows [`ResizeSession::return_plan`]. Photos
 /// replaced under their own names are decoded again.
 fn close_session(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult)]) {
     let redraw = {
@@ -560,26 +560,25 @@ fn close_session(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult
                 a.viewer.forget_decode(result);
             }
         }
+        // The filmstrip's tiles go with the session.
+        a.clear_thumbs();
         if a.saving.is_some() {
             Redraw::Full
         } else {
-            match return_target(s.entered_from.as_deref(), results) {
-                Some(target) => {
+            // Unless a save rewrote it, the photo gets its pending rotation back, without
+            // asking (M6 ruling); a rewritten one is read again.
+            match s.return_plan(results) {
+                Return::Restore(target, quarters) => {
                     delete::cancel_if_pending(a, &target);
-                    // Unless a save rewrote it, the photo gets its pending rotation back,
-                    // without asking (M6 ruling).
-                    let rewritten = results.iter().any(|(original, r)| {
-                        matches!(r, ItemResult::Replaced { .. }) && same_path(original, &target)
-                    });
-                    let same = s.entered_from.as_deref() == Some(target.as_path());
-                    if same && !rewritten {
-                        a.viewer.return_to(&target, s.entered_quarters)
-                    } else {
-                        a.viewer.open(&target);
-                        Redraw::Full
-                    }
+                    a.viewer.return_to(&target, quarters)
                 }
-                None => a.viewer.close(),
+                Return::Fresh(target) => {
+                    delete::cancel_if_pending(a, &target);
+                    a.viewer.forget_decode(&target);
+                    a.viewer.open(&target);
+                    Redraw::Full
+                }
+                Return::Empty => a.viewer.close(),
             }
         }
     };

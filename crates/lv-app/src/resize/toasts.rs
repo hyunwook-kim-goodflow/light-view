@@ -79,6 +79,10 @@ pub fn undone(app: &RefCell<App>, hwnd: HWND, paths: &[(PathBuf, PathBuf)]) {
             a.viewer.forget_decode(original);
             a.viewer.forget_decode(result);
         }
+        // Still open on photos not saved: Esc goes back to what the undo restored.
+        if let Some(s) = &mut a.resize.session {
+            s.undo_entered(paths);
+        }
         let shown = a.viewer.current_path().map(std::path::Path::to_path_buf);
         let back = shown.and_then(|c| {
             paths

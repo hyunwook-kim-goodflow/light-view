@@ -35,8 +35,15 @@ pub struct Geometry {
     pub rows: Vec<(usize, Rect)>,
 }
 
-/// The screen's geometry in a `client` sized window (DIPs, `dip` DIPs per pixel).
-pub fn geometry(client: (f32, f32), side: SidebarSide, dip: f32, s: &ResizeSession) -> Geometry {
+/// The screen's geometry in a `client` sized window (DIPs, `dip` DIPs per pixel), the
+/// sidebar's middle scrolled to show the focused control `focus` (short windows).
+pub fn geometry(
+    client: (f32, f32),
+    side: SidebarSide,
+    dip: f32,
+    s: &ResizeSession,
+    focus: Ctl,
+) -> Geometry {
     let view = Rect {
         x: 0.0,
         y: 0.0,
@@ -44,7 +51,7 @@ pub fn geometry(client: (f32, f32), side: SidebarSide, dip: f32, s: &ResizeSessi
         h: client.1,
     };
     let stage = stage_rect(view, side, dip);
-    let layout = sidebar_layout(view, side, dip);
+    let layout = sidebar_layout(view, side, dip).scrolled_for(focus, &s.memory);
     let notes: Vec<bool> = s
         .items
         .iter()
@@ -114,6 +121,9 @@ fn draw_stage(r: &mut Renderer, g: &Geometry, v: &ScreenView) {
             Some(th) => {
                 r.fill_round_rect(t(*cell), 3.0, p.surface2);
                 r.draw_thumb(th.id, th.size, &th.bgra, t(*cell));
+                // The tile's square corners are masked to the cell's rounding.
+                let mask = (cell.x - 2.0, cell.y - 2.0, cell.w + 4.0, cell.h + 4.0);
+                r.stroke_round_rect(mask, 5.0, p.paper, 2.0);
             }
             None => {
                 r.fill_round_rect(t(*cell), 3.0, p.surface2);
@@ -199,6 +209,8 @@ fn draw_sidebar(r: &mut Renderer, g: &Geometry, v: &ScreenView) {
     if m.tab == ResizeTab::Resolution {
         draw_choice(r, l, Ctl::Axis, v);
     }
+    // The middle (outputs and list) scrolls in its viewport in a short window.
+    r.push_clip(t(l.viewport));
     section(r, l.output, tr(v.lang, S::ResizeOutput), p);
     draw_choice(r, l, Ctl::Format, v);
     draw_choice(r, l, Ctl::Quality, v);
@@ -214,6 +226,7 @@ fn draw_sidebar(r: &mut Renderer, g: &Geometry, v: &ScreenView) {
     draw_checkbox(r, l.metadata.control, gps, m.strip_gps, !saving, v);
     section(r, l.estimate, tr(v.lang, S::ResizeEstimate), p);
     draw_list(r, g, v);
+    r.pop_clip();
     if let Some(total) = text::total_line(v.lang, &s.items) {
         r.draw_runs_ellipsis(
             t(l.total),
@@ -254,7 +267,14 @@ fn draw_sidebar(r: &mut Renderer, g: &Geometry, v: &ScreenView) {
             f.w + 2.0 * FOCUS_OUTSET,
             f.h + 2.0 * FOCUS_OUTSET,
         );
+        let middle = l.in_middle(focus);
+        if middle {
+            r.push_clip(t(l.viewport));
+        }
         r.stroke_round_rect(ring, RADIUS + FOCUS_OUTSET, p.ink, 1.5);
+        if middle {
+            r.pop_clip();
+        }
     }
 }
 

@@ -51,11 +51,13 @@ pub struct Ui {
 /// The screen's geometry while it is open.
 pub fn geometry_of(a: &App) -> Option<Geometry> {
     let s = a.resize.session.as_ref()?;
+    let focus = a.resize.ui.sidebar.focus;
     Some(draw::geometry(
         a.client(),
         a.settings.sidebar_side,
         a.dip,
         s,
+        focus,
     ))
 }
 
