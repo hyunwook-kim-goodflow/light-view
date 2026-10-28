@@ -36,7 +36,21 @@ pub enum FailReason {
     ReadOnly,
     /// The original changed since it was shown, is gone, or is not a regular file.
     Changed,
+    /// 원본 대체 refused for this photo (ruling R3).
+    ReplaceRefused(ReplaceRefusal),
+    /// The written file was over the 용량 limit after all (spec §5); it was removed and
+    /// the original is as it was.
+    OverLimit,
     Io(String),
+}
+
+/// Why a photo is never replaced (ruling R3), for the screen's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaceRefusal {
+    /// An animation: only its first frame would be kept.
+    Animated,
+    /// Opened at reduced size: the result would be smaller than the original's pixels.
+    Scaled,
 }
 
 /// How saving one photo ended.
@@ -309,6 +323,30 @@ fn set_hidden(path: &Path, hidden: bool) {
 fn next_backup() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Takes back a replace that just happened, before it joined a batch: the result at
+/// `result` is deleted and the original comes back from `backup` under its name
+/// `original`, with the hidden attribute it had. If the name cannot be had back the
+/// original is kept visible beside it ([`keep_visible`]). False when the result could
+/// not be deleted: then nothing changed.
+pub fn revert_replace(result: &Path, backup: &Path, original: &Path) -> bool {
+    let hidden = is_hidden(result);
+    if fs::remove_file(to_extended_path(result)).is_err() {
+        return false;
+    }
+    let to = to_extended_path(original);
+    match move_no_replace(&to_extended_path(backup), &to) {
+        Ok(()) => set_hidden(&to, hidden),
+        Err(e) => {
+            eprintln!(
+                "light-view: {} could not get its name back: {e}",
+                original.display()
+            );
+            keep_visible(backup, original);
+        }
+    }
+    true
 }
 
 /// The longer (in UTF-16 units) of the two paths a replace of `src` as `format` makes:

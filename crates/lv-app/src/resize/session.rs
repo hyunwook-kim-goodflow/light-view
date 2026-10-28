@@ -84,22 +84,33 @@ pub struct ResizeSession {
     pub replace: bool,
     /// The photo the viewer showed before the session (none: the empty screen).
     pub entered_from: Option<PathBuf>,
+    /// The view rotation entered_from had pending (clockwise quarters): given back
+    /// to the viewer when the screen closes without replacing it (M6 ruling).
+    pub entered_quarters: u8,
     /// The sidebar's values, every tab's; saved to the settings as they change.
     pub memory: ResizeMemory,
-    /// Bumped whenever `spec` changes: estimates of another generation are stale.
+    /// Bumped whenever `spec` changes: estimates of another generation are stale. Never
+    /// reused across sessions (`ResizeState` hands out the first one).
     pub generation: u64,
 }
 
 impl ResizeSession {
-    pub fn new(entered_from: Option<PathBuf>, memory: ResizeMemory) -> ResizeSession {
+    /// A session whose first generation is `generation`.
+    pub fn new(
+        entered_from: Option<PathBuf>,
+        entered_quarters: u8,
+        memory: ResizeMemory,
+        generation: u64,
+    ) -> ResizeSession {
         ResizeSession {
             items: Vec::new(),
             current: 0,
             spec: spec_for(&memory),
             replace: false,
             entered_from,
+            entered_quarters: entered_quarters % 4,
             memory,
-            generation: 1,
+            generation,
         }
     }
 
@@ -277,7 +288,7 @@ mod tests {
     }
 
     fn session(names: &[&str]) -> ResizeSession {
-        let mut s = ResizeSession::new(None, ResizeMemory::default());
+        let mut s = ResizeSession::new(None, 0, ResizeMemory::default(), 1);
         s.add(names.iter().map(|n| item(n)).collect());
         s
     }

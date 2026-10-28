@@ -715,6 +715,53 @@ mod tests {
         assert_ne!(v.generation(), generation);
     }
 
+    /// M6 ruling: the resize screen opened from the menu leaves the viewer on the rotated
+    /// photo; Esc returns to it with the rotation still pending and no prompt.
+    #[test]
+    fn menu_entry_then_esc_keeps_the_pending_rotation() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        let generation = v.generation();
+        // Esc: back to c.jpg, which the screen never moved away from.
+        assert_eq!(v.return_to(&p("c.jpg"), 1), Redraw::Full);
+        assert_eq!(v.current_path(), Some(p("c.jpg").as_path()));
+        assert_eq!(v.view_rotation_quarters(), 1);
+        assert!(v.unsaved_rotation());
+        assert_eq!(v.generation(), generation, "not reopened");
+        assert_eq!(v.take_pending_leave(), None, "no prompt waits");
+        match v.scene() {
+            Scene::Image { quarters, .. } => assert_eq!(quarters, 1),
+            _ => panic!("the photo should be shown"),
+        }
+    }
+
+    /// M6 ruling: a drop or a forwarded launch opens the screen on other photos, so the
+    /// viewer shows those; Esc brings back the rotated photo with its pending rotation.
+    #[test]
+    fn drop_or_forwarded_entry_then_esc_keeps_the_pending_rotation() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateLeft);
+        assert_eq!(v.view_rotation_quarters(), 3);
+        // The screen shows its first photo (what `resize::show_current` does).
+        v.open(&p("a.jpg"));
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.view_rotation_quarters(), 0);
+        // Esc.
+        v.return_to(&p("c.jpg"), 3);
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.current_path(), Some(p("c.jpg").as_path()));
+        assert_eq!(v.view_rotation_quarters(), 3);
+        assert!(v.unsaved_rotation());
+        match v.scene() {
+            Scene::Image { quarters, .. } => assert_eq!(quarters, 3),
+            _ => panic!("the photo should be shown"),
+        }
+        // Saving it later saves that rotation.
+        assert_eq!(v.save_request().map(|r| r.quarters), Some(3));
+    }
+
     #[test]
     fn prev_requests_prefetch_backwards() {
         let (mut v, _rx) = viewer_at("d.jpg");

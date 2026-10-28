@@ -286,6 +286,20 @@ struct Queue {
     closed: bool,
 }
 
+impl Queue {
+    /// Adds jobs (one generation); a newer generation drops what is queued.
+    fn submit(&mut self, jobs: Vec<Job>) {
+        let Some(first) = jobs.first() else {
+            return;
+        };
+        if first.generation != self.generation {
+            self.jobs.clear();
+            self.generation = first.generation;
+        }
+        self.jobs.extend(jobs);
+    }
+}
+
 struct Shared {
     queue: Mutex<Queue>,
     wake: Condvar,
@@ -320,16 +334,10 @@ impl Estimator {
     /// Queues `jobs` (all of one generation). A newer generation drops every job still
     /// queued; a job already running finishes and its result is stale.
     pub fn submit(&self, jobs: Vec<Job>) {
-        let Some(first) = jobs.first() else {
+        if jobs.is_empty() {
             return;
-        };
-        let mut q = self.lock();
-        if first.generation != q.generation {
-            q.jobs.clear();
-            q.generation = first.generation;
         }
-        q.jobs.extend(jobs);
-        drop(q);
+        self.lock().submit(jobs);
         self.shared.wake.notify_all();
     }
 
@@ -575,6 +583,29 @@ mod tests {
         // Larger than the cap on its own: not kept.
         cache.put(a, 1, vec![0; 11]);
         assert_eq!(cache.take(a, 1), None);
+    }
+
+    #[test]
+    fn a_newer_generation_drops_older_queued_jobs() {
+        let job = |generation, index| Job {
+            generation,
+            index,
+            path: PathBuf::from(format!("{index}.png")),
+            quarters: 0,
+            spec: spec(Target::LongEdge(4), OutputFormat::Png),
+        };
+        let mut q = Queue::default();
+        q.submit(vec![job(1, 0), job(1, 1), job(1, 2)]);
+        // More of the same generation are added after them.
+        q.submit(vec![job(1, 3)]);
+        assert_eq!(q.jobs.len(), 4);
+        // A newer generation: every queued job of the old one is gone.
+        q.submit(vec![job(2, 1), job(2, 0)]);
+        let left: Vec<(u64, usize)> = q.jobs.iter().map(|j| (j.generation, j.index)).collect();
+        assert_eq!(left, [(2, 1), (2, 0)]);
+        // An empty submit changes nothing.
+        q.submit(Vec::new());
+        assert_eq!((q.generation, q.jobs.len()), (2, 2));
     }
 
     #[test]

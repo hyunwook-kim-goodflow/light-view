@@ -101,6 +101,9 @@ pub struct ResizeState {
     batch_threads: Vec<JoinHandle<()>>,
     /// Whether a folder (and a path that short) has a Recycle Bin.
     bins: HashMap<(PathBuf, bool), bool>,
+    /// The highest estimate generation handed out, across sessions: a job still running
+    /// from an earlier session can never match a later one.
+    last_generation: u64,
 }
 
 impl Default for ResizeState {
@@ -122,6 +125,7 @@ impl Default for ResizeState {
             trash: None,
             batch_threads: Vec::new(),
             bins: HashMap::new(),
+            last_generation: 0,
         }
     }
 }
@@ -129,6 +133,30 @@ impl Default for ResizeState {
 impl ResizeState {
     pub fn is_open(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Opens a session whose generations follow every earlier session's.
+    fn open_session(&mut self, entered_from: Option<PathBuf>, quarters: u8, memory: ResizeMemory) {
+        self.last_generation += 1;
+        let generation = self.last_generation;
+        self.session = Some(ResizeSession::new(
+            entered_from,
+            quarters,
+            memory,
+            generation,
+        ));
+    }
+
+    /// Ends the session: queued estimates and kept bytes go; running ones finish stale.
+    fn end_session(&mut self) -> Option<ResizeSession> {
+        let s = self.session.take()?;
+        self.last_generation = self.last_generation.max(s.generation);
+        if let Some(e) = &self.estimator {
+            e.cancel();
+        }
+        self.cache.clear();
+        self.replace_block = None;
+        Some(s)
     }
 
     /// A one-line state of the screen, drawn until it has its own drawing (M6 Task 6):
@@ -230,7 +258,9 @@ pub fn add(app: &RefCell<App>, hwnd: HWND, paths: Vec<PathBuf>) {
         let opened = a.resize.session.is_none();
         if opened {
             let memory = a.settings.resize.unwrap_or_default();
-            a.resize.session = Some(ResizeSession::new(shown, memory));
+            // The shown photo's pending rotation comes back when the screen closes.
+            let quarters = a.viewer.view_rotation_quarters();
+            a.resize.open_session(shown, quarters, memory);
             // R1: kept results take at most a quarter of the memory limit.
             a.resize.cache = ByteCache::new(commands::memory_budget(&a.settings) / 4);
             if a.resize.estimator.is_none() {
@@ -523,14 +553,9 @@ fn close_session(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult
             return;
         };
         let a = &mut *guard;
-        let Some(s) = a.resize.session.take() else {
+        let Some(s) = a.resize.end_session() else {
             return;
         };
-        if let Some(e) = &a.resize.estimator {
-            e.cancel();
-        }
-        a.resize.cache.clear();
-        a.resize.replace_block = None;
         for (original, result) in results {
             if let ItemResult::Replaced { result, .. } = result {
                 a.viewer.forget_decode(original);
@@ -543,8 +568,18 @@ fn close_session(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult
             match return_target(s.entered_from.as_deref(), results) {
                 Some(target) => {
                     delete::cancel_if_pending(a, &target);
-                    a.viewer.open(&target);
-                    Redraw::Full
+                    // Unless a save rewrote it, the photo gets its pending rotation back,
+                    // without asking (M6 ruling).
+                    let rewritten = results.iter().any(|(original, r)| {
+                        matches!(r, ItemResult::Replaced { .. }) && same_path(original, &target)
+                    });
+                    let same = s.entered_from.as_deref() == Some(target.as_path());
+                    if same && !rewritten {
+                        a.viewer.return_to(&target, s.entered_quarters)
+                    } else {
+                        a.viewer.open(&target);
+                        Redraw::Full
+                    }
                 }
                 None => a.viewer.close(),
             }
@@ -552,4 +587,68 @@ fn close_session(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult
     };
     commands::after(app, hwnd, redraw);
     invalidate(hwnd);
+}
+
+#[cfg(test)]
+mod tests {
+    use lv_core::identity::FileIdentity;
+
+    use super::*;
+
+    fn item(name: &str) -> ResizeItem {
+        let id = FileIdentity {
+            volume_serial: 1,
+            file_index: 2,
+            size: 3,
+            modified: 4,
+        };
+        ResizeItem::new(PathBuf::from(name), id, 0)
+    }
+
+    fn ready() -> Estimate {
+        Estimate::Ready {
+            size: (1, 1),
+            bytes: 1,
+        }
+    }
+
+    /// I1: a job still running when the screen closed must not be taken (and its bytes
+    /// saved, R1) by the next session, whatever generation it carries.
+    #[test]
+    fn a_result_from_an_earlier_session_is_rejected() {
+        let path = PathBuf::from("a.jpg");
+        let mut state = ResizeState::default();
+        state.open_session(None, 0, ResizeMemory::default());
+        let s = state.session.as_mut().unwrap();
+        s.add(vec![item("a.jpg")]);
+        let first = s.generation;
+        // A setting changed mid-session: a second generation.
+        s.set_memory(ResizeMemory {
+            long_edge: 640,
+            ..s.memory
+        });
+        let second = s.generation;
+        assert!(state.end_session().is_some());
+        // Esc, then 크기 조정 again with the same photo.
+        state.open_session(None, 0, ResizeMemory::default());
+        let s = state.session.as_mut().unwrap();
+        s.add(vec![item("a.jpg")]);
+        assert!(s.generation > second);
+        for stale in [first, second] {
+            assert!(!s.apply_estimate(stale, 0, &path, None, ready()), "{stale}");
+        }
+        assert_eq!(s.items[0].estimate, Estimate::Pending);
+        let now = s.generation;
+        assert!(s.apply_estimate(now, 0, &path, None, ready()));
+    }
+
+    #[test]
+    fn the_session_keeps_the_pending_rotation_it_was_opened_with() {
+        let mut state = ResizeState::default();
+        state.open_session(Some(PathBuf::from("c.jpg")), 3, ResizeMemory::default());
+        let s = state.end_session().unwrap();
+        assert_eq!(s.entered_from, Some(PathBuf::from("c.jpg")));
+        assert_eq!(s.entered_quarters, 3);
+        assert!(state.session.is_none());
+    }
 }
