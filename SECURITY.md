@@ -6,9 +6,9 @@ saves them matter. Thank you for reporting them privately first.
 ## Reporting a vulnerability
 
 Please use GitHub's **private vulnerability reporting**: on
-[goodflow/light-view](https://github.com/goodflow/light-view), open the **Security** tab
+[hyunwook-kim-goodflow/light-view](https://github.com/hyunwook-kim-goodflow/light-view), open the **Security** tab
 and choose **Report a vulnerability**
-(<https://github.com/goodflow/light-view/security/advisories/new>). Only the maintainers
+(<https://github.com/hyunwook-kim-goodflow/light-view/security/advisories/new>). Only the maintainers
 see the report. Do not open a public issue or pull request for a vulnerability.
 
 Helpful to include: the light-view version (About dialog), Windows version, what happens
@@ -54,7 +54,7 @@ In scope:
   silently damage a photo, or lose its metadata beyond what the README describes, is in
   scope.
 - The update check (when turned on): anything that makes light-view contact a host other
-  than `api.github.com` or open a page outside `github.com/goodflow/light-view/releases/`.
+  than `api.github.com` or open a page outside `github.com/hyunwook-kim-goodflow/light-view/releases/`.
   The check uses Windows' automatic proxy settings, so Windows may also look up a proxy
   (WPAD, a PAC file) on the local network when it runs, and it checks that GitHub's
   certificate has not been revoked, which can contact the certificate authority's

@@ -29,9 +29,9 @@ AppName=light-view
 AppVersion={#AppVersion}
 AppVerName=light-view {#AppVersion}
 AppPublisher=goodflow
-AppPublisherURL=https://github.com/goodflow/light-view
-AppSupportURL=https://github.com/goodflow/light-view/issues
-AppUpdatesURL=https://github.com/goodflow/light-view/releases
+AppPublisherURL=https://github.com/hyunwook-kim-goodflow/light-view
+AppSupportURL=https://github.com/hyunwook-kim-goodflow/light-view/issues
+AppUpdatesURL=https://github.com/hyunwook-kim-goodflow/light-view/releases
 VersionInfoVersion={#AppVersion}
 ; Per-user install: no UAC prompt, HKCU only, and no dialog offering an all-users install.
 PrivilegesRequired=lowest

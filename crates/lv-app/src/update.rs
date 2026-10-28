@@ -45,9 +45,9 @@ use crate::window::App;
 pub const WM_APP_UPDATE: u32 = WM_APP + 8;
 
 const HOST: &str = "api.github.com";
-const LATEST_PATH: &str = "/repos/goodflow/light-view/releases/latest";
+const LATEST_PATH: &str = "/repos/hyunwook-kim-goodflow/light-view/releases/latest";
 /// The only pages [보기] opens.
-const RELEASES_PREFIX: &str = "https://github.com/goodflow/light-view/releases/";
+const RELEASES_PREFIX: &str = "https://github.com/hyunwook-kim-goodflow/light-view/releases/";
 /// Larger answers are refused unread.
 pub const MAX_RESPONSE: usize = 1 << 20;
 /// The whole check, from start to the answer reaching the window.
@@ -629,20 +629,20 @@ mod tests {
         }
         // Another host, another repository, another scheme, tricks.
         for url in [
-            "https://evil.example/goodflow/light-view/releases/tag/v0.2.0",
-            "https://github.com.evil.example/goodflow/light-view/releases/tag/v0.2.0",
+            "https://evil.example/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0",
+            "https://github.com.evil.example/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0",
             "https://github.com/someone/light-view/releases/tag/v0.2.0",
-            "http://github.com/goodflow/light-view/releases/tag/v0.2.0",
-            "https://github.com/goodflow/light-view/releases/",
-            "https://github.com/goodflow/light-view/releases/../../../evil",
-            "https://github.com/goodflow/light-view/releases/tag/v0.2.0?x=\"y\"",
-            "https://github.com/goodflow/light-view/releases/tag/v0.2.0 calc.exe",
-            "https://github.com/goodflow/light-view/releasesx/tag/v0.2.0",
+            "http://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/../../../evil",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0?x=\"y\"",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0 calc.exe",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releasesx/tag/v0.2.0",
             // Not this tag's page.
-            "https://github.com/goodflow/light-view/releases/tag/v0.3.0",
-            "https://github.com/goodflow/light-view/releases/tag/0.2.0",
-            "https://github.com/goodflow/light-view/releases/latest",
-            "https://github.com/goodflow/light-view/releases/tag/v0.2.0/",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.3.0",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/0.2.0",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/latest",
+            "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0/",
             "",
         ] {
             assert_eq!(
@@ -653,8 +653,8 @@ mod tests {
         }
         // Missing or mistyped fields.
         for body in [
-            r#"{"html_url": "https://github.com/goodflow/light-view/releases/tag/v0.2.0"}"#,
-            r#"{"tag_name": 2, "html_url": "https://github.com/goodflow/light-view/releases/tag/v0.2.0"}"#,
+            r#"{"html_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0"}"#,
+            r#"{"tag_name": 2, "html_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0"}"#,
         ] {
             assert_eq!(
                 parse_latest(body.as_bytes(), CURRENT),

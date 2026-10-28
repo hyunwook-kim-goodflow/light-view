@@ -2,7 +2,7 @@
 ==========
 
 가볍고 빠른 Windows 사진 뷰어예요. (A light, fast photo viewer for Windows.)
-https://github.com/goodflow/light-view
+https://github.com/hyunwook-kim-goodflow/light-view
 
 실행: light-view.exe를 열거나, 사진 파일을 light-view.exe로 끌어다 놓아요.
 지원 형식: JPEG, PNG, GIF, WebP, BMP, HEIC/HEIF
