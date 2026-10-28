@@ -3,9 +3,13 @@
 //! of the app and its HEIF workers, and closes the app with `WM_CLOSE` posted to its
 //! own window (found by class and process id). Nothing else is touched: `--bench` makes
 //! the app use default settings, save none and skip the single-instance check.
+//!
+//! A resize run ([`measure_resize`]) starts `lv-app.exe --bench --resize <files>…`
+//! instead, waits for the app's `estimates-done-ms=` line (every photo has its estimate)
+//! and watches the private bytes of the app and its workers all along for their peak.
 
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -22,6 +26,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// How long the app may take to present its first image.
 const FIRST_PRESENT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the app may take to estimate every photo of a resize run.
+const ESTIMATES_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often a resize run samples memory for its peak.
+const PEAK_POLL: Duration = Duration::from_millis(20);
 /// Memory counts as settled once it moved less than this over `SETTLE_WINDOW`.
 const SETTLE_DELTA: u64 = 2 << 20;
 const SETTLE_WINDOW: Duration = Duration::from_millis(600);
@@ -50,11 +58,11 @@ impl Sample {
     }
 }
 
-/// Parses `first-present-ms=512 private-mb=180 decode-ms=230.5 …`; `None` if the line
-/// does not start with `first-present-ms=`.
-pub fn parse_timing_line(line: &str) -> Option<Vec<(String, f64)>> {
+/// Parses a line of `name=value` pairs that starts with `first`, like
+/// `first-present-ms=512 private-mb=180 decode-ms=230.5 …`; `None` if it does not.
+pub fn parse_line(line: &str, first: &str) -> Option<Vec<(String, f64)>> {
     let line = line.trim();
-    if !line.starts_with("first-present-ms=") {
+    if !line.starts_with(first) {
         return None;
     }
     line.split_whitespace()
@@ -63,6 +71,93 @@ pub fn parse_timing_line(line: &str) -> Option<Vec<(String, f64)>> {
             Some((name.to_string(), value.parse().ok()?))
         })
         .collect()
+}
+
+/// What one resize run measured.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResizeSample {
+    /// The app's `estimates-done-ms=` line, as `name=value` pairs.
+    pub steps: Vec<(String, f64)>,
+    /// The highest private bytes (MB) of the app and its workers together, sampled every
+    /// `PEAK_POLL` from the start until every estimate was in.
+    pub peak_total_mb: f64,
+    /// The app's own peak private bytes (MB), as Windows counts it.
+    pub app_peak_mb: f64,
+    /// The highest worker total sampled (MB).
+    pub workers_peak_mb: f64,
+}
+
+impl ResizeSample {
+    pub fn step(&self, name: &str) -> Option<f64> {
+        self.steps.iter().find(|(n, _)| n == name).map(|s| s.1)
+    }
+
+    /// The peak private bytes: the sampled total, or the app's own peak when sampling
+    /// missed it.
+    pub fn peak_mb(&self) -> f64 {
+        self.peak_total_mb.max(self.app_peak_mb)
+    }
+}
+
+/// Opens `files` on the resize screen (`--bench-webp`: as WebP) and measures until every
+/// photo has its estimate.
+pub fn measure_resize(app: &Path, files: &[PathBuf], webp: bool) -> Result<ResizeSample, String> {
+    let mut child = Command::new(app)
+        .arg(if webp { "--bench-webp" } else { "--bench" })
+        .arg("--resize")
+        .args(files)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", app.display()))?;
+    let result = measure_resize_child(&mut child);
+    close(&mut child);
+    result
+}
+
+fn measure_resize_child(child: &mut Child) -> Result<ResizeSample, String> {
+    let rx = read_lines(child, "estimates-done-ms=")?;
+    let pid = child.id();
+    let started = Instant::now();
+    let (mut peak_total, mut workers_peak) = (0u64, 0u64);
+    let steps = loop {
+        let (app, workers) = memory(pid);
+        peak_total = peak_total.max(app + workers);
+        workers_peak = workers_peak.max(workers);
+        match rx.recv_timeout(PEAK_POLL) {
+            Ok(steps) => break steps,
+            Err(mpsc::RecvTimeoutError::Timeout) if started.elapsed() < ESTIMATES_TIMEOUT => {}
+            Err(_) => return Err("the app did not estimate every photo in time".into()),
+        }
+    };
+    let app_peak_mb = counters(pid).map_or(0.0, |c| mb(c.PeakPagefileUsage as u64));
+    Ok(ResizeSample {
+        steps,
+        peak_total_mb: mb(peak_total),
+        app_peak_mb,
+        workers_peak_mb: mb(workers_peak),
+    })
+}
+
+/// Reads the child's stderr on a thread until it exits (so its pipe never fills up) and
+/// sends each line starting with `first`, parsed; other lines are echoed.
+fn read_lines(
+    child: &mut Child,
+    first: &'static str,
+) -> Result<mpsc::Receiver<Vec<(String, f64)>>, String> {
+    let stderr = child.stderr.take().ok_or("no stderr pipe")?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(steps) = parse_line(&line, first) {
+                let _ = tx.send(steps);
+            } else if !line.trim().is_empty() && !line.starts_with("first-present-ms=") {
+                eprintln!("  app: {line}");
+            }
+        }
+    });
+    Ok(rx)
 }
 
 pub fn measure(app: &Path, file: &Path) -> Result<Sample, String> {
@@ -81,18 +176,7 @@ pub fn measure(app: &Path, file: &Path) -> Result<Sample, String> {
 }
 
 fn measure_child(child: &mut Child, started: Instant) -> Result<Sample, String> {
-    let stderr = child.stderr.take().ok_or("no stderr pipe")?;
-    let (tx, rx) = mpsc::channel();
-    // Reads until the app exits, so its pipe never fills up.
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if let Some(steps) = parse_timing_line(&line) {
-                let _ = tx.send(steps);
-            } else if !line.trim().is_empty() {
-                eprintln!("  app: {line}");
-            }
-        }
-    });
+    let rx = read_lines(child, "first-present-ms=")?;
     let steps = rx
         .recv_timeout(FIRST_PRESENT_TIMEOUT)
         .map_err(|_| "the app presented no image in time".to_string())?;
@@ -254,14 +338,26 @@ mod tests {
 
     #[test]
     fn timing_line_parses_into_steps() {
-        let steps = parse_timing_line(
+        let steps = parse_line(
             "first-present-ms=512 private-mb=180 decode-ms=230.5 shown-at=40.0\r\n",
+            "first-present-ms=",
         )
         .unwrap();
         assert_eq!(steps[0], ("first-present-ms".to_string(), 512.0));
         assert_eq!(steps[2], ("decode-ms".to_string(), 230.5));
         assert_eq!(steps.len(), 4);
-        assert_eq!(parse_timing_line("light-view: something else"), None);
-        assert_eq!(parse_timing_line("first-present-ms=x"), None);
+        assert_eq!(
+            parse_line("light-view: something else", "first-present-ms="),
+            None
+        );
+        assert_eq!(parse_line("first-present-ms=x", "first-present-ms="), None);
+        let done = parse_line(
+            "estimates-done-ms=2400 photos=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640",
+            "estimates-done-ms=",
+        )
+        .unwrap();
+        assert_eq!(done[0], ("estimates-done-ms".to_string(), 2400.0));
+        assert_eq!(done[4], ("peak-private-mb".to_string(), 640.0));
+        assert_eq!(parse_line("first-present-ms=1", "estimates-done-ms="), None);
     }
 }

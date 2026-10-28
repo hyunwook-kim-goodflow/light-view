@@ -1,3 +1,5 @@
 {"case": "jpeg12mp", "first_pixel_ms": 394, "decode_ms": 247, "private_mb": 299}
 {"case": "jpeg24mp", "first_pixel_ms": 561, "decode_ms": 474, "private_mb": 560}
 {"case": "png_large", "first_pixel_ms": 627, "decode_ms": 501, "private_mb": 980}
+{"case": "resize10x12mp", "estimates_ms": 3796, "first_estimate_ms": 1006, "peak_private_mb": 603}
+{"case": "resize10x12mp_webp", "estimates_ms": 7300, "first_estimate_ms": 1685, "peak_private_mb": 687}
