@@ -487,6 +487,8 @@ pub(crate) mod fake {
     pub(crate) struct FakeTrash {
         pub(crate) bin: PathBuf,
         pub(crate) has_bin: bool,
+        /// Refuses every file, as a bin that is off or full would.
+        pub(crate) refuse: bool,
         pub(crate) results: Rc<RefCell<Vec<Reported>>>,
     }
 
@@ -497,7 +499,16 @@ pub(crate) mod fake {
             FakeTrash {
                 bin,
                 has_bin,
+                refuse: false,
                 results: Rc::default(),
+            }
+        }
+
+        /// A bin that takes nothing.
+        pub(crate) fn refusing(dir: &Path) -> FakeTrash {
+            FakeTrash {
+                refuse: true,
+                ..FakeTrash::new(dir, true)
             }
         }
 
@@ -518,7 +529,11 @@ pub(crate) mod fake {
 
         fn recycle(&self, p: PendingDelete) {
             let bin = self.bin.clone();
+            let refuse = self.refuse;
             let r = commit(&p, |path| {
+                if refuse {
+                    return Err("refused".to_owned());
+                }
                 fs::rename(path, bin.join(path.file_name().unwrap())).map_err(|e| e.to_string())
             });
             self.results.borrow_mut().push((p.path, r));
