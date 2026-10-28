@@ -8,7 +8,7 @@
 
 ## 설치와 포터블
 
-[GitHub Releases](https://github.com/goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
+[GitHub Releases](https://github.com/hyunwook-kim-goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
 
 - **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록, 작업자의 AppContainer 프로필은 지우고 설정과 크래시 기록(미니덤프 포함)은 남겨요. 필요 없으면 두 폴더를 직접 지워도 돼요.
 - **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 `%APPDATA%`는 건드리지 않아요. 레지스트리도 보통은 건드리지 않아요(예외는 아래 AppContainer 프로필). 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 보통 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(압축을 푼 폴더에는 AppContainer가 읽을 권한이 없어요). 다만 폴더에 `ALL APPLICATION PACKAGES` 읽기 권한이 있으면(예: `C:\Program Files` 아래에 풀었거나 아래처럼 `icacls`로 권한을 줬을 때) AppContainer를 쓰고, 그때 윈도우가 AppContainer 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`와 HKCU의 등록)을 만들어요. 포터블판에는 제거 프로그램이 없으니, 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`을 한 번 실행해 그 프로필을 지워 주세요(아무것도 띄우지 않고 끝나요. 설치판도 함께 쓰고 있으면 설치판이 다음에 다시 만들어요). 포터블판은 설치판이나 다른 폴더의 포터블판과 따로 한 창을 써요(한쪽이 열려 있어도 다른 쪽 사진이 그 창으로 넘어가지 않아요).
@@ -62,7 +62,7 @@ M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub�
 - **화면 읽기 프로그램:** UI Automation으로 버튼 줄, 시작 화면 [열기], 메뉴, 대화상자, 알림, EXIF 카드와 목록, 설정 창의 이름·역할·상태(사용 안 함, 고정됨, 선택됨)를 알려 주고, 포커스 이동과 알림을 읽어 줘요.
 - **USB 안전 제거:** 보던 사진이 있는 이동식 드라이브를 "하드웨어 안전 제거"로 빼려고 하면 폴더 감시를 놓아서 제거가 막히지 않아요. 화면의 사진은 그대로 남고, 그 뒤 저장·삭제는 파일이 바뀌었다고 알려 줘요. 제거가 취소되면 감시를 다시 시작하고, 드라이브를 다시 꽂고 같은 폴더의 사진을 열면 다시 감시해요.
 - 아직 없는 것: 단축키 편집, AVIF, 코드 서명(SignPath 신청 전). 아래 로드맵을 보세요.
-- **업데이트 확인(선택):** 네트워크를 쓰는 기능은 이것 하나예요. 사진을 처음 연 뒤 "새 버전이 나오면 알려 드릴까요?"라고 한 번 묻고, [알려 주세요]를 고를 때만 켜져요(Enter와 Esc는 [괜찮아요]). 켜면 하루 한 번 백그라운드에서 `https://api.github.com/repos/goodflow/light-view/releases/latest`를 HTTPS로 조회해요(리디렉션·쿠키 없음, 인증서 해지 확인, 10초 제한, 응답 1 MB까지). 새 버전이 있으면 "새 버전(X)이 나왔어요 [보기]"를 보여 주고, [보기]는 그 릴리스 페이지(`https://github.com/goodflow/light-view/releases/tag/...`)만 브라우저로 열어요. 다운로드·설치는 하지 않아요. 윈도우의 자동 프록시 설정을 따르므로 조회할 때 프록시 자동 검색(WPAD)이나 PAC 파일 요청이 함께 일어날 수 있어요. 설정의 "업데이트 확인"으로 끌 수 있어요.
+- **업데이트 확인(선택):** 네트워크를 쓰는 기능은 이것 하나예요. 사진을 처음 연 뒤 "새 버전이 나오면 알려 드릴까요?"라고 한 번 묻고, [알려 주세요]를 고를 때만 켜져요(Enter와 Esc는 [괜찮아요]). 켜면 하루 한 번 백그라운드에서 `https://api.github.com/repos/hyunwook-kim-goodflow/light-view/releases/latest`를 HTTPS로 조회해요(리디렉션·쿠키 없음, 인증서 해지 확인, 10초 제한, 응답 1 MB까지). 새 버전이 있으면 "새 버전(X)이 나왔어요 [보기]"를 보여 주고, [보기]는 그 릴리스 페이지(`https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/...`)만 브라우저로 열어요. 다운로드·설치는 하지 않아요. 윈도우의 자동 프록시 설정을 따르므로 조회할 때 프록시 자동 검색(WPAD)이나 PAC 파일 요청이 함께 일어날 수 있어요. 설정의 "업데이트 확인"으로 끌 수 있어요.
 - **크래시 기록:** 앱이 비정상 종료되면 `%LOCALAPPDATA%\light-view\crashes\`(포터블판은 exe 옆 `data\crashes\`)에 로그와 미니덤프를 남겨요(최근 10개만). 어디로도 보내지 않아요. 원하면 GitHub 이슈에 직접 첨부해 주세요.
 
 ## 빌드
