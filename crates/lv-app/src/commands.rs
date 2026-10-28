@@ -412,8 +412,10 @@ pub fn handle(
         // Windows is ending the session: the process may be ended once this returns, so
         // a running save gets up to `END_SESSION_WAIT` to finish its replace (blocking
         // the shutdown with WM_QUERYENDSESSION would be worse), and so does sending the
-        // pending delete to the Recycle Bin.
+        // pending delete to the Recycle Bin. A resize save stops before its next photo
+        // and gets the same wait for the photo in hand.
         WM_ENDSESSION if wparam.0 != 0 => {
+            resize::stop_for_end_session(app, END_SESSION_WAIT);
             {
                 let mut a = app.try_borrow_mut().ok()?;
                 if a.saving.is_some() {

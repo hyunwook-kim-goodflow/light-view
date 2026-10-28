@@ -46,7 +46,7 @@ pub mod toasts;
 use estimate::{ByteCache, Estimator, Job, Maker, ESTIMATE_THREADS};
 use save::batch::{ReplaceBatch, Unrecycled, Unrestored};
 use save::{longest_replace_path, ItemResult};
-pub use saving::{defer_close, flush_at_exit, on_saved};
+pub use saving::{defer_close, flush_at_exit, on_saved, stop_for_end_session};
 use saving::{Event, SaveSummary};
 pub use session::{
     drop_action, estimate_order, DropAction, Estimate, ReplaceBlock, ResizeItem, ResizeSession,
@@ -69,6 +69,8 @@ pub struct SaveProgress {
     pub results: Vec<(PathBuf, ItemResult)>,
     /// The window closes once the save ends.
     close_after: bool,
+    /// Tells the save thread to start no further photo ([`saving::stop_for_end_session`]).
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What a commit or an undo of a replace could not do, for the screen to tell.

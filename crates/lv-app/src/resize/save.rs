@@ -26,6 +26,7 @@ use crate::save::atomic::{
 };
 
 pub mod batch;
+pub mod live;
 
 /// Why one photo was not saved. Nothing of it changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,11 +161,19 @@ fn replace(
         return Err(FailReason::NameTaken);
     }
 
-    // ② Aside, hidden. From here on every way out puts it back unless `done`.
-    move_no_replace(&src_ext, &backup_ext).map_err(|e| win_reason(&e))?;
+    // ② Aside, hidden. The folder is listed first so a crash from here on is recovered
+    // at the next start whatever it opens. From here on every way out puts it back
+    // unless `done`.
+    let folder = live::folder_of(&backup).to_path_buf();
+    live::hold(&folder);
+    if let Err(e) = move_no_replace(&src_ext, &backup_ext) {
+        live::release(&folder);
+        return Err(win_reason(&e));
+    }
     let mut aside = Aside {
         backup: backup_ext,
         original: src_ext,
+        folder,
         was_hidden,
         done: false,
     };
@@ -195,6 +204,8 @@ fn replace(
 struct Aside {
     backup: PathBuf,
     original: PathBuf,
+    /// The folder as listed for crash recovery ([`live`]).
+    folder: PathBuf,
     was_hidden: bool,
     done: bool,
 }
@@ -205,7 +216,11 @@ impl Drop for Aside {
             return;
         }
         match move_no_replace(&self.backup, &self.original) {
-            Ok(()) => set_hidden(&self.original, self.was_hidden),
+            Ok(()) => {
+                set_hidden(&self.original, self.was_hidden);
+                live::release(&self.folder);
+            }
+            // Its folder stays listed: the next start puts it back.
             Err(e) => {
                 // Shown, so it is not lost from sight; the next start puts it back
                 // ([`recover_backups`]) once its name is free.
@@ -346,6 +361,7 @@ pub fn revert_replace(result: &Path, backup: &Path, original: &Path) -> bool {
             keep_visible(backup, original);
         }
     }
+    live::release(live::folder_of(backup));
     true
 }
 
