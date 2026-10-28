@@ -121,20 +121,14 @@ fn main() -> anyhow::Result<()> {
         if let Some(dir) = first.and_then(photo_folder) {
             timing::step("recover-ms", || resize::save::recover_backups(&dir));
         }
-        // And in every folder a save that did not finish listed, whatever this launch
-        // opens; on a thread of its own, since a listed folder may be slow to reach.
-        if let Some(list) = window::live_backups_dir(&data) {
-            resize::save::live::init(list.clone());
-            let recover = move || {
-                resize::save::live::recover_listed(&list, resize::save::recover_backups);
-            };
-            if let Err(e) = std::thread::Builder::new()
-                .name("lv-recover".into())
-                .spawn(recover)
-            {
-                eprintln!("light-view: backup recovery not started: {e}");
-            }
-        }
+    }
+    let live_list = if bench {
+        None
+    } else {
+        window::live_backups_dir(&data)
+    };
+    if let Some(list) = &live_list {
+        resize::save::live::init(list.clone());
     }
     // Held until the window closes, so later launches forward to it. "새 창" applies to
     // viewing only: every resize launch goes to the one window (spec §10, R4).
@@ -148,6 +142,20 @@ fn main() -> anyhow::Result<()> {
             Launch::Primary(guard) => Some(guard),
         }
     };
+    // Every folder a save that did not finish listed is recovered, whatever this launch
+    // opens. Only a launch that keeps running does it (a forwarding one would exit in
+    // the middle), on a thread of its own since a listed folder may be slow to reach.
+    if let Some(list) = live_list {
+        let recover = move || {
+            resize::save::live::recover_listed(&list, resize::save::recover_folder);
+        };
+        if let Err(e) = std::thread::Builder::new()
+            .name("lv-recover".into())
+            .spawn(recover)
+        {
+            eprintln!("light-view: backup recovery not started: {e}");
+        }
+    }
     // COM for the UI thread, once (the shell's calls and the Open dialog), held until
     // the window is gone.
     let _com = shell::ComApartment::init();
