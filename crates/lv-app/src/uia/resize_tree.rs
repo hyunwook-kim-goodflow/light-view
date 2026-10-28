@@ -237,6 +237,17 @@ pub(super) fn add_resize(b: &mut Builder, i: &ResizeInput) {
             }
         }
     }
+    // In a short window the middle scrolls: what is out of its view is not drawn.
+    let vp = super::PxRect::from_dips(l.viewport, b.dip);
+    let choices = CHOICE_FIRST + 2 * CHOICE_STRIDE..CHOICE_FIRST + 5 * CHOICE_STRIDE;
+    for n in &mut b.nodes {
+        let middle = choices.contains(&n.id)
+            || matches!(n.id, REASON | GPS | LIST)
+            || n.id >= LIST_ITEM_FIRST;
+        if middle && (n.rect.y + n.rect.h <= vp.y || n.rect.y >= vp.y + vp.h) {
+            n.offscreen = true;
+        }
+    }
 }
 
 #[cfg(test)]

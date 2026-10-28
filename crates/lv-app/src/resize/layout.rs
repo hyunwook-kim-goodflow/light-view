@@ -128,6 +128,13 @@ pub struct SidebarLayout {
     pub total: Rect,
     pub cancel: Rect,
     pub save: Rect,
+    /// Where the middle (the output rows and the list) is shown. In a window shorter
+    /// than `MIN_SIDEBAR_H` (maximized or full screen) the middle scrolls inside it,
+    /// so the top rows and the buttons always show.
+    pub viewport: Rect,
+    /// How far the middle is scrolled up, 0..=`max_scroll`.
+    pub scroll: f32,
+    pub max_scroll: f32,
 }
 
 /// The sidebar in `view` (DIPs) on `side`; `dip` is DIPs per pixel.
@@ -169,7 +176,16 @@ pub fn sidebar_layout(view: Rect, side: SidebarSide, dip: f32) -> SidebarLayout 
     let bottom = p.y + p.h - PAD;
     let buttons_y = bottom - BUTTON_H;
     let total = line(buttons_y - BUTTON_GAP - TOTAL_H, TOTAL_H);
-    let list = line(y, (total.y - y).max(0.0));
+    // The list keeps at least one row with its note; what does not fit scrolls.
+    let min_list = LIST_ROW_H + LIST_NOTE_H;
+    let list = line(y, (total.y - y).max(min_list));
+    let viewport = Rect {
+        x: p.x,
+        y: output.y,
+        w: p.w,
+        h: (total.y - output.y).max(0.0),
+    };
+    let max_scroll = (list.y + list.h - total.y).max(0.0);
     let half = (inner - BUTTON_GAP) / 2.0;
     let cancel = Rect {
         x,
@@ -181,7 +197,7 @@ pub fn sidebar_layout(view: Rect, side: SidebarSide, dip: f32) -> SidebarLayout 
         x: x + half + BUTTON_GAP,
         ..cancel
     };
-    SidebarLayout {
+    let natural = SidebarLayout {
         panel: p,
         title,
         tabs,
@@ -197,7 +213,12 @@ pub fn sidebar_layout(view: Rect, side: SidebarSide, dip: f32) -> SidebarLayout 
         total,
         cancel,
         save,
-    }
+        viewport,
+        scroll: 0.0,
+        max_scroll,
+    };
+    // At first scrolled to the end: the list (and its current row) shows.
+    natural.scrolled_to(max_scroll)
 }
 
 /// `r` split into `n` options side by side, sized by `weights`, `gap` apart.
@@ -216,6 +237,57 @@ fn split(r: Rect, n: usize, weights: &[f32], gap: f32) -> Vec<Rect> {
 }
 
 impl SidebarLayout {
+    /// The same layout with the middle scrolled by `to` (clamped).
+    pub fn scrolled_to(mut self, to: f32) -> SidebarLayout {
+        let to = to.clamp(0.0, self.max_scroll);
+        let dy = self.scroll - to;
+        self.scroll = to;
+        let up = |r: &mut Rect| r.y += dy;
+        for row in [
+            &mut self.format,
+            &mut self.quality,
+            &mut self.save_mode,
+            &mut self.metadata,
+        ] {
+            up(&mut row.label);
+            up(&mut row.control);
+        }
+        for r in [
+            &mut self.output,
+            &mut self.reason,
+            &mut self.estimate,
+            &mut self.list,
+        ] {
+            up(r);
+        }
+        self
+    }
+
+    /// Scrolled so the focused control `c` shows: an output row is brought into view;
+    /// anything else leaves the list in view.
+    pub fn scrolled_for(self, c: Ctl, memory: &ResizeMemory) -> SidebarLayout {
+        if self.max_scroll <= 0.0 || !self.in_middle(c) || c == Ctl::List {
+            return self;
+        }
+        let Some(r) = self.focus_rect(c, memory) else {
+            return self;
+        };
+        let (top, bottom) = (r.y + self.scroll, r.y + r.h + self.scroll);
+        let vp = self.viewport;
+        let lo = bottom + 4.0 - (vp.y + vp.h);
+        let hi = top - 4.0 - vp.y;
+        let to = self.scroll.clamp(lo.min(hi), hi.max(lo));
+        self.scrolled_to(to)
+    }
+
+    /// Whether `c` sits in the scrolling middle.
+    pub fn in_middle(&self, c: Ctl) -> bool {
+        matches!(
+            c,
+            Ctl::Format | Ctl::Quality | Ctl::SaveMode | Ctl::StripGps | Ctl::List
+        )
+    }
+
     /// The row a control sits in for `memory`'s tab.
     pub fn row_of(&self, c: Ctl, memory: &ResizeMemory) -> Option<Row> {
         let fields = tab_fields(memory.tab);
@@ -286,6 +358,10 @@ impl SidebarLayout {
     /// The control under (x, y) for `ctx`; list rows come from `rows`.
     pub fn hit(&self, x: f32, y: f32, ctx: &Ctx, rows: &[(usize, Rect)]) -> Option<Hit> {
         for c in controls(&ctx.memory) {
+            // A middle control scrolled out of view cannot be hit.
+            if self.in_middle(c) && !self.viewport.contains(x, y) {
+                continue;
+            }
             if c.option_count() > 0 {
                 let options = self.options(c, &ctx.memory);
                 if let Some(i) = options.iter().position(|r| r.contains(x, y)) {
@@ -296,6 +372,9 @@ impl SidebarLayout {
             {
                 return Some(Hit::Control(c));
             }
+        }
+        if !self.viewport.contains(x, y) {
+            return None;
         }
         rows.iter()
             .find(|(_, r)| r.contains(x, y))

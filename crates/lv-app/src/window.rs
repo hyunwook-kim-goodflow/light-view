@@ -152,6 +152,13 @@ impl App {
         (w, (h - bar).max(0.0))
     }
 
+    /// Drops the resize screen's filmstrip bitmaps.
+    pub fn clear_thumbs(&mut self) {
+        if let Some(r) = &mut self.renderer {
+            r.clear_thumbs();
+        }
+    }
+
     /// A point in client DIPs as the viewer sees it (its view starts at the resize
     /// screen's photo area).
     pub fn view_point(&self, (x, y): (f32, f32)) -> (f32, f32) {

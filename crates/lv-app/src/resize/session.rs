@@ -97,6 +97,9 @@ pub struct ResizeSession {
     /// The view rotation entered_from had pending (clockwise quarters): given back
     /// to the viewer when the screen closes without replacing it (M6 ruling).
     pub entered_quarters: u8,
+    /// A save (or an undo of one) rewrote the photo at `entered_from` while the screen
+    /// stayed open: leaving opens it fresh, never restoring an old decode or rotation.
+    pub entered_rewritten: bool,
     /// The sidebar's values, every tab's; saved to the settings as they change.
     pub memory: ResizeMemory,
     /// Bumped whenever `spec` changes: estimates of another generation are stale. Never
@@ -119,6 +122,7 @@ impl ResizeSession {
             replace: false,
             entered_from,
             entered_quarters: entered_quarters % 4,
+            entered_rewritten: false,
             memory,
             generation,
         }
@@ -193,8 +197,40 @@ impl ResizeSession {
         if let Some(result) = replaced {
             self.entered_from = Some(result);
             self.entered_quarters = 0;
+            self.entered_rewritten = true;
         }
         !self.items.is_empty()
+    }
+
+    /// An undo of a replace ended while the screen is open: a photo it brought back is
+    /// where Esc goes, opened fresh (`paths` pairs each original with its result).
+    pub fn undo_entered(&mut self, paths: &[(PathBuf, PathBuf)]) {
+        let Some(from) = &self.entered_from else {
+            return;
+        };
+        if let Some((original, _)) = paths.iter().find(|(_, r)| same_path(r, from)) {
+            self.entered_from = Some(original.clone());
+            self.entered_quarters = 0;
+            self.entered_rewritten = true;
+        }
+    }
+
+    /// How the viewer comes back when the screen closes after `results` (empty for
+    /// Esc): the photo opened from, with its pending rotation, unless a save rewrote
+    /// it (then it is opened fresh, under its new name if it has one).
+    pub fn return_plan(&self, results: &[(PathBuf, ItemResult)]) -> Return {
+        let Some(target) = return_target(self.entered_from.as_deref(), results) else {
+            return Return::Empty;
+        };
+        let rewritten = self.entered_rewritten
+            || results.iter().any(|(original, r)| {
+                matches!(r, ItemResult::Replaced { .. }) && same_path(original, &target)
+            });
+        if self.entered_from.as_deref() == Some(target.as_path()) && !rewritten {
+            Return::Restore(target, self.entered_quarters)
+        } else {
+            Return::Fresh(target)
+        }
     }
 
     /// An estimate for `index` made under `generation`: taken unless it is stale (another
@@ -218,7 +254,9 @@ impl ResizeSession {
             item.src_bytes = s.bytes;
             item.animated = s.animated;
             item.scaled = s.scaled;
-            if s.thumb.is_some() {
+            // The tile only changes with `quarters`, fixed per photo: the first one stays
+            // (its bitmap is not made again on every setting change).
+            if item.thumb.is_none() {
                 item.thumb = s.thumb;
             }
         }
@@ -307,6 +345,17 @@ pub fn drop_action(count: usize, in_resize: bool) -> DropAction {
         (false, 0 | 1) => DropAction::Open,
         (false, _) => DropAction::Ask,
     }
+}
+
+/// How the viewer comes back when the screen closes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Return {
+    /// No photo was shown: the empty screen.
+    Empty,
+    /// The photo opened from, with its pending rotation (no prompt).
+    Restore(PathBuf, u8),
+    /// A photo a save rewrote: opened again from the file.
+    Fresh(PathBuf),
 }
 
 /// Where the viewer goes once a save ends (spec §6): the photo it showed before, or the
@@ -520,6 +569,80 @@ mod tests {
         )];
         assert!(!s.keep_unsaved(&all));
         assert!(s.items.is_empty());
+    }
+
+    fn replaced(result: &str) -> ItemResult {
+        ItemResult::Replaced {
+            result: PathBuf::from(result),
+            backup: PathBuf::from(".x.lvbak-1-0"),
+        }
+    }
+
+    /// Re-review r1: a save that keeps the screen open and rewrote the photo opened
+    /// from must make Esc open it fresh, never restore an old decode or rotation.
+    #[test]
+    fn esc_after_a_kept_open_save_opens_the_rewritten_photo_fresh() {
+        let fail = ItemResult::Failed(FailReason::NameTaken);
+        // Nothing saved yet: Esc restores the pending rotation.
+        let mut s = session(&["a.jpg", "bb.jpg"]);
+        s.entered_from = Some(PathBuf::from("a.jpg"));
+        s.entered_quarters = 3;
+        assert_eq!(
+            s.return_plan(&[]),
+            Return::Restore(PathBuf::from("a.jpg"), 3)
+        );
+        // Case (b): replaced under the same name, bb.jpg failed, the screen stays.
+        let results = vec![
+            (PathBuf::from("a.jpg"), replaced("a.jpg")),
+            (PathBuf::from("bb.jpg"), fail.clone()),
+        ];
+        assert!(s.keep_unsaved(&results));
+        assert_eq!(s.return_plan(&[]), Return::Fresh(PathBuf::from("a.jpg")));
+        // Under a new name: Esc opens the result.
+        let mut s = session(&["a.heic", "bb.jpg"]);
+        s.entered_from = Some(PathBuf::from("a.heic"));
+        let results = vec![
+            (PathBuf::from("a.heic"), replaced("a.jpg")),
+            (PathBuf::from("bb.jpg"), fail),
+        ];
+        assert!(s.keep_unsaved(&results));
+        assert_eq!(s.return_plan(&[]), Return::Fresh(PathBuf::from("a.jpg")));
+        // Case (a): [실행 취소] while the screen is open removes the result and brings
+        // the original back: Esc goes there, fresh.
+        s.undo_entered(&[(PathBuf::from("a.heic"), PathBuf::from("a.jpg"))]);
+        assert_eq!(s.entered_from, Some(PathBuf::from("a.heic")));
+        assert_eq!(s.return_plan(&[]), Return::Fresh(PathBuf::from("a.heic")));
+        // An undo of other photos leaves it alone.
+        s.undo_entered(&[(PathBuf::from("c.png"), PathBuf::from("c.jpg"))]);
+        assert_eq!(s.entered_from, Some(PathBuf::from("a.heic")));
+        // No photo was shown: the empty screen.
+        assert_eq!(session(&["a.jpg"]).return_plan(&[]), Return::Empty);
+    }
+
+    /// Re-review r1 minor: a photo's tile is made once; later estimates keep it.
+    #[test]
+    fn a_photo_keeps_its_first_tile() {
+        let mut s = session(&["a.jpg"]);
+        let p = PathBuf::from("a.jpg");
+        let tile =
+            |n: u8| super::super::thumb::thumbnail(&[n, n, n, 255], (1, 1), 64).map(Arc::new);
+        let source = |thumb| Source {
+            size: (1, 1),
+            bytes: 1,
+            animated: false,
+            scaled: false,
+            thumb,
+        };
+        let first = tile(1);
+        let gen = s.generation;
+        assert!(s.apply_estimate(gen, 0, &p, Some(source(first.clone())), ready()));
+        s.set_memory(ResizeMemory {
+            long_edge: 640,
+            ..s.memory
+        });
+        let gen = s.generation;
+        assert!(s.apply_estimate(gen, 0, &p, Some(source(tile(2))), ready()));
+        assert_eq!(s.items[0].thumb, first);
     }
 
     #[test]

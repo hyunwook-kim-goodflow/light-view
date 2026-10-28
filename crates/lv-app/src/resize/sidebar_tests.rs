@@ -426,3 +426,45 @@ fn minimum_height_fits_every_row() {
         }
     }
 }
+
+/// Re-review r1 (M1): a maximized or full-screen window shorter than the minimum keeps
+/// the top rows and the buttons; the middle scrolls, showing the list at first and a
+/// focused output row when it has the focus.
+#[test]
+fn short_windows_scroll_the_middle() {
+    let memory = ResizeMemory::default();
+    let v = view(1200.0, 470.0);
+    let l = sidebar_layout(v, SidebarSide::Right, 1.0);
+    assert!(l.max_scroll > 0.0);
+    // Buttons and total inside the panel, the total above the buttons.
+    assert!(l.save.y + l.save.h <= v.h + 0.01);
+    assert!(l.total.y + l.total.h <= l.save.y);
+    // At first the list's first row (with a note) shows inside the middle.
+    let vp = l.viewport;
+    assert!(l.list.y >= vp.y - 0.01 && l.list.y + LIST_ROW_H + LIST_NOTE_H <= vp.y + vp.h + 0.01);
+    assert_eq!(list_rows(l.list, &[true, true, true], 2)[0].0, 2);
+    // The format row is out of view: a click there reaches what is drawn there (the
+    // fixed rows above), never the hidden row.
+    let c = ctx(memory);
+    let f = l.format.control;
+    assert!(f.y + f.h <= vp.y + 0.01, "{f:?} {vp:?}");
+    let hit = l.hit(f.x + 5.0, f.y + 5.0, &c, &[]);
+    assert!(!matches!(hit, Some(Hit::Option(Ctl::Format, _))), "{hit:?}");
+    // Focused, each output row scrolls into view.
+    for ctl in [Ctl::Format, Ctl::Quality, Ctl::SaveMode, Ctl::StripGps] {
+        let s = l.clone().scrolled_for(ctl, &memory);
+        let r = s.focus_rect(ctl, &memory).unwrap();
+        assert!(
+            r.y >= vp.y - 0.01 && r.y + r.h <= vp.y + vp.h + 0.01,
+            "{ctl:?} {r:?}"
+        );
+        assert!(s.hit(r.x + 3.0, r.y + 3.0, &c, &[]).is_some(), "{ctl:?}");
+    }
+    // The tabs and the fields never scroll.
+    let s = l.clone().scrolled_for(Ctl::Format, &memory);
+    assert_eq!((s.tabs.clone(), s.rows), (l.tabs.clone(), l.rows));
+    // A tall window does not scroll at all.
+    let tall = sidebar_layout(view(1200.0, 900.0), SidebarSide::Right, 1.0);
+    assert_eq!(tall.max_scroll, 0.0);
+    assert_eq!(tall.clone().scrolled_for(Ctl::Format, &memory), tall);
+}

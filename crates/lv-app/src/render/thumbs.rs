@@ -22,6 +22,13 @@ pub(super) struct ThumbCache {
 }
 
 impl Renderer {
+    /// Drops every kept bitmap (the resize screen closed).
+    pub fn clear_thumbs(&mut self) {
+        if let Some(d) = &mut self.device {
+            d.thumbs.bitmaps.clear();
+        }
+    }
+
     /// Draws premultiplied BGRA pixels of `size` filling `rect` (DIPs), cropped to its
     /// aspect ratio around the centre. `id` names the pixels: the bitmap is made once.
     pub fn draw_thumb(

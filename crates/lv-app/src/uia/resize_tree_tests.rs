@@ -48,7 +48,7 @@ fn tree(s: &ResizeSession, focus: Option<Ctl>, block: Option<ReplaceBlock>, lang
         toast: None,
         resize: Some(ResizeInput {
             session: s,
-            geometry: geometry(client, SidebarSide::Right, 1.0, s),
+            geometry: geometry(client, SidebarSide::Right, 1.0, s, Ctl::List),
             focus,
             block,
             progress: None,
