@@ -18,6 +18,7 @@ pub mod listing;
 pub mod portable;
 pub mod prefetch;
 pub mod profile;
+pub mod resize;
 pub mod settings;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
