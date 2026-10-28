@@ -53,6 +53,8 @@ use crate::instance::{acquire_or_forward, Launch};
 /// `light-view.exe --uninstall-cleanup`: deletes the worker's AppContainer profile and
 /// exits with 0, whatever happened, without showing anything.
 const UNINSTALL_CLEANUP: &str = "--uninstall-cleanup";
+/// `light-view.exe --resize "<path>"`: Explorer's 크기 조정 verb (spec §3, ruling R4).
+const RESIZE: &str = "--resize";
 
 fn main() -> anyhow::Result<()> {
     let start = Instant::now();
@@ -66,18 +68,18 @@ fn main() -> anyhow::Result<()> {
     if let Err(e) = unsafe { SetCurrentProcessExplicitAppUserModelID(w!("goodflow.LightView")) } {
         eprintln!("light-view: could not set the AppUserModelID: {e}");
     }
-    let mut args = std::env::args_os().skip(1).peekable();
+    let mut raw = std::env::args_os().skip(1).peekable();
     // The uninstaller runs this before it removes the files (installer/light-view.iss).
-    if args.peek().is_some_and(|a| a == UNINSTALL_CLEANUP) {
+    if raw.peek().is_some_and(|a| a == UNINSTALL_CLEANUP) {
         worker::delete_profile();
         return Ok(());
     }
-    let mut bench = false;
-    while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
+    let args = parse_args(raw);
+    if args.timing {
         timing::enable(start);
-        bench |= flag == "--bench";
     }
-    let initial = args.next().map(PathBuf::from);
+    let bench = args.bench;
+    let initial = args.initial.clone();
     // `--bench` (lv-bench): default settings, nothing saved, no single-instance check,
     // so a measurement neither depends on nor changes the user's settings and windows.
     let data = data_dir();
@@ -103,18 +105,21 @@ fn main() -> anyhow::Result<()> {
     strings::set(settings.language);
     // Originals a crashed save left under their backup names come back (ruling R2).
     if !bench {
-        if let Some(dir) = initial.as_deref().and_then(photo_folder) {
+        let first = initial
+            .as_deref()
+            .or(args.resize.first().map(PathBuf::as_path));
+        if let Some(dir) = first.and_then(photo_folder) {
             timing::step("recover-ms", || resize::save::recover_backups(&dir));
         }
     }
-    // Held until the window closes, so later launches forward to it.
-    let _guard = if settings.open_in_new_window || bench {
+    // Held until the window closes, so later launches forward to it. "새 창" applies to
+    // viewing only: every resize launch goes to the one window (spec §10, R4).
+    let _guard = if (settings.open_in_new_window && !args.is_resize()) || bench {
         None
     } else {
         let key = instance::own_instance_key();
-        match timing::step("instance-ms", || {
-            acquire_or_forward(initial.as_deref(), key.as_deref())
-        }) {
+        let items = forwarded_items(&args);
+        match timing::step("instance-ms", || acquire_or_forward(&items, key.as_deref())) {
             Launch::Forwarded => return Ok(()),
             Launch::Primary(guard) => Some(guard),
         }
@@ -122,7 +127,58 @@ fn main() -> anyhow::Result<()> {
     // COM for the UI thread, once (the shell's calls and the Open dialog), held until
     // the window is gone.
     let _com = shell::ComApartment::init();
-    window::run(initial, settings, settings_path)
+    window::run(initial, args.resize, settings, settings_path)
+}
+
+/// What this launch hands to a running window.
+fn forwarded_items(args: &Args) -> Vec<instance::Forwarded> {
+    if args.is_resize() {
+        args.resize
+            .iter()
+            .cloned()
+            .map(instance::Forwarded::Resize)
+            .collect()
+    } else {
+        args.initial
+            .iter()
+            .cloned()
+            .map(instance::Forwarded::Open)
+            .collect()
+    }
+}
+
+/// The command line, after `--uninstall-cleanup` was ruled out.
+#[derive(Debug, Default)]
+struct Args {
+    /// `--timing` (or `--bench`): print the start-up timings.
+    timing: bool,
+    /// `--bench` (lv-bench).
+    bench: bool,
+    /// The photo or folder to open.
+    initial: Option<PathBuf>,
+    /// `--resize <path>…` (Explorer's 크기 조정 verb): the photos for the resize screen.
+    resize: Vec<PathBuf>,
+}
+
+impl Args {
+    fn is_resize(&self) -> bool {
+        !self.resize.is_empty()
+    }
+}
+
+fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Args {
+    let mut args = args.peekable();
+    let mut parsed = Args::default();
+    while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
+        parsed.timing = true;
+        parsed.bench |= flag == "--bench";
+    }
+    if args.next_if(|a| a == RESIZE).is_some() {
+        parsed.resize = args.map(PathBuf::from).collect();
+    } else {
+        parsed.initial = args.next().map(PathBuf::from);
+    }
+    parsed
 }
 
 /// The folder of the photo (or the folder) the app was started with.
@@ -162,6 +218,46 @@ mod tests {
     use windows::Win32::System::Diagnostics::Debug::{
         GetErrorMode, SetErrorMode, THREAD_ERROR_MODE,
     };
+
+    use super::{parse_args, Args};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn args(list: &[&str]) -> Args {
+        parse_args(list.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn resize_flag_parses_paths() {
+        // Explorer's verb: `light-view.exe --resize "<path>"`, once per file (R4); more
+        // than one path after the flag is taken too.
+        let a = args(&["--resize", r"C:\p\a.jpg"]);
+        assert_eq!(a.resize, vec![PathBuf::from(r"C:\p\a.jpg")]);
+        assert_eq!(a.initial, None);
+        let a = args(&["--resize", "a.jpg", "b c.png"]);
+        assert_eq!(
+            a.resize,
+            vec![PathBuf::from("a.jpg"), PathBuf::from("b c.png")]
+        );
+        assert!(a.is_resize());
+        // Timing flags come first, as before.
+        let a = args(&["--timing", "--resize", "a.jpg"]);
+        assert!(a.timing && !a.bench);
+        assert_eq!(a.resize, vec![PathBuf::from("a.jpg")]);
+        // A plain launch is unchanged.
+        let a = args(&["--bench", "x.jpg"]);
+        assert!(a.timing && a.bench && !a.is_resize());
+        assert_eq!(a.initial, Some(PathBuf::from("x.jpg")));
+        assert_eq!(args(&[]).initial, None);
+        // The flag with nothing after it opens nothing.
+        let a = args(&["--resize"]);
+        assert!(!a.is_resize() && a.initial.is_none());
+        // `--resize` after a path is just another (ignored) argument.
+        assert_eq!(
+            args(&["a.jpg", "--resize"]).initial,
+            Some(PathBuf::from("a.jpg"))
+        );
+    }
 
     #[test]
     fn recovery_looks_in_the_photo_folder() {

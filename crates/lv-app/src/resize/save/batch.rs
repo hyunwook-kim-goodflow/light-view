@@ -80,6 +80,10 @@ impl ReplaceBatch {
         });
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the resize screen's toast (M6 Task 6) shows it")
+    )]
     pub fn len(&self) -> usize {
         self.items.len()
     }

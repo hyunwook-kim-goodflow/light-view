@@ -168,11 +168,15 @@ pub enum S {
     ToastUpdateAvailableEnd,
     BtnView,
     SettingsUpdateCheck,
+    // Resize (M6): the screen's name, the menu item and the drop question's button;
+    // the drop question. Noun forms, short.
+    Resize,
+    PromptDropMany,
 }
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 94] = [
+const ALL: [S; 96] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -267,6 +271,8 @@ const ALL: [S; 94] = [
     S::ToastUpdateAvailableEnd,
     S::BtnView,
     S::SettingsUpdateCheck,
+    S::Resize,
+    S::PromptDropMany,
 ];
 
 /// The text for `key` in `lang`.
@@ -414,6 +420,8 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::ToastUpdateAvailableEnd => (")이 나왔어요", " is out"),
         S::BtnView => ("보기", "View"),
         S::SettingsUpdateCheck => ("업데이트 확인", "Check for updates"),
+        S::Resize => ("크기 조정", "Resize"),
+        S::PromptDropMany => ("사진 여러 장", "Several photos"),
     };
     match lang {
         Lang::Ko => ko,
@@ -434,6 +442,19 @@ pub fn tf(key: S, args: &[&dyn Display]) -> String {
         s.push_str(&a.to_string());
     }
     s
+}
+
+/// "3장" / "3 photos" in the current language.
+pub fn photo_count(n: usize) -> String {
+    photo_count_in(current(), n)
+}
+
+fn photo_count_in(lang: Lang, n: usize) -> String {
+    match (lang, n) {
+        (Lang::Ko, _) => format!("{n}장"),
+        (Lang::En, 1) => "1 photo".to_owned(),
+        (Lang::En, _) => format!("{n} photos"),
+    }
 }
 
 /// "너무 커서 열 수 없어요 (30000×20000)": the text in `lang` with the pixel size appended.
@@ -487,7 +508,7 @@ mod tests {
     fn all_lists_every_key_once() {
         // The last variant is the sentinel: a key added to `S` after it must be
         // added to `ALL` too, or the tests above would skip it.
-        assert_eq!(ALL.last(), Some(&S::SettingsUpdateCheck));
+        assert_eq!(ALL.last(), Some(&S::PromptDropMany));
         for (i, a) in ALL.iter().enumerate() {
             assert!(!ALL[i + 1..].contains(a), "{a:?} listed twice");
         }
@@ -543,6 +564,17 @@ mod tests {
         assert_eq!(text(Lang::Ko, S::ScaledOpen), "축소해서 열었어요");
         assert_eq!(text(Lang::En, S::ScaledOpen), "Opened at reduced size");
         assert_eq!(text(Lang::Ko, S::ToastCopied), "복사했어요");
+    }
+
+    #[test]
+    fn resize_entry_texts() {
+        // The fixed wording (M6 global constraints): noun forms, short.
+        assert_eq!(text(Lang::Ko, S::Resize), "크기 조정");
+        assert_eq!(text(Lang::En, S::Resize), "Resize");
+        assert_eq!(text(Lang::Ko, S::PromptDropMany), "사진 여러 장");
+        assert_eq!(photo_count_in(Lang::Ko, 3), "3장");
+        assert_eq!(photo_count_in(Lang::En, 3), "3 photos");
+        assert_eq!(photo_count_in(Lang::En, 1), "1 photo");
     }
 
     #[test]

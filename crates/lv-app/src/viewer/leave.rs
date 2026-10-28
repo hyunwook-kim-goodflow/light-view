@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lv_core::command::Command;
 use lv_core::identity::FileIdentity;
+use lv_core::listing::FolderList;
 
 use super::{Redraw, Viewer};
 
@@ -139,6 +140,20 @@ impl Viewer {
         self.wanted.clear();
         self.prefetcher.request(&[]);
         Redraw::Full
+    }
+
+    /// Shows nothing: the empty start screen (the resize screen closing back to it).
+    pub fn close(&mut self) -> Redraw {
+        self.list = FolderList::default();
+        self.quarters = 0;
+        self.backward = false;
+        self.pending_leave = None;
+        self.clear_shown()
+    }
+
+    /// Drops the kept decode of `path` (the file was rewritten), so it is decoded again.
+    pub fn forget_decode(&mut self, path: &Path) {
+        self.prefetcher.invalidate(path);
     }
 
     /// Like `hide`, for good (the photo was deleted permanently).

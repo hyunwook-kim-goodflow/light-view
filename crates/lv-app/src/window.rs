@@ -33,6 +33,7 @@ use crate::menu::Menu;
 use crate::overlay::Overlay;
 use crate::placement;
 use crate::render::{self, Renderer};
+use crate::resize::ResizeState;
 use crate::settings_win::{self, SettingsWindow};
 use crate::start::{self, StartScreen};
 use crate::theme::{self, system_prefers_dark};
@@ -95,6 +96,8 @@ pub struct App {
     pub settings_win: Option<SettingsWindow>,
     /// The update question and the release found (spec §6.6).
     pub update: UpdateState,
+    /// The resize screen (M6): its session, estimates and save.
+    pub resize: ResizeState,
 }
 
 impl App {

@@ -2,11 +2,6 @@
 //! in place of the originals with a hidden backup that goes to the Recycle Bin later and
 //! an undo for the whole save.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the resize session (M6 Task 5) saves")
-)]
-
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -55,10 +50,6 @@ pub enum ItemResult {
         backup: PathBuf,
     },
     /// Not saved: no result meets the limit ("맞추기 불가").
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "the resize session (M6 Task 5) reports it")
-    )]
     CantFit,
     Failed(FailReason),
 }
@@ -320,6 +311,26 @@ fn next_backup() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The longer (in UTF-16 units) of the two paths a replace of `src` as `format` makes:
+/// its result and its backup, with the longest backup number. The Recycle Bin must be
+/// asked about this one (`Trash::has_recycle_bin`): near `MAX_PATH` it takes the shorter
+/// path and refuses the longer.
+pub fn longest_replace_path(src: &Path, format: OutputFormat) -> PathBuf {
+    let result = replace_target(src, format);
+    let units = |p: &Path| p.as_os_str().encode_wide().count();
+    match src.file_name() {
+        Some(name) => {
+            let backup = src.with_file_name(backup_name(name, std::process::id(), u32::MAX));
+            if units(&backup) > units(&result) {
+                backup
+            } else {
+                result
+            }
+        }
+        None => result,
+    }
+}
+
 /// `.<name>.lvbak-<pid>-<n>`.
 fn backup_name(name: &OsStr, pid: u32, n: u32) -> OsString {
     let mut backup = OsString::from(".");
@@ -544,6 +555,19 @@ mod tests {
                 .args(["/remove:d", &self.user])
                 .output();
         }
+    }
+
+    #[test]
+    fn longest_replace_path_is_the_backup() {
+        let src = Path::new(r"C:\p\IMG.HEIC");
+        let longest = longest_replace_path(src, OutputFormat::Jpeg);
+        assert_eq!(longest.parent(), src.parent());
+        let name = file_name(&longest);
+        assert!(
+            name.starts_with(".IMG.HEIC.lvbak-") && name.ends_with("-4294967295"),
+            "{name}"
+        );
+        assert!(parse_backup_name(longest.file_name().unwrap()).is_some());
     }
 
     #[test]

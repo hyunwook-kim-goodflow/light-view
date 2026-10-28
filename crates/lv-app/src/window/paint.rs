@@ -21,6 +21,7 @@ use super::App;
 const LOADING_SIZE_DIP: f32 = 13.0;
 const PILL_HEIGHT_DIP: f32 = 28.0;
 const PILL_PAD_DIP: f32 = 14.0;
+const RESIZE_PILL_TOP: f32 = 16.0;
 
 impl App {
     /// Uploads the shown image (or animation frame) if it changed since the last paint,
@@ -97,6 +98,10 @@ impl App {
         } else if loading {
             draw_pill(r, p, self.dark, (view_w, view_h), t(S::Loading));
         }
+        // The resize screen's placeholder until it has its own drawing (M6 Task 6).
+        if let Some(line) = self.resize.status_line() {
+            pill_at(r, p, self.dark, (view_w / 2.0, RESIZE_PILL_TOP), &line);
+        }
         if let Some(input) = toolbar {
             let view = ToolbarView {
                 input,
@@ -149,6 +154,17 @@ impl App {
 /// A small "불러오는 중…" or "저장하는 중…" pill centred in the image area: surface
 /// fill, plus a hairline border in dark mode (no shadows there).
 fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32), text: &str) {
+    pill_at(
+        r,
+        p,
+        dark,
+        (view_w / 2.0, (view_h - PILL_HEIGHT_DIP) / 2.0),
+        text,
+    );
+}
+
+/// The pill centred on `centre_x` with its top at `top`.
+fn pill_at(r: &mut Renderer, p: &Palette, dark: bool, (centre_x, top): (f32, f32), text: &str) {
     let run = TextRun {
         text,
         family: "Segoe UI",
@@ -158,7 +174,7 @@ fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, 
     };
     let text_w = r.measure_runs(&[run]).unwrap_or(80.0);
     let (w, h) = (text_w + 2.0 * PILL_PAD_DIP, PILL_HEIGHT_DIP);
-    let rect = ((view_w - w) / 2.0, (view_h - h) / 2.0, w, h);
+    let rect = (centre_x - w / 2.0, top, w, h);
     r.fill_round_rect(rect, h / 2.0, p.surface);
     if dark {
         r.stroke_round_rect(rect, h / 2.0, p.hairline, 1.0);
