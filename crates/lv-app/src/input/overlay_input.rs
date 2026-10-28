@@ -69,7 +69,7 @@ pub fn show_toast(app: &RefCell<App>, hwnd: HWND, make: impl FnOnce(u64) -> Toas
     unsafe { SetTimer(hwnd, TOAST_TIMER, ms as u32, None) };
     invalidate(hwnd);
     // A replaced "N장 대체 · 실행 취소" is final now.
-    crate::resize::screen::toast_check(app, hwnd);
+    crate::resize::toasts::toast_check(app, hwnd);
 }
 
 /// Input for the overlay, seen before everything else. An open dialog takes keys
@@ -216,7 +216,7 @@ pub fn overlay(
                 drop(a);
                 invalidate(hwnd);
                 // A replace whose toast went is final; a waiting report shows.
-                crate::resize::screen::toast_check(app, hwnd);
+                crate::resize::toasts::toast_check(app, hwnd);
             } else if let Some(t) = &a.overlay.toast {
                 // Fired early: wait out the rest.
                 let left = (t.shown_at_ms + t.duration_ms).saturating_sub(now).max(1);

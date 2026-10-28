@@ -210,6 +210,8 @@ pub enum S {
     ResizeReplaced,
     ResizeFailed,
     ResizeUndoIncomplete,
+    /// 원본 대체 refused for a photo opened at reduced size, in a save's summary.
+    ResizeScaledRefusal,
     ResizeResultNotRecycled,
     ResizeResultChanged,
     ResizeNotRecycled,
@@ -222,7 +224,7 @@ pub enum S {
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 139] = [
+const ALL: [S; 140] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -354,6 +356,7 @@ const ALL: [S; 139] = [
     S::ResizeReplaced,
     S::ResizeFailed,
     S::ResizeUndoIncomplete,
+    S::ResizeScaledRefusal,
     S::ResizeResultNotRecycled,
     S::ResizeResultChanged,
     S::ResizeNotRecycled,
@@ -545,7 +548,8 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::ResizeSaved => ("저장", "saved"),
         S::ResizeReplaced => ("대체", "replaced"),
         S::ResizeFailed => ("실패", "Failed"),
-        S::ResizeUndoIncomplete => ("실행 취소 불가", "Undo incomplete"),
+        S::ResizeUndoIncomplete => ("일부 복원 실패", "Not fully restored"),
+        S::ResizeScaledRefusal => ("축소본", "Reduced-size copy"),
         S::ResizeResultNotRecycled => ("결과 파일 휴지통 이동 실패", "Result not recycled"),
         S::ResizeResultChanged => ("결과 파일 변경됨", "Result changed"),
         S::ResizeNotRecycled => ("원본 휴지통 이동 실패", "Original not recycled"),

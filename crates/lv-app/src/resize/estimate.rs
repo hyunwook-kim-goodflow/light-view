@@ -17,6 +17,7 @@ use lv_core::resize::{
 };
 
 use super::session::{Estimate, Source};
+use super::thumb::{thumbnail, THUMB_EDGE};
 use crate::commands::HwndCell;
 use crate::worker::WorkerPool;
 
@@ -91,6 +92,8 @@ pub fn produce(
         bytes: file.len() as u64,
         animated,
         scaled,
+        // The filmstrip's tile, from this same decode (as the result will look).
+        thumb: thumbnail(&rgba, size, THUMB_EDGE).map(Arc::new),
     };
     (Some(source), make(&rgba, size, &file, format, spec, maker))
 }

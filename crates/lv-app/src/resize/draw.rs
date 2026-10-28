@@ -45,7 +45,11 @@ pub fn geometry(client: (f32, f32), side: SidebarSide, dip: f32, s: &ResizeSessi
     };
     let stage = stage_rect(view, side, dip);
     let layout = sidebar_layout(view, side, dip);
-    let notes: Vec<bool> = s.items.iter().map(|i| i.animated || i.scaled).collect();
+    let notes: Vec<bool> = s
+        .items
+        .iter()
+        .map(|i| i.animated || i.scaled || i.save_error.is_some())
+        .collect();
     let rows = list_rows(layout.list, &notes, s.current);
     Geometry {
         stage,
@@ -102,16 +106,25 @@ fn draw_stage(r: &mut Renderer, g: &Geometry, v: &ScreenView) {
             r.draw_glyph(t(rect), glyph, v.icon_family, 18.0, p.ink, false);
         }
     }
+    // The filmstrip: each photo's tile (its number until the tile is ready), the
+    // current one outlined in the highlighter.
     for (i, cell) in &g.parts.strip {
         let on = *i == s.current;
-        let (fill, color) = if on {
-            (p.highlighter, p.on_highlighter)
-        } else {
-            (p.surface2, p.ink2)
-        };
-        r.fill_round_rect(t(*cell), 3.0, fill);
-        let n = (i + 1).to_string();
-        r.draw_runs(t(*cell), &[run(&n, color, 11.0, on)], Align::Center);
+        match s.items.get(*i).and_then(|item| item.thumb.as_ref()) {
+            Some(th) => {
+                r.fill_round_rect(t(*cell), 3.0, p.surface2);
+                r.draw_thumb(th.id, th.size, &th.bgra, t(*cell));
+            }
+            None => {
+                r.fill_round_rect(t(*cell), 3.0, p.surface2);
+                let n = (i + 1).to_string();
+                r.draw_runs(t(*cell), &[run(&n, p.ink2, 11.0, on)], Align::Center);
+            }
+        }
+        if on {
+            let ring = (cell.x - 2.0, cell.y - 2.0, cell.w + 4.0, cell.h + 4.0);
+            r.stroke_round_rect(ring, 4.0, p.highlighter, 2.0);
+        }
     }
     let Some(item) = s.items.get(s.current) else {
         return;

@@ -1,34 +1,31 @@
 //! The resize screen in the window (M6 Task 6): its geometry, the sidebar's keys and
-//! clicks, the native number fields, and the toasts after a save ("N장 대체 · 실행
-//! 취소", the summary, what a commit or undo could not do).
+//! clicks and the native number fields; its toasts are in `toasts`.
 //!
 //! Like the rest of `resize`, every function takes the `RefCell<App>` and holds no
 //! borrow across Win32 calls that may re-enter the window procedure (SetFocus,
 //! SetWindowText, showing a toast).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 
 use lv_core::command::{Command, VK_ESCAPE, VK_RETURN};
-use lv_core::listing::same_path;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{SetBkColor, SetTextColor, HDC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, SetTimer, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, WM_CAPTURECHANGED, WM_COMMAND,
+    GetWindowRect, IsZoomed, KillTimer, SetTimer, SetWindowPos, EN_CHANGE, EN_KILLFOCUS,
+    EN_SETFOCUS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_COMMAND,
     WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_SETFOCUS, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use super::draw::{self, Geometry, ScreenView};
 use super::fields::{self, Fields, Wanted, WM_APP_RESIZE_FIELD};
-use super::saving::SaveSummary;
+use super::layout::MIN_SIDEBAR_H;
 use super::sidebar::{
     controls, stage_parts, stage_rect, tab_fields, Action, Ctl, Ctx, Field, Hit, Sidebar, FIELDS,
     VK_TAB,
 };
-use super::text::ToastText;
-use super::{go_to, leave, saving, set_memory, set_replace, step, BatchReport, ResizeState};
+use super::{go_to, leave, saving, set_memory, set_replace, step, ResizeState};
 use crate::commands;
 use crate::input;
 use crate::overlay::Toast;
@@ -36,7 +33,6 @@ use crate::strings;
 use crate::theme::palette;
 use crate::toolbar::Rect;
 use crate::uia::PxRect;
-use crate::viewer::Redraw;
 use crate::window::{invalidate, App};
 
 /// Typing in a field is taken this long after the last key.
@@ -127,6 +123,7 @@ pub fn sync(app: &RefCell<App>, hwnd: HWND) {
     });
     if relayout {
         input::sync_tooltips(app, hwnd);
+        grow_to_fit(app, hwnd);
     }
     let Ok(mut a) = app.try_borrow_mut() else {
         return;
@@ -172,6 +169,15 @@ pub fn sync(app: &RefCell<App>, hwnd: HWND) {
         .collect();
     // A field being typed in keeps its text; the others show the settings' value.
     let replace: Vec<bool> = FIELDS.iter().map(|f| fields.hwnd(*f) != focused).collect();
+    // A field losing its place (covered, or another tab) gives up the keyboard focus
+    // in the model too, so the window's WM_SETFOCUS does not hand it back.
+    let losing = FIELDS
+        .iter()
+        .zip(&wanted)
+        .any(|(f, w)| w.rect.is_none() && fields.hwnd(*f) == focused);
+    if losing {
+        a.resize.ui.sidebar.focus = Ctl::List;
+    }
     drop(a);
     // A field that goes away must not keep the focus.
     for (f, w) in FIELDS.iter().zip(&wanted) {
@@ -186,6 +192,31 @@ pub fn sync(app: &RefCell<App>, hwnd: HWND) {
     if let Ok(mut a) = app.try_borrow_mut() {
         if a.resize.is_open() {
             a.resize.ui.fields = Some(fields);
+        }
+    }
+}
+
+/// A window opened too short for the sidebar grows to its minimum height (not while
+/// maximized or full screen: those keep the screen's size).
+fn grow_to_fit(app: &RefCell<App>, hwnd: HWND) {
+    let Ok(short) = app
+        .try_borrow()
+        .map(|a| a.resize.is_open() && a.fullscreen.is_none() && a.client().1 < MIN_SIDEBAR_H)
+    else {
+        return;
+    };
+    // SAFETY: plain calls on our own window; no App borrow is held (WM_SIZE re-enters).
+    unsafe {
+        if !short || IsZoomed(hwnd).as_bool() {
+            return;
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        if let Some(h) = crate::placement::window_height_for(hwnd, MIN_SIDEBAR_H) {
+            let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+            let _ = SetWindowPos(hwnd, None, 0, 0, rc.right - rc.left, h, flags);
         }
     }
 }
@@ -278,6 +309,10 @@ pub fn on_message(
                 let Ctl::Field(f) = a.resize.ui.sidebar.focus else {
                     return None;
                 };
+                // Not into a field a dialog or the menu covers.
+                if a.overlay.dialog_open() || a.menu.is_open() {
+                    return None;
+                }
                 a.resize.ui.fields.as_ref().map(|x| x.hwnd(f))
             };
             if let Some(edit) = edit {
@@ -501,85 +536,4 @@ pub fn save(app: &RefCell<App>, hwnd: HWND) {
         }
         invalidate(hwnd);
     }
-}
-
-// ---- Toasts ----------------------------------------------------------------------
-
-/// A save ended (the screen closed): its summary, with [실행 취소] when it replaced
-/// photos.
-pub fn after_save(app: &RefCell<App>, hwnd: HWND) {
-    let Some((summary, undo)) = app.try_borrow_mut().ok().and_then(|mut a| {
-        let s = a.resize.last_save.take()?;
-        // "N장 대체" counts the photos its [실행 취소] brings back.
-        let n = a.resize.batch.as_ref().map_or(0, |b| b.len());
-        let undo = n > 0;
-        let replaced = if undo { n } else { s.replaced };
-        Some((SaveSummary { replaced, ..s }, undo))
-    }) else {
-        return;
-    };
-    input::show_toast(app, hwnd, |now| {
-        Toast::resize(ToastText::Summary(summary), undo, now)
-    });
-}
-
-/// After the toast changed or went: a replace whose "N장 대체 · 실행 취소" is no
-/// longer up is final (its originals go to the Recycle Bin), and once no toast is up
-/// the next report of a commit or undo is shown.
-pub fn toast_check(app: &RefCell<App>, hwnd: HWND) {
-    let Ok((commit, report)) = app.try_borrow_mut().map(|mut a| {
-        let now = a.pointer.now_ms();
-        let toast = a.overlay.toast.as_ref().filter(|t| t.visible(now));
-        let undo_up = toast.is_some_and(Toast::undoes_replace);
-        let free = toast.is_none();
-        let report = (free && !a.resize.reports.is_empty()).then(|| a.resize.reports.remove(0));
-        (a.resize.batch.is_some() && !undo_up, report)
-    }) else {
-        return;
-    };
-    if commit {
-        saving::commit_batch(app);
-    }
-    if let Some(r) = report {
-        let what = match r {
-            BatchReport::Unrecycled(v) => ToastText::Unrecycled(v),
-            BatchReport::Unrestored(v) => ToastText::Unrestored(v),
-        };
-        input::show_toast(app, hwnd, |now| Toast::resize(what, false, now));
-    }
-}
-
-/// [실행 취소] on "N장 대체": every replaced photo comes back (off the UI thread).
-pub fn undo(app: &RefCell<App>, hwnd: HWND) {
-    saving::undo_batch(app);
-    invalidate(hwnd);
-}
-
-/// An undo ended: the photos it touched are decoded again, and the viewer shows the
-/// original again if it showed one of them.
-pub fn undone(app: &RefCell<App>, hwnd: HWND, paths: &[(PathBuf, PathBuf)]) {
-    let redraw = {
-        let Ok(mut a) = app.try_borrow_mut() else {
-            return;
-        };
-        for (original, result) in paths {
-            a.viewer.forget_decode(original);
-            a.viewer.forget_decode(result);
-        }
-        let shown = a.viewer.current_path().map(std::path::Path::to_path_buf);
-        let back = shown.and_then(|c| {
-            paths
-                .iter()
-                .find(|(o, r)| same_path(o, &c) || same_path(r, &c))
-                .map(|(o, _)| o.clone())
-        });
-        match back {
-            Some(original) if !a.resize.is_open() => {
-                a.viewer.open(&original);
-                Redraw::Full
-            }
-            _ => Redraw::None,
-        }
-    };
-    commands::after(app, hwnd, redraw);
 }

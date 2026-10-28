@@ -40,6 +40,8 @@ pub mod screen;
 pub mod session;
 pub mod sidebar;
 pub mod text;
+pub mod thumb;
+pub mod toasts;
 
 use estimate::{ByteCache, Estimator, Job, Maker, ESTIMATE_THREADS};
 use save::batch::{ReplaceBatch, Unrecycled, Unrestored};
@@ -256,7 +258,8 @@ pub fn add(app: &RefCell<App>, hwnd: HWND, paths: Vec<PathBuf>) {
         }
         let opened = a.resize.session.is_none();
         if opened {
-            let memory = a.settings.resize.unwrap_or_default();
+            let mut memory = a.settings.resize.unwrap_or_default();
+            memory.quality = sidebar::snap_quality(memory.quality);
             // The shown photo's pending rotation comes back when the screen closes.
             let quarters = a.viewer.view_rotation_quarters();
             a.resize.open_session(shown, quarters, memory);

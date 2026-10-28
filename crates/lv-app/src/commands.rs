@@ -312,7 +312,7 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             true
         }
         OverlayEvent::Toast(ToastAction::UndoReplace) => {
-            resize::screen::undo(app, hwnd);
+            resize::toasts::undo(app, hwnd);
             true
         }
         OverlayEvent::Toast(ToastAction::ViewUpdate) => {

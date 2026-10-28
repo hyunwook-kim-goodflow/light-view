@@ -289,10 +289,17 @@ fn handle(
     match msg {
         WM_ERASEBKGND => Some(LRESULT(1)),
         WM_GETMINMAXINFO => {
+            // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
+            let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
             if let Some(width) = placement::min_window_width(hwnd) {
-                // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
-                let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize.x = mmi.ptMinTrackSize.x.max(width);
+            }
+            // The resize screen's sidebar needs its height (its buttons never overlap).
+            if crate::resize::is_open(app) {
+                let min = crate::resize::layout::MIN_SIDEBAR_H;
+                if let Some(height) = placement::window_height_for(hwnd, min) {
+                    mmi.ptMinTrackSize.y = mmi.ptMinTrackSize.y.max(height);
+                }
             }
             Some(LRESULT(0))
         }

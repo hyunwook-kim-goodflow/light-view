@@ -263,7 +263,8 @@ fn clicks_act_on_release_over_the_pressed_part() {
     let hit = l.hit(x, y, &c, &rows);
     assert_eq!(hit, Some(Hit::Option(Ctl::Tabs, 2)));
     s.press(hit);
-    assert_eq!(s.focus, Ctl::Tabs);
+    // A mouse pick leaves the keyboard focus where it was (I4).
+    assert_eq!(s.focus, Ctl::List);
     let Action::Memory(m) = s.release(hit, &c) else {
         panic!("tab");
     };
@@ -356,4 +357,72 @@ fn uia_names_name_every_field() {
         Ctl::SaveMode.option_labels(Lang::En),
         ["New file", "Replace original"]
     );
+}
+
+/// I4: a choice picked with the mouse never takes ← →; they step photos. Only a
+/// choice reached with Tab changes its option with them.
+#[test]
+fn mouse_pick_leaves_arrows_to_photos() {
+    let c = ctx(ResizeMemory::default());
+    let mut s = Sidebar::default();
+    s.press(Some(Hit::Option(Ctl::Format, 1)));
+    let Action::Memory(m) = s.release(Some(Hit::Option(Ctl::Format, 1)), &c) else {
+        panic!("pick");
+    };
+    assert_eq!(m.format, ResizeFormat::Png);
+    let c = ctx(m);
+    assert_eq!(s.on_key(VK_RIGHT, NONE, false, &c), Some(Action::Step(1)));
+    assert_eq!(s.on_key(VK_LEFT, NONE, false, &c), Some(Action::Step(-1)));
+    // Through UI Automation too.
+    s.invoke(Hit::Option(Ctl::Tabs, 2), &c);
+    assert_eq!(s.on_key(VK_RIGHT, NONE, false, &c), Some(Action::Step(1)));
+    // A pick while a field had the focus moves it to the list.
+    let mut s = Sidebar {
+        focus: Ctl::Field(Field::Pixels),
+        ..Sidebar::default()
+    };
+    s.press(Some(Hit::Option(Ctl::Format, 0)));
+    assert_eq!(s.focus, Ctl::List);
+    // Reached with Tab, the choice takes them.
+    let mut s = Sidebar {
+        focus: Ctl::Axis,
+        ..Sidebar::default()
+    };
+    s.on_key(VK_TAB, NONE, false, &c);
+    assert_eq!(s.focus, Ctl::Format);
+    assert!(matches!(
+        s.on_key(VK_LEFT, NONE, false, &c),
+        Some(Action::Memory(_))
+    ));
+}
+
+/// M9: a fixed quality from the settings file that is not offered snaps to one that is.
+#[test]
+fn odd_qualities_snap_to_an_offered_one() {
+    assert_eq!(snap_quality(None), None);
+    assert_eq!(snap_quality(Some(85)), Some(90));
+    assert_eq!(snap_quality(Some(84)), Some(80));
+    assert_eq!(snap_quality(Some(100)), Some(90));
+    assert_eq!(snap_quality(Some(60)), Some(60));
+    assert_eq!(snap_quality(Some(64)), Some(60));
+    let m = ResizeMemory {
+        quality: snap_quality(Some(72)),
+        ..ResizeMemory::default()
+    };
+    assert_eq!(Ctl::Quality.selected(&m, false), Some(3));
+}
+
+/// M1: at the minimum height the list keeps a row with a note and nothing overlaps.
+#[test]
+fn minimum_height_fits_every_row() {
+    for side in [SidebarSide::Left, SidebarSide::Right] {
+        for w in [700.0, 1200.0] {
+            let l = sidebar_layout(view(w, MIN_SIDEBAR_H), side, 1.0);
+            assert!(l.list.y >= l.estimate.y + l.estimate.h - 0.01);
+            assert!(l.list.h + 0.01 >= LIST_ROW_H + LIST_NOTE_H, "{:?}", l.list);
+            assert!(l.total.y + l.total.h <= l.cancel.y);
+            assert!(l.metadata.label.y + l.metadata.label.h <= l.list.y + 0.01);
+            assert_eq!(list_rows(l.list, &[true, false], 0).len(), 1);
+        }
+    }
 }
