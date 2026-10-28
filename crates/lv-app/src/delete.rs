@@ -196,7 +196,7 @@ fn check(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
 /// A regular file (no folder, link or junction) with the identity `id`. A reparse point
 /// passes only with a tag that keeps it a plain file ([`file_like_reparse_tag`]), such as a
 /// OneDrive placeholder.
-fn check_file(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
+pub(crate) fn check_file(path: &Path, id: &FileIdentity) -> Result<(), Refusal> {
     let ext = to_extended_path(path);
     let meta = fs::symlink_metadata(&ext).map_err(|_| Refusal::Changed)?;
     if !meta.is_file() {
@@ -473,28 +473,25 @@ fn refused(app: &RefCell<App>, hwnd: HWND, r: &Refusal) {
     input::show_toast(app, hwnd, |now| Toast::new(key, now));
 }
 
+/// A Recycle Bin for tests, shared with the resize save's tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
-    use lv_core::identity::capture;
-    use lv_core::listing::FolderList;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::mpsc::{channel, Receiver};
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
-    type Reported = (PathBuf, Result<(), CommitError>);
+    pub(crate) type Reported = (PathBuf, Result<(), CommitError>);
 
     /// Moves "recycled" files into its own folder, synchronously, through `commit`.
     #[derive(Clone)]
-    struct FakeTrash {
-        bin: PathBuf,
-        has_bin: bool,
-        results: Rc<RefCell<Vec<Reported>>>,
+    pub(crate) struct FakeTrash {
+        pub(crate) bin: PathBuf,
+        pub(crate) has_bin: bool,
+        pub(crate) results: Rc<RefCell<Vec<Reported>>>,
     }
 
     impl FakeTrash {
-        fn new(dir: &Path, has_bin: bool) -> FakeTrash {
+        pub(crate) fn new(dir: &Path, has_bin: bool) -> FakeTrash {
             let bin = dir.join("bin");
             fs::create_dir(&bin).unwrap();
             FakeTrash {
@@ -504,7 +501,7 @@ mod tests {
             }
         }
 
-        fn binned(&self) -> Vec<String> {
+        pub(crate) fn binned(&self) -> Vec<String> {
             let mut v: Vec<String> = fs::read_dir(&self.bin)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -529,6 +526,17 @@ mod tests {
 
         fn flush(&self, _timeout: Duration) {}
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lv_core::identity::capture;
+    use lv_core::listing::FolderList;
+    use std::sync::mpsc::{channel, Receiver};
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+    use fake::{FakeTrash, Reported};
 
     struct Folder {
         dir: tempfile::TempDir,
