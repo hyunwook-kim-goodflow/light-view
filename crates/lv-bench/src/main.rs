@@ -169,6 +169,8 @@ fn run_resize(case: &str, args: &Args, folder: &Path) -> Result<CaseResult, Stri
     let mut samples = Vec::new();
     for i in 0..args.runs {
         let sample = run::measure_resize(&args.app, &files, webp)?;
+        all_ready(&sample.steps, RESIZE_PHOTOS)
+            .map_err(|e| format!("{case}: run {}: {e}", i + 1))?;
         if args.verbose {
             eprintln!(
                 "  run {}: peak {:.0} MB sampled (workers {:.0} MB), app's own peak {:.0} MB; {}",
@@ -210,6 +212,19 @@ fn run_resize(case: &str, args: &Args, folder: &Path) -> Result<CaseResult, Stri
             ("peak_private_mb", report::median(&mut peak)),
         ],
     ))
+}
+
+/// Whether an estimates line says every one of `photos` photos got a result: a photo
+/// that failed or could not fit also ends the wait, and must not pass as a fast run.
+fn all_ready(steps: &[(String, f64)], photos: usize) -> Result<(), String> {
+    let value = |name: &str| steps.iter().find(|(n, _)| n == name).map(|s| s.1);
+    match (value("photos"), value("ready")) {
+        (Some(p), Some(r)) if p == photos as f64 && r == photos as f64 => Ok(()),
+        (Some(p), Some(r)) => Err(format!(
+            "{r} of {p} photos have an estimate, {photos} expected (a failed or 맞추기 불가 estimate?)"
+        )),
+        _ => Err("the estimates line has no photos= or ready=".into()),
+    }
 }
 
 /// The picture a case opens, written into `folder`; `None` (with a note) for a case
@@ -312,4 +327,31 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         args.cases = CASES.iter().map(|c| c.to_string()).collect();
     }
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_ready;
+
+    fn line(photos: f64, ready: f64) -> Vec<(String, f64)> {
+        vec![
+            ("estimates-done-ms".to_string(), 2400.0),
+            ("photos".to_string(), photos),
+            ("ready".to_string(), ready),
+        ]
+    }
+
+    #[test]
+    fn a_resize_run_counts_only_when_every_photo_is_ready() {
+        assert!(all_ready(&line(10.0, 10.0), 10).is_ok());
+        // Failed or 맞추기 불가 estimates end the wait too, but are not a measurement.
+        assert!(all_ready(&line(10.0, 9.0), 10)
+            .unwrap_err()
+            .contains("9 of 10"));
+        assert!(all_ready(&line(0.0, 0.0), 10).is_err());
+        // Fewer photos joined the session than were opened.
+        assert!(all_ready(&line(9.0, 9.0), 10).is_err());
+        // An app too old to say how many are ready.
+        assert!(all_ready(&line(10.0, 10.0)[..2], 10).is_err());
+    }
 }

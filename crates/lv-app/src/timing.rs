@@ -10,10 +10,11 @@
 //!
 //! On the resize screen a second line follows once every photo has its estimate:
 //!
-//! `estimates-done-ms=2400 photos=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640`
+//! `estimates-done-ms=2400 photos=10 ready=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640`
 //!
-//! (times since the start; `peak-private-mb` is this process's highest private bytes so
-//! far, the HEIF and WebP workers not included).
+//! (times since the start; `ready` counts the photos with a result, not 맞추기 불가 or a
+//! failure; `peak-private-mb` is this process's highest private bytes so far, the HEIF
+//! and WebP workers not included).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -97,9 +98,10 @@ pub fn first_image_presented() {
     emit(&format_line(elapsed, private_mb(), &steps));
 }
 
-/// Call when a resize estimate arrived, with the session's photo count and how many
-/// still wait for theirs. The first time none waits, prints the estimates line.
-pub fn estimate_arrived(photos: usize, pending: usize) {
+/// Call when a resize estimate arrived, with the session's photo count, how many still
+/// wait for theirs and how many have a result. The first time none waits, prints the
+/// estimates line.
+pub fn estimate_arrived(photos: usize, pending: usize, ready: usize) {
     let Some(start) = START.get() else { return };
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let first = *FIRST_ESTIMATE.get_or_init(|| ms);
@@ -111,14 +113,24 @@ pub fn estimate_arrived(photos: usize, pending: usize) {
     emit(&format_estimates_line(
         ms,
         photos,
+        ready,
         first,
+        // PeakPagefileUsage is the peak of the commit charge, which for a process is its
+        // private bytes: the peak of PrivateUsage.
         mem.map(|c| (mb(c.PrivateUsage), mb(c.PeakPagefileUsage))),
     ));
 }
 
-fn format_estimates_line(ms: f64, photos: usize, first: f64, mem: Option<(u64, u64)>) -> String {
-    let mut line =
-        format!("estimates-done-ms={ms:.0} photos={photos} first-estimate-ms={first:.0}");
+fn format_estimates_line(
+    ms: f64,
+    photos: usize,
+    ready: usize,
+    first: f64,
+    mem: Option<(u64, u64)>,
+) -> String {
+    let mut line = format!(
+        "estimates-done-ms={ms:.0} photos={photos} ready={ready} first-estimate-ms={first:.0}"
+    );
     if let Some((now, peak)) = mem {
         line.push_str(&format!(" private-mb={now} peak-private-mb={peak}"));
     }
@@ -192,12 +204,12 @@ mod tests {
     #[test]
     fn estimates_line_names_its_values() {
         assert_eq!(
-            format_estimates_line(2400.4, 10, 519.6, Some((310, 640))),
-            "estimates-done-ms=2400 photos=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640"
+            format_estimates_line(2400.4, 10, 9, 519.6, Some((310, 640))),
+            "estimates-done-ms=2400 photos=10 ready=9 first-estimate-ms=520 private-mb=310 peak-private-mb=640"
         );
         assert_eq!(
-            format_estimates_line(9.0, 1, 9.0, None),
-            "estimates-done-ms=9 photos=1 first-estimate-ms=9"
+            format_estimates_line(9.0, 1, 0, 9.0, None),
+            "estimates-done-ms=9 photos=1 ready=0 first-estimate-ms=9"
         );
     }
 

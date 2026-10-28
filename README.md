@@ -1,6 +1,6 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Since M5 it draws images larger than a GPU texture in tiles with mipmaps, opens JPEGs over the memory limit at reduced size (marked "Opened at reduced size"), runs the HEIC worker in an AppContainer where the install folder allows it, keeps local crash records, and has an opt-in update check (the only network use). M5 measurements on one laptop: 12 MP JPEG first pixel about 290 ms (target 200 ms, not met) and about 294 MB memory (target 300 MB); see "현재 수치". Since M6 it resizes photos for upload: a resize screen (Explorer right-click "Resize with light-view" in the installed copy, the in-app menu, or several photos dropped on the window) with resolution, file-size and scale targets, JPEG/PNG/WebP output, location removal on by default, and "Replace original" with an undo that keeps the original until the toast is gone. M6 measurement: ten 12 MP JPEGs to 1920 px JPEG estimated in about 3.8 s with a peak of about 603 MB (targets 10 s / 600 MB; memory just over). Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Since M5 it draws images larger than a GPU texture in tiles with mipmaps, opens JPEGs over the memory limit at reduced size (marked "Opened at reduced size"), runs the HEIC worker in an AppContainer where the install folder allows it, keeps local crash records, and has an opt-in update check (the only network use). M5 measurements on one laptop: 12 MP JPEG first pixel about 290 ms (target 200 ms, not met) and about 294 MB memory (target 300 MB); see "현재 수치". Since M6 it resizes photos for upload: a resize screen (Explorer right-click "Resize with light-view" in the installed copy, the in-app menu, or several photos dropped on the window) with resolution, file-size and scale targets, JPEG/PNG/WebP output, location removal on by default, and "Replace original" with an undo that keeps the original until the toast is gone. M6 measurement: ten 12 MP JPEGs to 1920 px JPEG estimated in about 3.8 s with a peak of about 604 MB (targets 10 s / 600 MB; memory just over). Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
@@ -51,6 +51,11 @@ M6(크기 조정)까지 끝났어요. 아직 GitHub에 올리거나 릴리스를
 - 알림이 사라지거나 앱을 닫으면 백업(원본)을 **휴지통**으로 보내요. 영구 삭제는 하지 않아요. 휴지통이 받지 않으면 원본을 `<이름> (원본).<확장자>`로 남겨요.
 - 어느 단계에서 실패하면 그 사진은 원래 상태로 되돌리고 실패로 표시해요. 앱이 도중에 죽으면 다음 실행 때 남은 `*.lvbak-*`를 지우지 않고, 원래 이름이 비어 있으면 되돌리고 아니면 `(원본)`으로 보이게 해요.
 - **원본 대체를 막는 경우(사이드바에 이유 표시):** 휴지통이 없는 위치(네트워크, 이동식 드라이브, 긴 경로 등), 애니메이션 원본, 메모리 한도 때문에 축소해서 연 원본.
+
+### 알려진 문제 (M6)
+
+- `--resize`로 띄운 창의 제목이 크기 조정 화면의 장수가 아니라 뒤에서 연 보기 폴더의 위치를 보여 줘요(예: 화면은 1 / 3인데 제목은 "a.jpg · 1 / 7"). 보기가 첫 사진의 폴더를 함께 열기 때문이에요.
+- 맞추기 불가인 사진만 남으면 [저장 (0장)]이 눌리는 모양으로 남아요(눌러도 저장할 것이 없어요).
 
 ### 위치 정보 제거
 
@@ -176,18 +181,18 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version 0.1.0
 
 ### M6 (lv-bench, 크기 조정)
 
-`resize10x12mp`: 12 MP JPEG(4032×3024, 합성) 10장을 `lv-app.exe --bench --resize <10장>`으로 크기 조정 화면에 열고(기본 설정: 해상도, 긴 변 1920, JPEG 원본 수준) 모든 예상이 나오기까지의 시간과 앱 + 작업자의 최대 개인 메모리를 재요. `resize10x12mp_webp`는 같은 것을 WebP로 해요(사진마다 전체 픽셀을 WebP 작업자에 한 번 보내고, 맞추기는 작업자가 해요). JSON 값은 `estimates_ms`(시작부터 마지막 예상까지), `first_estimate_ms`(첫 예상까지), `peak_private_mb`(20 ms마다 잰 앱 + 작업자 합과 윈도우가 센 앱 자신의 최대치 중 큰 값)예요. `--check`는 `_ms` 값에 +50 ms, 그 밖에는 +30 MB 여유를 줘요.
+`resize10x12mp`: 12 MP JPEG(4032×3024, 합성) 10장을 `lv-app.exe --bench --resize <10장>`으로 크기 조정 화면에 열고(기본 설정: 해상도, 긴 변 1920, JPEG 원본 수준) 모든 예상이 나오기까지의 시간과 앱 + 작업자의 최대 개인 메모리를 재요. `resize10x12mp_webp`는 같은 것을 WebP로 해요(사진마다 전체 픽셀을 WebP 작업자에 한 번 보내고, 맞추기는 작업자가 해요). JSON 값은 `estimates_ms`(시작부터 마지막 예상까지), `first_estimate_ms`(첫 예상까지), `peak_private_mb`(20 ms마다 잰 앱 + 작업자 합과 윈도우가 센 앱 자신의 최대치 중 큰 값)예요. `--check`는 `_ms` 값에 +50 ms, 그 밖에는 +30 MB 여유를 줘요. 앱이 찍는 줄의 `photos=`와 `ready=`(결과가 나온 사진 수, 맞추기 불가·실패는 빠짐)가 모두 10이 아니면 그 실행은 오류로 끝나요(빨리 실패한 예상이 빠른 측정으로 보이지 않게).
 
 측정 환경: i7-1360P, Windows 11, release 빌드(`+crt-static`, 포터블 폴더 구성, AppContainer 없이 낮은 무결성 샌드박스), **AC 전원**, 2026-10-28, `--runs 5` 중앙값.
 
 | 경우 | 모든 예상(ms) | 첫 예상(ms) | 최대 개인 메모리(MB) | 목표 | 판정 |
 |---|---|---|---|---|---|
-| resize10x12mp (JPEG) | 3796 (5회 3662–4579) | 1006 | 603 (거의 앱만, 작업자 없음) | 10 s / 600 MB | 시간 달성, 메모리 **3 MB 넘음** |
-| resize10x12mp_webp | 7300 (5회 7133–7897) | 1685 | 687 (앱 최대 약 484 + WebP 작업자 최대 약 296) | — | 참고(10 s 안) |
+| resize10x12mp (JPEG) | 3780 (5회 3693–4027) | 1006 | 604 (거의 앱만, 작업자 없음) | 10 s / 600 MB | 시간 달성, 메모리 **4 MB 넘음** |
+| resize10x12mp_webp | 7307 (5회 7122–7486) | 1642 | 686 (같은 순간 앱 + 작업자 합의 최대. 앱만의 최대 약 483, 작업자만의 최대 약 296은 다른 때라 더하면 안 돼요) | — | 참고(10 s 안) |
 
-같은 빌드로 `--runs 3 --case jpeg12mp --case resize10x12mp --check crates\lv-bench\baseline.json`은 통과했어요(jpeg12mp 285 ms / 245 ms / 308 MB). 두 크기 조정 줄을 `baseline.json`에 더했어요.
+같은 빌드로 `--runs 3 --case jpeg12mp --case resize10x12mp --check crates\lv-bench\baseline.json`은 통과했어요(jpeg12mp 285 ms / 245 ms / 308 MB). 두 크기 조정 줄을 `baseline.json`에 더했어요(모든 실행에서 10장 모두 결과가 나왔어요, `ready=10`). `--check`는 회귀만 잡아요: 메모리는 기준값의 1.5배(604 MB면 약 906 MB)를 넘어야 실패하고, 600 MB 목표를 지키는지는 검사하지 않아요.
 
-**메모리가 목표를 넘는 이유:** 예상은 두 장씩 동시에 만들고, 한 장마다 12 MP를 디코딩한 BGRA(약 48 MB)와 그것을 바꾼 RGBA(약 48 MB), 파일 바이트, 줄인 결과와 인코딩 버퍼를 함께 들고 있어요. 그래서 두 장이 겹치는 동안 앱만 약 600 MB가 되고(예상이 다 나온 뒤에는 약 288 MB로 내려가요), 이 PC의 기본 메모리 한도(실제 메모리의 1/4, 최대 2 GB) 안이지만 600 MB 목표는 조금 넘어요. WebP는 앱 쪽이 더 작지만(약 484 MB) 사진마다 전체 RGBA를 작업자에 보내므로 작업자가 약 296 MB를 더 써요. 줄이려면 디코딩 결과를 RGBA로 바꾸지 않고 바로 줄이거나(한 장에 약 48 MB), 동시에 만드는 장수를 메모리 한도에 따라 1장으로 낮추는 방법이 있어요.
+**메모리가 목표를 넘는 이유:** 예상은 두 장씩 동시에 만들고, 한 장마다 12 MP를 디코딩한 BGRA(약 48 MB)와 그것을 바꾼 RGBA(약 48 MB), 파일 바이트, 줄인 결과와 인코딩 버퍼를 함께 들고 있어요. 그래서 두 장이 겹치는 동안 앱만 약 600 MB가 되고(예상이 다 나온 뒤에는 약 288 MB로 내려가요), 이 PC의 기본 메모리 한도(실제 메모리의 1/4, 최대 2 GB) 안이지만 600 MB 목표는 조금 넘어요. WebP는 앱 쪽이 더 작지만(약 483 MB) 사진마다 전체 RGBA를 작업자에 보내므로 작업자가 약 296 MB를 더 써요. 줄이려면 디코딩 결과를 RGBA로 바꾸지 않고 바로 줄이거나(한 장에 약 48 MB), 동시에 만드는 장수를 메모리 한도에 따라 1장으로 낮추는 방법이 있어요.
 
 ### M6 smoke (포터블판)
 
@@ -315,7 +320,7 @@ M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU
 - (M4) **창 두 개에서 설정:** "새 창"으로 창을 두 개 띄우고 각각 다른 설정(예: 한쪽은 언어, 다른 쪽은 메모리 한도)을 바꾼 뒤 둘 다 닫아도, `settings.toml`에 두 변경이 모두 남아 있나요
 - (M4) 실제 카메라·아이폰·갤럭시 사진(HEIC 포함)에서 EXIF 카드의 날짜, 카메라, 노출, 위치가 맞게 나오나요(HEIC의 EXIF는 EXIF가 든 샘플이 없어 자동 테스트로 확인하지 못했어요)
 - (M4) 다크 모드에서 메뉴, EXIF 카드, 정보 대화상자, 설정 창의 색과 테두리가 자연스럽나요
-- (M6) **크기 조정 문구:** 정해진 목록 밖에서 고른 문구가 괜찮나요. 사이드바 "기준"/"Based on", "출력"/"Output", "메타데이터"/"Metadata", "예상 불가"/"No estimate", 끌어 놓기 질문 "사진 여러 장"/"Several photos", "필름 띠"/"Filmstrip", 실패 이유 "휴지통 없는 위치"/"No Recycle Bin here", "쓰기 불가 위치"/"Can't write here", "원본 변경됨"/"Original changed", "최대 용량 초과"/"Over max size", "저장 실패"/"Save failed", "축소본"/"Reduced-size copy", 실행 취소·정리 알림 "일부 복원 실패"/"Not fully restored", "결과 파일 휴지통 이동 실패"/"Result not recycled", "결과 파일 변경됨"/"Result changed", "원본 휴지통 이동 실패"/"Original not recycled", "원본은 {이름}로 보관"/"Original kept as {name}", 저장 알림 "N장 저장"/"N saved"
+- (M6) **크기 조정 문구:** 정해진 목록 밖에서 고른 문구가 괜찮나요. 사이드바 "기준"/"Based on", "출력"/"Output", "메타데이터"/"Metadata", "예상 불가"/"No estimate", 끌어 놓기 질문 "사진 여러 장"/"Several photos", "필름 띠"/"Filmstrip", 실패 이유 "휴지통 없는 위치"/"No Recycle Bin here", "쓰기 불가 위치"/"Can't write here", "원본 변경됨"/"Original changed", "최대 용량 초과"/"Over max size", "저장 실패"/"Save failed", "축소본"/"Reduced-size copy", 실행 취소·정리 알림 "일부 복원 실패"/"Not fully restored", "결과 파일 휴지통 이동 실패"/"Result not recycled", "결과 파일 변경됨"/"Result changed", "원본 휴지통 이동 실패"/"Original not recycled", "원본은 {이름}로 보관"/"Original kept as {name}", 저장 알림 "N장 저장"/"N saved"·"N장 대체"/"N replaced"·"N장 실패"/"Failed: N"·"N장 맞추기 불가"/"Can't fit: N"(조각 "저장"/"saved", "대체"/"replaced", "실패"/"Failed"), 예상 크기 앞의 "약 "/"≈ "
 - (M6) **업로드 사이트에서 결과 확인:** 실제로 쓰는 사이트에 크기 조정 결과(JPEG·WebP, 용량 탭 결과)를 올려서 받아 주고, 방향이 맞고, 위치가 나오지 않나요. 사이트가 MB를 1,048,576바이트로 세면 결과가 조금 더 작을 뿐이에요
 - (M6) **크기 조정 끌어 놓기:** 탐색기에서 사진 3장을 light-view 창에 끌어 놓으면 "사진 여러 장 · 보기 / 크기 조정"이 나오고, 크기 조정 화면이 열려 있을 때 끌어 놓으면 목록에 더해지나요(개발 중에는 끌어 놓기를 흉내 내지 않아 확인하지 못했어요)
 - (M6) **우클릭으로 16장 이상:** 설치판에서 16장 이상 고르고도 "light-view로 크기 조정"이 메뉴에 나오고 한 화면에 모두 모이나요
