@@ -318,6 +318,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lv-webp"
+version = "0.1.0"
+dependencies = [
+ "image",
+]
+
+[[package]]
 name = "lv-worker"
 version = "0.1.0"
 dependencies = [
@@ -325,6 +332,7 @@ dependencies = [
  "lv-heif",
  "lv-ipc",
  "lv-jpegtran",
+ "lv-webp",
  "windows",
 ]
 

@@ -44,6 +44,35 @@ pub fn user_path(path: &Path) -> PathBuf {
     PathBuf::from(OsString::from_wide(&rest))
 }
 
+/// `path` with every short (8.3) name expanded to the real one, in user form. The shell
+/// may hand over a long path by its 8.3 form; listed by the real names, the photo would
+/// show twice in its folder and a resized copy would take the short name. A path that
+/// cannot be read is returned unchanged.
+pub fn long_form(path: &Path) -> PathBuf {
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let ext = HSTRING::from(lv_core::identity::to_extended_path(path).as_os_str());
+    let mut buf = vec![0u16; ext.len() + 1];
+    loop {
+        // SAFETY: `ext` is NUL-terminated and `buf` is a live buffer passed with its
+        // length.
+        let len = unsafe { GetLongPathNameW(&ext, Some(&mut buf)) } as usize;
+        if len == 0 {
+            return path.to_path_buf();
+        }
+        if len < buf.len() {
+            let long = user_path(&PathBuf::from(OsString::from_wide(&buf[..len])));
+            // Kept as given when it only differs by the `\\?\` prefix.
+            return if long.as_os_str() == user_path(path).as_os_str() {
+                path.to_path_buf()
+            } else {
+                long
+            };
+        }
+        // Too small: `len` is the size needed, with the NUL.
+        buf.resize(len, 0);
+    }
+}
+
 /// COM on this thread as a single-threaded apartment, as the shell's functions and
 /// dialogs need; uninitialized when dropped. The UI thread makes one at start-up
 /// (`main`) and holds it until the window is gone, so the calls below need no setup of

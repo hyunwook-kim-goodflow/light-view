@@ -18,6 +18,7 @@ pub const APP_FOLDER: &str = "light-view";
 
 const SETTINGS_FILE: &str = "settings.toml";
 const CRASHES_FOLDER: &str = "crashes";
+const LIVE_BACKUPS_FOLDER: &str = "live-backups";
 
 /// Where this copy keeps its data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,16 @@ impl DataDir {
         Some(self.root(local_app_data)?.join(CRASHES_FOLDER))
     }
 
+    /// The folder listing the folders that hold replace backups not yet committed, for
+    /// crash recovery at the next start. Like the crash records it stays on this PC:
+    /// `%LOCALAPPDATA%\light-view\live-backups`, or `data\live-backups` when portable.
+    pub fn live_backups_dir(
+        &self,
+        local_app_data: impl FnOnce() -> Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        Some(self.root(local_app_data)?.join(LIVE_BACKUPS_FOLDER))
+    }
+
     fn root(&self, known_folder: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
         match self {
             DataDir::Portable(dir) => Some(dir.clone()),
@@ -88,6 +99,10 @@ mod tests {
             Some(expected.join("settings.toml"))
         );
         assert_eq!(data.crash_dir(never), Some(expected.join("crashes")));
+        assert_eq!(
+            data.live_backups_dir(never),
+            Some(expected.join("live-backups"))
+        );
     }
 
     #[test]
@@ -109,8 +124,13 @@ mod tests {
             data.crash_dir(|| Some(local.clone())),
             Some(local.join("light-view").join("crashes"))
         );
+        assert_eq!(
+            data.live_backups_dir(|| Some(local.clone())),
+            Some(local.join("light-view").join("live-backups"))
+        );
         // No profile folder: no settings file, no crash records.
         assert_eq!(data.settings_file(|| None), None);
         assert_eq!(data.crash_dir(|| None), None);
+        assert_eq!(data.live_backups_dir(|| None), None);
     }
 }

@@ -155,6 +155,8 @@ pub fn open_dialog(app: &RefCell<App>, hwnd: HWND) {
     if let Some(path) = picked.or(forwarded) {
         commands::open(app, hwnd, &path);
     }
+    // Photos sent to the resize screen while the dialog was up.
+    crate::resize::flush_queued(app, hwnd);
 }
 
 /// The settings window, disabled while the modal Open dialog is up (that dialog

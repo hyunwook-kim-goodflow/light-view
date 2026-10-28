@@ -22,6 +22,7 @@ use crate::clipboard;
 use crate::commands;
 use crate::input;
 use crate::overlay::Toast;
+use crate::resize;
 use crate::shell;
 use crate::start;
 use crate::strings::{t, S};
@@ -59,21 +60,24 @@ pub enum MenuItem {
     Open,
     ShowInFolder,
     CopyPath,
+    /// 크기 조정 (M6): the resize screen with the photo shown.
+    Resize,
     DefaultApps,
     Settings,
     About,
 }
 
 /// Top to bottom; a separator follows the first `GROUP` items.
-pub const ITEMS: [MenuItem; 6] = [
+pub const ITEMS: [MenuItem; 7] = [
     MenuItem::Open,
     MenuItem::ShowInFolder,
     MenuItem::CopyPath,
+    MenuItem::Resize,
     MenuItem::DefaultApps,
     MenuItem::Settings,
     MenuItem::About,
 ];
-const GROUP: usize = 3;
+const GROUP: usize = 4;
 
 impl MenuItem {
     /// The label's string key.
@@ -82,6 +86,7 @@ impl MenuItem {
             MenuItem::Open => S::MenuOpen,
             MenuItem::ShowInFolder => S::MenuShowInFolder,
             MenuItem::CopyPath => S::MenuCopyPath,
+            MenuItem::Resize => S::Resize,
             MenuItem::DefaultApps => S::MenuDefaultApps,
             MenuItem::Settings => S::MenuSettings,
             MenuItem::About => S::MenuAbout,
@@ -107,7 +112,10 @@ impl MenuItem {
 
     /// Items about the shown photo, unavailable without one.
     pub fn needs_file(self) -> bool {
-        matches!(self, MenuItem::ShowInFolder | MenuItem::CopyPath)
+        matches!(
+            self,
+            MenuItem::ShowInFolder | MenuItem::CopyPath | MenuItem::Resize
+        )
     }
 }
 
@@ -361,6 +369,7 @@ pub fn run_item(app: &RefCell<App>, hwnd: HWND, item: MenuItem) {
                 Err(e) => eprintln!("light-view: could not copy to the clipboard: {e}"),
             }
         }
+        MenuItem::Resize => resize::enter_current(app, hwnd),
         MenuItem::DefaultApps => {
             if !shell::open(hwnd, "ms-settings:defaultapps".as_ref()) {
                 input::show_toast(app, hwnd, |now| Toast::new(S::ToastOpenFailed, now));
@@ -585,6 +594,7 @@ mod tests {
                 "열기",
                 "폴더에서 보기",
                 "경로 복사",
+                "크기 조정",
                 "기본 앱 설정 열기",
                 "설정",
                 "정보"
@@ -603,7 +613,7 @@ mod tests {
         assert_eq!((l.card.x, l.card.y), (100.0, 120.0));
         assert_eq!(l.card.w, 264.0);
         assert_eq!(l.items.len(), ITEMS.len());
-        assert_eq!(l.card.h, 6.0 * 44.0 + 9.0 + 12.0);
+        assert_eq!(l.card.h, 7.0 * 44.0 + 9.0 + 12.0);
         for (i, r) in l.items.iter().enumerate() {
             assert!(r.h >= 44.0 && r.w >= 44.0, "{r:?}");
             assert!(inside(*r, l.card));
@@ -612,8 +622,8 @@ mod tests {
             }
         }
         // The separator sits between the photo items and the app items.
-        assert_eq!(l.separator.y, l.items[2].y + l.items[2].h);
-        assert_eq!(l.items[3].y, l.separator.y + l.separator.h);
+        assert_eq!(l.separator.y, l.items[3].y + l.items[3].h);
+        assert_eq!(l.items[4].y, l.separator.y + l.separator.h);
     }
 
     #[test]
@@ -673,19 +683,19 @@ mod tests {
         assert_eq!(m.selected, Some(1));
         m.on_key(VK_UP, NONE);
         m.on_key(VK_UP, NONE);
-        assert_eq!(m.selected, Some(5)); // wrapped to 정보
+        assert_eq!(m.selected, Some(6)); // wrapped to 정보
         m.on_key(VK_DOWN, NONE);
         assert_eq!(m.selected, Some(0));
         m.on_key(VK_END, NONE);
-        assert_eq!(m.selected, Some(5));
+        assert_eq!(m.selected, Some(6));
         m.on_key(VK_HOME, NONE);
         assert_eq!(m.selected, Some(0));
-        // Without a photo, 폴더에서 보기 and 경로 복사 are skipped.
+        // Without a photo, 폴더에서 보기, 경로 복사 and 크기 조정 are skipped.
         let mut m = Menu::default();
         m.open((0.0, 0.0), false, true);
-        assert!(!m.enabled(1) && !m.enabled(2) && m.enabled(0) && m.enabled(3));
+        assert!(!m.enabled(1) && !m.enabled(2) && !m.enabled(3) && m.enabled(0) && m.enabled(4));
         m.on_key(VK_DOWN, NONE);
-        assert_eq!(m.selected, Some(3));
+        assert_eq!(m.selected, Some(4));
         m.on_key(VK_UP, NONE);
         assert_eq!(m.selected, Some(0));
         // From no selection: ↓ the first item, ↑ the last.
@@ -695,7 +705,7 @@ mod tests {
         assert_eq!(m.selected, Some(0));
         m.open((0.0, 0.0), true, false);
         m.on_key(VK_UP, NONE);
-        assert_eq!(m.selected, Some(5));
+        assert_eq!(m.selected, Some(6));
     }
 
     #[test]
@@ -781,9 +791,9 @@ mod tests {
         m.open((100.0, 100.0), true, false);
         let l = m.layout(VIEW).unwrap();
         // Hover selects.
-        let (x, y) = center(l.items[4]);
+        let (x, y) = center(l.items[5]);
         assert!(m.hover(x, y, VIEW));
-        assert_eq!(m.selected, Some(4));
+        assert_eq!(m.selected, Some(5));
         assert!(!m.hover(x, y, VIEW));
         // Pressed on one item, released on another: nothing.
         let (ax, ay) = center(l.items[0]);

@@ -547,6 +547,38 @@ mod tests {
         assert!(l.details.is_empty());
     }
 
+    /// M6: "N장 대체 · 실행 취소" — the replace's summary with its own [실행 취소].
+    #[test]
+    fn replace_toast_offers_its_undo_and_follows_the_language() {
+        use crate::resize::saving::SaveSummary;
+        use crate::resize::text::ToastText;
+        let summary = SaveSummary {
+            replaced: 3,
+            ..SaveSummary::default()
+        };
+        let mut toast = Toast::resize(ToastText::Summary(summary.clone()), true, 0);
+        toast.retranslate(Lang::Ko);
+        let (label, action) = toast.action.clone().unwrap();
+        assert_eq!(format!("{} · {label}", toast.text), "3장 대체 · 실행 취소");
+        assert_eq!(action, ToastAction::UndoReplace);
+        assert!(toast.undoes_replace());
+        assert_eq!(toast.duration_ms, 6000);
+        toast.retranslate(Lang::En);
+        let label = &toast.action.as_ref().unwrap().0;
+        assert_eq!(format!("{} · {label}", toast.text), "3 replaced · Undo");
+        // A save without replacing has no undo; the delete toast's undo is not this one.
+        let plain = Toast::resize(ToastText::Summary(summary), false, 0);
+        assert!(plain.action.is_none() && !plain.undoes_replace());
+        assert!(!Toast::recycled(0).undoes_replace());
+        // Its action goes through the overlay like the delete toast's.
+        let mut o = Overlay::default();
+        o.show_toast(toast);
+        assert_eq!(
+            o.take_toast_action(),
+            Some(OverlayEvent::Toast(ToastAction::UndoReplace))
+        );
+    }
+
     #[test]
     fn toast_lasts_six_seconds() {
         let toast = Toast::new(S::ToastSaveFailed, 1_000);

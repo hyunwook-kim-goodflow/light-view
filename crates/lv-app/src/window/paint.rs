@@ -8,6 +8,7 @@ use crate::exif_card::{self, CardView};
 use crate::menu::{self, MenuView};
 use crate::overlay::{self, OverlayView};
 use crate::render::{Align, Renderer, TextRun};
+use crate::resize::{draw as resize_draw, screen as resize_screen};
 use crate::start;
 use crate::strings::{t, S};
 use crate::theme::{palette, Palette};
@@ -74,6 +75,11 @@ impl App {
         let card = self.card_model();
         let start = self.start_layout();
         let menu = self.menu.layout(self.client_dips);
+        // The resize screen: the photo in its area, the rest around it.
+        let resize = resize_screen::geometry_of(self);
+        let photo = resize.as_ref().map(|g| g.parts.photo);
+        let icons = self.icon_family;
+        let screen = resize_screen::view(&self.resize, self.dark, icons);
         let Some(r) = &mut self.renderer else { return };
         let p = palette(self.dark);
         r.begin(p.paper);
@@ -83,19 +89,41 @@ impl App {
         match self.viewer.scene() {
             // The previous photo stays up while the next one loads.
             Scene::Image { rect, quarters } => {
-                r.draw_image(rect, quarters);
+                let (dx, dy) = photo.map_or((0.0, 0.0), |a| (a.x, a.y));
+                r.draw_image((rect.0 + dx, rect.1 + dy, rect.2, rect.3), quarters);
                 drew_image = r.has_image();
             }
-            Scene::Message(text) if !loading => r.draw_text_center(&text, p.ink2),
+            Scene::Message(text) if !loading => match photo {
+                Some(a) => {
+                    let run = TextRun {
+                        text: &text,
+                        family: "Segoe UI",
+                        size: 15.0,
+                        bold: false,
+                        color: p.ink2,
+                    };
+                    r.draw_runs_ellipsis((a.x, a.y, a.w, a.h), &[run], Align::Center);
+                }
+                None => r.draw_text_center(&text, p.ink2),
+            },
             Scene::Message(_) | Scene::Empty => {}
         }
         if let Some(l) = &start {
             start::draw(r, l, p);
         }
+        if let (Some(g), Some(v)) = (&resize, &screen) {
+            resize_draw::draw(r, g, v);
+        }
+        // Centred in the image area (the resize screen's photo area).
+        let (cx, cy) = photo.map_or((0.0, 0.0), |a| (a.x, a.y));
+        let pill = |r: &mut Renderer, text: &str| {
+            let top = cy + (view_h - PILL_HEIGHT_DIP) / 2.0;
+            pill_at(r, p, self.dark, (cx + view_w / 2.0, top), text);
+        };
         if saving {
-            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Saving));
+            pill(r, t(S::Saving));
         } else if loading {
-            draw_pill(r, p, self.dark, (view_w, view_h), t(S::Loading));
+            pill(r, t(S::Loading));
         }
         if let Some(input) = toolbar {
             let view = ToolbarView {
@@ -143,12 +171,12 @@ impl App {
             Err(e) => eprintln!("light-view: EndDraw failed: {e}"),
         }
         // What was just drawn is what a screen reader sees.
-        uia_provider::publish(hwnd, || uia::main_tree_of(self));
+        uia_provider::publish(hwnd, || uia::main_tree_of(self, hwnd));
     }
 }
-/// A small "불러오는 중…" or "저장하는 중…" pill centred in the image area: surface
-/// fill, plus a hairline border in dark mode (no shadows there).
-fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, f32), text: &str) {
+/// A small "불러오는 중…" or "저장하는 중…" pill centred on `centre_x` with its top at
+/// `top`: surface fill, plus a hairline border in dark mode (no shadows there).
+fn pill_at(r: &mut Renderer, p: &Palette, dark: bool, (centre_x, top): (f32, f32), text: &str) {
     let run = TextRun {
         text,
         family: "Segoe UI",
@@ -158,7 +186,7 @@ fn draw_pill(r: &mut Renderer, p: &Palette, dark: bool, (view_w, view_h): (f32, 
     };
     let text_w = r.measure_runs(&[run]).unwrap_or(80.0);
     let (w, h) = (text_w + 2.0 * PILL_PAD_DIP, PILL_HEIGHT_DIP);
-    let rect = ((view_w - w) / 2.0, (view_h - h) / 2.0, w, h);
+    let rect = (centre_x - w / 2.0, top, w, h);
     r.fill_round_rect(rect, h / 2.0, p.surface);
     if dark {
         r.stroke_round_rect(rect, h / 2.0, p.hairline, 1.0);

@@ -35,6 +35,8 @@ pub enum Command {
     Escape,
     Open,
     Settings,
+    /// The menu's 크기 조정 (M6): the resize screen with the current photo. No key.
+    Resize,
 }
 
 /// Modifier state at the time of the input event.
@@ -179,6 +181,20 @@ mod tests {
         };
         assert_eq!(command_for_key(VK_OEM_PLUS, shift), Some(Command::ZoomIn));
         assert_eq!(command_for_key(VK_OEM_MINUS, shift), Some(Command::ZoomOut));
+    }
+
+    #[test]
+    fn resize_has_no_shortcut() {
+        // 크기 조정 comes only from the menus (spec §3): no key or wheel maps to it.
+        for vk in 0..=u16::from(u8::MAX) {
+            for mods in [NONE, CTRL] {
+                assert_ne!(command_for_key(vk, mods), Some(Command::Resize), "{vk:#x}");
+            }
+        }
+        for delta in [-120, 0, 120] {
+            assert_ne!(command_for_wheel(delta, NONE), Command::Resize);
+            assert_ne!(command_for_wheel(delta, CTRL), Command::Resize);
+        }
     }
 
     #[test]

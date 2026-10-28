@@ -44,15 +44,20 @@ In scope:
 - **Malicious images.** A crafted JPEG, PNG, GIF, WebP, BMP or HEIC/HEIF file (or its
   EXIF, ICC profile or container boxes) that makes light-view crash, hang, use memory
   far beyond the configured limit, read or write out of bounds, or run code.
-- **Worker escape.** HEIC/HEIF decoding and lossless JPEG rotation run in a separate
-  worker process (`lv-worker.exe`) in a low-integrity sandbox with a Job Object, and in an
-  AppContainer without capabilities when the install folder allows it (see README). A way
-  for a compromised worker to read or change user files, reach the network, start
-  processes, or take over the viewer app through its messages is in scope.
-- **Save corruption.** Rotation saves and deletions are meant to leave the original
-  untouched whenever anything goes wrong. A file that makes a save destroy, truncate or
-  silently damage a photo, or lose its metadata beyond what the README describes, is in
-  scope.
+- **Worker escape.** HEIC/HEIF decoding, lossless JPEG rotation and lossy WebP encoding
+  (resize) run in a separate worker process (`lv-worker.exe`) in a low-integrity sandbox
+  with a Job Object, and in an AppContainer without capabilities when the install folder
+  allows it (see README). A way for a compromised worker to read or change user files,
+  reach the network, start processes, or take over the viewer app through its messages is
+  in scope. This includes a worker whose WebP output, which the app saves as the user's
+  file, is something other than what was asked for.
+- **Save corruption.** Rotation saves, resize saves (new files, "Replace original" and its
+  undo) and deletions are meant to leave the original untouched whenever anything goes
+  wrong. A file that makes a save destroy, truncate or silently damage a photo, leave the
+  original with no way back after "Replace original", or lose its metadata beyond what the
+  README describes, is in scope. So is a resize result larger than the file-size limit
+  that was set, and location (GPS) data that survives in a result while "Remove location"
+  is on.
 - The update check (when turned on): anything that makes light-view contact a host other
   than `api.github.com` or open a page outside `github.com/hyunwook-kim-goodflow/light-view/releases/`.
   The check uses Windows' automatic proxy settings, so Windows may also look up a proxy
@@ -62,7 +67,7 @@ In scope:
 
 Out of scope:
 
-- Bugs in libheif, libde265, libjpeg-turbo or Rust crates that light-view does not
+- Bugs in libheif, libde265, libjpeg-turbo, libwebp or Rust crates that light-view does not
   expose; please report those upstream (we still want to hear if light-view is affected).
 - Attacks that need administrator rights or an already compromised user account.
 - Images within the documented size limits that are simply slow or large to open.
@@ -72,8 +77,12 @@ Out of scope:
 
 취약점은 공개 이슈 대신 GitHub 비공개 취약점 신고(저장소 **Security** 탭 →
 **Report a vulnerability**)로 알려 주세요. 7일 안에 받았다고 답하고, 최신 릴리스만
-보안 수정을 받아요. 범위는 악성 이미지, 작업자 프로세스 탈출, 저장 중 파일 손상, 그리고
-업데이트 확인(켰을 때)이 `api.github.com` 말고 다른 곳에 연결하거나 light-view 릴리스
-페이지 밖을 여는 문제예요. 업데이트 확인은 윈도우의 자동 프록시 설정을 따르므로 프록시
+보안 수정을 받아요. 범위는 악성 이미지, 작업자 프로세스 탈출(HEIC 디코딩, JPEG 무손실
+회전, 크기 조정의 WebP 손실 인코딩을 하는 작업자. 저장되는 WebP 결과가 요청과 다른 경우
+포함), 저장 중 파일 손상(회전 저장, 크기 조정 저장, 원본 대체와 그 실행 취소, 삭제. 원본
+대체 뒤 원본을 되돌릴 방법이 없어지는 경우, 결과가 정한 용량을 넘는 경우, 위치 정보 제거를
+켰는데 결과에 위치 정보가 남는 경우 포함), 그리고 업데이트 확인(켰을 때)이
+`api.github.com` 말고 다른 곳에 연결하거나 light-view 릴리스 페이지 밖을 여는 문제예요.
+libheif, libde265, libjpeg-turbo, libwebp 자체의 버그는 그쪽 프로젝트에 알려 주세요. 업데이트 확인은 윈도우의 자동 프록시 설정을 따르므로 프록시
 자동 검색(WPAD, PAC)이 함께 일어날 수 있고, GitHub 인증서가 폐기되지 않았는지 확인하느라
 인증 기관의 폐기 확인 서버(OCSP, CRL)에 연결할 수 있어요. 이 둘은 정상 동작이에요.

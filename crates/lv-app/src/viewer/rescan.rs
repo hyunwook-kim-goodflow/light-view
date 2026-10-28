@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
-use lv_core::listing::{same_path, FolderList};
+use lv_core::listing::{same_path, Entry, FolderList};
 
 use super::{Redraw, RescanNotice, Viewer};
 
@@ -28,8 +28,8 @@ pub struct RescanFound {
     folder: PathBuf,
     generation: u64,
     current: Option<PathBuf>,
-    /// The folder's files; `None` if it could not be read.
-    paths: Option<Vec<PathBuf>>,
+    /// The folder's files with their sizes and times; `None` if it could not be read.
+    paths: Option<Vec<Entry>>,
     /// The current photo is not listed and its metadata reads "not found".
     current_absent: bool,
     /// The checked files whose identity changed (`Verify::Changed` only: a file that
@@ -43,9 +43,11 @@ impl RescanJob {
     /// Reads the folder and the identities. Blocks as long as the disk does.
     pub fn run(self) -> RescanFound {
         let started = Instant::now();
-        let paths = FolderList::read_files(&self.folder).ok();
+        let paths = FolderList::read_entries(&self.folder).ok();
         let current_absent = match (&paths, &self.current) {
-            (Some(paths), Some(c)) => !paths.iter().any(|p| same_path(p, c)) && confirmed_absent(c),
+            (Some(paths), Some(c)) => {
+                !paths.iter().any(|(p, _)| same_path(p, c)) && confirmed_absent(c)
+            }
             _ => false,
         };
         let changed = self
@@ -139,14 +141,14 @@ impl Viewer {
             return Some((Redraw::None, None));
         };
         if let Some(c) = &current {
-            if !paths.iter().any(|p| same_path(p, c)) && !found.current_absent {
+            if !paths.iter().any(|(p, _)| same_path(p, c)) && !found.current_absent {
                 // Not listed this time, yet still there.
-                paths.push(c.clone());
+                paths.push((c.clone(), None));
             }
         }
         let rotated = self.unsaved_rotation();
         let position = self.list.position();
-        self.list.refresh(paths, current.as_deref());
+        self.list.refresh_entries(paths, current.as_deref());
         let stayed = match (&current, self.list.current()) {
             (Some(old), Some(new)) => same_path(old, new),
             (None, None) => true,

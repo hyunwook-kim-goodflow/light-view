@@ -24,6 +24,10 @@ https://github.com/hyunwook-kim-goodflow/light-view
 - 설정은 %APPDATA%\light-view\settings.toml, 크래시 기록은 %LOCALAPPDATA%\light-view\crashes에 있어요.
   제거해도 설정과 크래시 기록은 남아요.
 - 기본 앱은 Windows 설정 > 앱 > 기본 앱에서 고를 수 있어요.
+- 사진 우클릭 메뉴에 "light-view로 크기 조정"이 생겨요(Windows 11은 "더 많은 옵션 표시" 안).
+  여러 장을 골라도 한 화면에 모여요. 포터블판에는 이 메뉴가 없어요(끌어 놓기로 열어요).
+  (Installed version only: a "Resize with light-view" entry in the photo right-click menu;
+  on Windows 11 it is under "Show more options".)
 
 네트워크: 업데이트 확인(처음 실행할 때 켤지 물어요) 말고는 아무 통신도 하지 않아요.
 크래시 기록은 이 PC에만 남고 어디로도 보내지 않아요.

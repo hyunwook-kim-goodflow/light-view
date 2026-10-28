@@ -10,8 +10,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1DeviceContext, ID2D1Factory1, ID2D1HwndRenderTarget,
-    ID2D1SolidColorBrush, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_INTERPOLATION_MODE,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_INTERPOLATION_MODE,
     D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
@@ -32,6 +32,7 @@ use crate::theme::Rgb;
 
 mod mips;
 mod text;
+mod thumbs;
 mod tiles;
 
 /// Posted to the window by a mip build once its levels are ready to upload; the
@@ -71,6 +72,8 @@ struct Device {
     image: Option<TiledBitmap>,
     /// Levels 1, 2, … of the image, once built (tiled images only).
     mips: Vec<TiledBitmap>,
+    /// Small bitmaps by id (the resize screen's filmstrip tiles).
+    thumbs: thumbs::ThumbCache,
 }
 
 pub struct Renderer {
@@ -88,6 +91,8 @@ pub struct Renderer {
     /// The tiled image's decoded frame, kept (shared, not copied) so deeper mip levels
     /// can be built when the window gets smaller.
     mip_source: Option<(DecodeResult, usize)>,
+    /// Clips pushed and not yet popped.
+    clips: u32,
 }
 
 /// An image is set but its bitmap is missing (the device was lost, or not yet built).
@@ -132,6 +137,7 @@ impl Renderer {
             device: None,
             mip_job: None,
             mip_source: None,
+            clips: 0,
         };
         crate::timing::step("d2d.target", || r.ensure_device())?;
         Ok(r)
@@ -281,6 +287,7 @@ impl Renderer {
     }
 
     pub fn begin(&mut self, bg: Rgb) {
+        self.clips = 0;
         if self.ensure_device().is_err() {
             return;
         }
@@ -354,6 +361,29 @@ impl Renderer {
         unsafe {
             d.brush.SetColor(&c);
             d.target.FillRectangle(&to_rect_f(rect), &d.brush);
+        }
+    }
+
+    /// Clips what is drawn next to `rect` (DIPs) until [`pop_clip`](Self::pop_clip).
+    pub fn push_clip(&mut self, rect: (f32, f32, f32, f32)) {
+        if let Some(d) = &self.device {
+            // SAFETY: a plain call on the live target between Begin/EndDraw.
+            unsafe {
+                d.target
+                    .PushAxisAlignedClip(&to_rect_f(rect), D2D1_ANTIALIAS_MODE_ALIASED)
+            };
+            self.clips += 1;
+        }
+    }
+
+    /// Ends the last [`push_clip`](Self::push_clip).
+    pub fn pop_clip(&mut self) {
+        if let Some(d) = &self.device {
+            if self.clips > 0 {
+                // SAFETY: pairs with the PushAxisAlignedClip above on the same target.
+                unsafe { d.target.PopAxisAlignedClip() };
+                self.clips -= 1;
+            }
         }
     }
 
@@ -481,6 +511,7 @@ impl Renderer {
             brush,
             image: None,
             mips: Vec::new(),
+            thumbs: thumbs::ThumbCache::default(),
         });
         Ok(())
     }

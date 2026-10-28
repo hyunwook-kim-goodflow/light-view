@@ -291,6 +291,53 @@ mod tests {
         }
     }
 
+    /// Newer iPhone photos (iPhone 15/16: 24/48 MP HEIC, HDR gain maps, new tile
+    /// layouts) in `testdata/private/iphone/` all decode through the real worker pool.
+    /// Run with `cargo test -p lv-app -- --ignored --nocapture iphone_heic_samples_open`.
+    #[test]
+    #[ignore = "needs iPhone 15/16 HEIC samples in testdata/private/iphone/ (not in git)"]
+    fn iphone_heic_samples_open() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/iphone");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension()
+                            .is_some_and(|x| x.eq_ignore_ascii_case("heic"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if files.is_empty() {
+            println!(
+                "testdata/private/iphone/*.heic 없음 — 건너뜀 (아이폰 15/16 샘플을 넣고 다시 실행)"
+            );
+            return;
+        }
+        files.sort();
+        let decoder = RoutingDecoder::with_worker(limits(), Some(worker_exe()), 2);
+        let mut failed = Vec::new();
+        for file in &files {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            let started = std::time::Instant::now();
+            match decoder.decode(file) {
+                Ok(img) if img.width > 0 && img.height > 0 => println!(
+                    "ok     {name}: {}x{}, {} ms",
+                    img.width,
+                    img.height,
+                    started.elapsed().as_millis()
+                ),
+                other => {
+                    println!("FAILED {name}: {:?}", other.map(|i| (i.width, i.height)));
+                    failed.push(name.into_owned());
+                }
+            }
+        }
+        assert!(failed.is_empty(), "did not open: {failed:?}");
+    }
+
     #[test]
     fn oversized_heif_is_rejected_unread() {
         // max_pixels 1: files over 64 MiB are refused.

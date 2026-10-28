@@ -177,6 +177,27 @@ pub fn min_window_width(hwnd: HWND) -> Option<i32> {
     }
 }
 
+/// Outer window height whose client area is `client_dip` DIPs tall at the window's DPI.
+pub fn window_height_for(hwnd: HWND, client_dip: f32) -> Option<i32> {
+    // SAFETY: plain calls on our window; `rc` is a live local.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            return None;
+        }
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: (client_dip * dpi as f32 / 96.0).ceil() as i32,
+        };
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        AdjustWindowRectExForDpi(&mut rc, style, false, ex_style, dpi).ok()?;
+        Some(rc.bottom - rc.top)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

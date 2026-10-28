@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::DragAcceptFiles;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, LoadCursorW, RegisterClassExW,
     SetWindowPlacement, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    IDC_ARROW, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell};
@@ -26,6 +26,7 @@ use crate::menu::Menu;
 use crate::overlay::Overlay;
 use crate::placement;
 use crate::render::Renderer;
+use crate::resize::ResizeState;
 use crate::start::StartScreen;
 use crate::theme::{self, system_prefers_dark};
 use crate::toolbar;
@@ -38,8 +39,11 @@ use super::{wndproc, App, CLASS_NAME};
 
 /// How long the (already hidden) app waits at exit for the Recycle Bin.
 const EXIT_COMMIT_WAIT: Duration = Duration::from_secs(10);
+/// Shows the window with `initial` open, or with the resize screen holding `resize`
+/// (`--resize`), and runs until it closes.
 pub fn run(
     initial: Option<PathBuf>,
+    resize: Vec<PathBuf>,
     settings: Settings,
     settings_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -89,6 +93,7 @@ pub fn run(
         watching: Watching::default(),
         settings_win: None,
         update: UpdateState::default(),
+        resize: ResizeState::default(),
     });
 
     // SAFETY: Win32 calls with valid arguments; `app` outlives the window because the
@@ -112,7 +117,8 @@ pub fn run(
             WINDOW_EX_STYLE(0),
             CLASS_NAME,
             w!("light-view"),
-            WS_OVERLAPPEDWINDOW,
+            // Clip children: the resize screen's number fields are child windows.
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -150,7 +156,11 @@ pub fn run(
         // The first photo (opened above) is shown if it is ready, and the title, toolbar
         // and folder watch follow it, as after any open.
         if first.is_some() {
-            app.borrow_mut().viewer.check_current();
+            let mut a = app.borrow_mut();
+            // Explorer may have told the folder's order before the window was there.
+            a.viewer.take_sort_answers();
+            a.viewer.check_current();
+            drop(a);
             commands::after(&app, hwnd, Redraw::Full);
         }
 
@@ -175,6 +185,10 @@ pub fn run(
         input::sync_tooltips(&app, hwnd);
         let _ = InvalidateRect(hwnd, None, false);
         crate::timing::mark("shown-at");
+        // Explorer's 크기 조정: the screen opens with this launch's photos (R4).
+        if !resize.is_empty() {
+            crate::resize::enter(&app, hwnd, resize);
+        }
         // The update question, if the first photo is already up; and the daily check
         // (on its own thread) if the user said yes before.
         update::maybe_ask(&app, hwnd);
@@ -186,7 +200,9 @@ pub fn run(
             DispatchMessageW(&msg);
         }
     }
-    // The window is gone: the pending delete goes to the Recycle Bin now.
+    // The window is gone: the pending delete goes to the Recycle Bin now, and so do the
+    // originals a resize replaced (their undo toast is gone with the window).
     app.borrow_mut().deleter.commit_all(EXIT_COMMIT_WAIT);
+    crate::resize::flush_at_exit(&app);
     Ok(())
 }
