@@ -33,6 +33,7 @@ use crate::menu::Menu;
 use crate::overlay::Overlay;
 use crate::placement;
 use crate::render::{self, Renderer};
+use crate::resize::ResizeState;
 use crate::settings_win::{self, SettingsWindow};
 use crate::start::{self, StartScreen};
 use crate::theme::{self, system_prefers_dark};
@@ -95,6 +96,8 @@ pub struct App {
     pub settings_win: Option<SettingsWindow>,
     /// The update question and the release found (spec §6.6).
     pub update: UpdateState,
+    /// The resize screen (M6): its session, estimates and save.
+    pub resize: ResizeState,
 }
 
 impl App {
@@ -134,8 +137,12 @@ impl App {
         self.client_dips
     }
 
-    /// The image area: the client area above a pinned toolbar.
+    /// The image area: the client area above a pinned toolbar; on the resize screen,
+    /// its photo area.
     fn view_dips(&self) -> (f32, f32) {
+        if let Some(r) = crate::resize::screen::photo_rect(self) {
+            return (r.w, r.h);
+        }
         let (w, h) = self.client_dips;
         let bar = if self.settings.toolbar_pinned {
             pinned_bar_height()
@@ -145,9 +152,26 @@ impl App {
         (w, (h - bar).max(0.0))
     }
 
-    /// The toolbar's layout input, or `None` when no file is open (no toolbar).
+    /// Drops the resize screen's filmstrip bitmaps.
+    pub fn clear_thumbs(&mut self) {
+        if let Some(r) = &mut self.renderer {
+            r.clear_thumbs();
+        }
+    }
+
+    /// A point in client DIPs as the viewer sees it (its view starts at the resize
+    /// screen's photo area).
+    pub fn view_point(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        match crate::resize::screen::photo_rect(self) {
+            Some(r) => (x - r.x, y - r.y),
+            None => (x, y),
+        }
+    }
+
+    /// The toolbar's layout input, or `None` when no file is open or the resize screen
+    /// is (no toolbar).
     pub fn toolbar_input(&self) -> Option<ToolbarInput> {
-        if !self.viewer.has_file() {
+        if !self.viewer.has_file() || self.resize.is_open() {
             return None;
         }
         Some(ToolbarInput {
@@ -170,7 +194,7 @@ impl App {
 
     /// Like `card_model`, without touching the card's state (for hit tests).
     pub fn card_layout(&self) -> Option<exif_card::Model> {
-        if !self.exif_card.is_open() || !self.viewer.has_file() {
+        if !self.exif_card.is_open() || !self.viewer.has_file() || self.resize.is_open() {
             return None;
         }
         let info = CardInfo {
@@ -272,10 +296,17 @@ fn handle(
     match msg {
         WM_ERASEBKGND => Some(LRESULT(1)),
         WM_GETMINMAXINFO => {
+            // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
+            let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
             if let Some(width) = placement::min_window_width(hwnd) {
-                // SAFETY: for WM_GETMINMAXINFO, lparam points to a writable MINMAXINFO.
-                let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize.x = mmi.ptMinTrackSize.x.max(width);
+            }
+            // The resize screen's sidebar needs its height (its buttons never overlap).
+            if crate::resize::is_open(app) {
+                let min = crate::resize::layout::MIN_SIDEBAR_H;
+                if let Some(height) = placement::window_height_for(hwnd, min) {
+                    mmi.ptMinTrackSize.y = mmi.ptMinTrackSize.y.max(height);
+                }
             }
             Some(LRESULT(0))
         }
@@ -285,6 +316,8 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_PAINT => {
+            // The resize screen's layout and number fields first (they are windows).
+            crate::resize::screen::sync(app, hwnd);
             let mut ps = PAINTSTRUCT::default();
             // SAFETY: paired BeginPaint/EndPaint on our window with a live PAINTSTRUCT.
             unsafe { BeginPaint(hwnd, &mut ps) };
@@ -299,7 +332,7 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
-            app.try_borrow().ok().map(|a| uia::main_tree_of(&a))
+            app.try_borrow().ok().map(|a| uia::main_tree_of(&a, hwnd))
         }),
         render::WM_APP_MIPS_READY => {
             invalidate(hwnd);
@@ -390,6 +423,7 @@ fn handle(
         }
         // The overlay sees input first: an open dialog takes it all.
         _ => input::overlay(app, hwnd, msg, wparam, lparam)
+            .or_else(|| crate::resize::screen::on_message(app, hwnd, msg, wparam, lparam))
             .or_else(|| commands::handle(app, hwnd, msg, wparam, lparam))
             .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
     }
@@ -435,6 +469,12 @@ pub fn settings_path(data: &DataDir) -> Option<PathBuf> {
 /// `data\crashes` beside a portable exe.
 pub fn crash_dir(data: &DataDir) -> Option<PathBuf> {
     data.crash_dir(|| known_folder(&FOLDERID_LocalAppData))
+}
+
+/// The list of folders holding replace backups not yet committed (final-review I2):
+/// `%LOCALAPPDATA%\light-view\live-backups`, or `data\live-backups` when portable.
+pub fn live_backups_dir(data: &DataDir) -> Option<PathBuf> {
+    data.live_backups_dir(|| known_folder(&FOLDERID_LocalAppData))
 }
 
 fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {

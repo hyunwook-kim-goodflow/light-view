@@ -1,6 +1,6 @@
 //! Drives the real `lv-worker` executable over piped stdio.
 //!
-//! The worker resolves `heif.dll`/`libde265.dll`/`turbojpeg.dll` (and their DLLs) from its own folder only, so they must sit
+//! The worker resolves `heif.dll`/`libde265.dll`/`turbojpeg.dll`/`libwebp.dll` (and their DLLs) from its own folder only, so they must sit
 //! next to `target\debug\lv-worker.exe` (`scripts/setup-deps.ps1` copies them there).
 
 use std::io::{BufReader, Read, Write};
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use lv_ipc::{read_response, write_request, FailKind, Request, Response};
+use lv_ipc::{read_response, write_request, FailKind, FitTarget, Request, Response};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_lv-worker");
 const MAX_PIXELS: u64 = 64_000_000;
@@ -29,6 +29,8 @@ fn require_dlls() {
         "turbojpeg.dll",
         "spng.dll",
         "z.dll",
+        "libwebp.dll",
+        "libsharpyuv.dll",
     ] {
         assert!(
             dir.join(dll).exists(),
@@ -356,6 +358,166 @@ fn rotate_over_pipes() {
     ));
 }
 
+impl Worker {
+    fn fit_webp(
+        &mut self,
+        id: u64,
+        src: (u32, u32),
+        start_quality: u8,
+        target: FitTarget,
+        rgba: Vec<u8>,
+    ) -> Response {
+        self.send(&Request::FitWebp {
+            id,
+            width: src.0,
+            height: src.1,
+            start_quality,
+            target,
+            rgba,
+        });
+        read_response(&mut self.stdout, RESPONSE_CAP)
+            .expect("valid response")
+            .expect("a response, not EOF")
+    }
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12
+        && &bytes[..4] == b"RIFF"
+        && &bytes[8..12] == b"WEBP"
+        && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize + 8 == bytes.len()
+}
+
+/// A gradient with some texture, opaque.
+fn picture(width: u32, height: u32) -> Vec<u8> {
+    let mut px = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let t = ((x ^ y) & 15) as u8;
+            px.extend_from_slice(&[
+                (x * 200 / width) as u8 + t,
+                (y * 200 / height) as u8 + t,
+                ((x + y) * 100 / (width + height)) as u8 + t,
+                255,
+            ]);
+        }
+    }
+    px
+}
+
+#[test]
+fn fit_webp_answers_outcome() {
+    let mut w = Worker::start();
+    let px = picture(64, 48);
+    // A resolution target: one encode at the start quality, at the target size.
+    let first = match w.fit_webp(1, (64, 48), 80, FitTarget::LongEdge(32), px.clone()) {
+        Response::Fitted {
+            id: 1,
+            width: 32,
+            height: 24,
+            quality: 80,
+            data,
+        } => data,
+        other => panic!("expected Fitted 32x24 q80, got {other:?}"),
+    };
+    assert!(is_webp(&first));
+    // Deterministic (ruling R1).
+    assert!(matches!(
+        w.fit_webp(2, (64, 48), 80, FitTarget::LongEdge(32), px.clone()),
+        Response::Fitted { id: 2, data, .. } if data == first
+    ));
+    // A byte budget between the sizes at quality 95 and 60: the quality search runs here.
+    let size_at = |w: &mut Worker, q: u8| match w.fit_webp(
+        9,
+        (64, 48),
+        q,
+        FitTarget::Percent(100),
+        px.clone(),
+    ) {
+        Response::Fitted { data, .. } => data.len() as u64,
+        other => panic!("{other:?}"),
+    };
+    let (high, low) = (size_at(&mut w, 95), size_at(&mut w, 60));
+    assert!(low < high);
+    let budget = low + (high - low) / 3;
+    let target = FitTarget::MaxBytes {
+        bytes: budget,
+        long_edge: None,
+    };
+    match w.fit_webp(3, (64, 48), 95, target, px.clone()) {
+        Response::Fitted {
+            id: 3,
+            width: 64,
+            height: 48,
+            quality,
+            data,
+        } => {
+            assert!(data.len() as u64 <= budget, "{} > {budget}", data.len());
+            assert!((60..95).contains(&quality), "quality {quality}");
+            assert!(is_webp(&data));
+        }
+        other => panic!("expected Fitted, got {other:?}"),
+    }
+    // A budget nothing meets (the source is under the 800 px floor): CantFit.
+    let target = FitTarget::MaxBytes {
+        bytes: 10,
+        long_edge: None,
+    };
+    match w.fit_webp(4, (64, 48), 90, target, px.clone()) {
+        Response::CantFit { id: 4, smallest } => assert!(smallest > 10),
+        other => panic!("expected CantFit, got {other:?}"),
+    }
+    // Over the worker's pixel limit: TooLarge with the source size, nothing encoded.
+    let mut small = Worker::spawn(&["--max-pixels", "3000"]);
+    assert_eq!(
+        small.fit_webp(5, (64, 48), 80, FitTarget::LongEdge(32), px.clone()),
+        Response::Failed {
+            id: 5,
+            kind: FailKind::TooLarge {
+                width: 64,
+                height: 48
+            }
+        }
+    );
+    // An output side over WebP's 16383 is TooLarge as well; a long source made short is not.
+    assert_eq!(
+        w.fit_webp(
+            6,
+            (16384, 1),
+            80,
+            FitTarget::Percent(100),
+            vec![0; 16384 * 4]
+        ),
+        Response::Failed {
+            id: 6,
+            kind: FailKind::TooLarge {
+                width: 16384,
+                height: 1
+            }
+        }
+    );
+    assert!(matches!(
+        w.fit_webp(
+            7,
+            (16384, 1),
+            80,
+            FitTarget::LongEdge(1000),
+            vec![9; 16384 * 4]
+        ),
+        Response::Fitted {
+            id: 7,
+            width: 1000,
+            height: 1,
+            ..
+        }
+    ));
+    // Still serving, and the other requests are unaffected.
+    assert!(matches!(
+        w.decode(8, MAX_PIXELS, sample("rainbow-451x461.heic")),
+        Response::Image { id: 8, .. }
+    ));
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn test_mode_wrong_kind_answers_with_the_other_kind() {
@@ -367,6 +529,10 @@ fn test_mode_wrong_kind_answers_with_the_other_kind() {
     assert!(matches!(
         w.rotate(2, 1, 1000, jpeg_sample("gradient-64x32.jpg")),
         Response::Image { id: 2, .. }
+    ));
+    assert!(matches!(
+        w.fit_webp(3, (1, 1), 80, FitTarget::LongEdge(1), vec![0; 4]),
+        Response::Image { id: 3, .. }
     ));
 }
 
@@ -417,7 +583,7 @@ fn truncated_frame_exits_two() {
 /// fixed part, RotateJpeg's); with N = 1000 that is 64 MiB + 17.
 #[test]
 fn oversized_request_exits_two() {
-    let cap: u64 = 64 * 1024 * 1024 + 17;
+    let cap: u64 = 64 * 1024 * 1024 + lv_ipc::REQUEST_FIXED_LEN;
     let header = |len: u64| {
         let mut h = b"LVW1".to_vec();
         h.push(0x01);

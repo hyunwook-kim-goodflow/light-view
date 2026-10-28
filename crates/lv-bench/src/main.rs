@@ -19,6 +19,17 @@
 //! baseline and the baseline + 50 ms (times) or + 30 MB (memory), or a baseline case
 //! that was asked for has no result (a case that could not run here, like `heic12mp`
 //! without `--heic`, is listed as skipped instead).
+//!
+//! The resize cases open ten copies of a 12 MP JPEG (4032×3024) on the resize screen
+//! (`--resize`) with the default settings — 해상도, 긴 변 1920, JPEG 원본 수준 — and
+//! measure until every photo has its estimate:
+//!
+//! `{"case": "resize10x12mp", "estimates_ms": 2400, "first_estimate_ms": 600, "peak_private_mb": 640}`
+//!
+//! `estimates_ms` is from process start to the last estimate, `first_estimate_ms` to the
+//! first; `peak_private_mb` is the highest private bytes of the app and its workers
+//! together while they were made. `resize10x12mp_webp` does the same with WebP output
+//! (each photo's full pixels go to a WebP worker once; needs `lv-worker.exe`).
 
 mod images;
 mod report;
@@ -30,7 +41,20 @@ use std::process::ExitCode;
 use images::Picture;
 use report::CaseResult;
 
-const CASES: [&str; 4] = ["jpeg12mp", "jpeg24mp", "png_large", "heic12mp"];
+const CASES: [&str; 6] = [
+    "jpeg12mp",
+    "jpeg24mp",
+    "png_large",
+    "heic12mp",
+    "resize10x12mp",
+    "resize10x12mp_webp",
+];
+/// Photos a resize case opens.
+const RESIZE_PHOTOS: usize = 10;
+const RESIZE_PICTURE: Picture = Picture::Jpeg {
+    width: 4032,
+    height: 3024,
+};
 
 struct Args {
     runs: usize,
@@ -95,6 +119,10 @@ fn run_cases(args: &Args, dir: &Path) -> Result<(Vec<CaseResult>, Vec<String>), 
     let mut skipped = Vec::new();
     for case in &args.cases {
         let folder = dir.join(case);
+        if case.starts_with("resize") {
+            results.push(run_resize(case, args, &folder)?);
+            continue;
+        }
         let file = match case_file(case, args, &folder)? {
             Some(file) => file,
             None => {
@@ -127,6 +155,76 @@ fn run_cases(args: &Args, dir: &Path) -> Result<(Vec<CaseResult>, Vec<String>), 
         results.push(summarize(case, &samples)?);
     }
     Ok((results, skipped))
+}
+
+/// A resize case: `RESIZE_PHOTOS` copies of a 12 MP JPEG on the resize screen.
+fn run_resize(case: &str, args: &Args, folder: &Path) -> Result<CaseResult, String> {
+    let webp = case.ends_with("_webp");
+    if webp && !args.app.with_file_name("lv-worker.exe").is_file() {
+        return Err(format!("{case} needs lv-worker.exe next to the app"));
+    }
+    let files = images::prepare_many(folder, RESIZE_PICTURE, RESIZE_PHOTOS)
+        .map_err(|e| format!("writing the {case} pictures: {e}"))?;
+    eprintln!("lv-bench: {case}: {} runs", args.runs);
+    let mut samples = Vec::new();
+    for i in 0..args.runs {
+        let sample = run::measure_resize(&args.app, &files, webp)?;
+        all_ready(&sample.steps, RESIZE_PHOTOS)
+            .map_err(|e| format!("{case}: run {}: {e}", i + 1))?;
+        if args.verbose {
+            eprintln!(
+                "  run {}: peak {:.0} MB sampled (workers {:.0} MB), app's own peak {:.0} MB; {}",
+                i + 1,
+                sample.peak_total_mb,
+                sample.workers_peak_mb,
+                sample.app_peak_mb,
+                sample
+                    .steps
+                    .iter()
+                    .map(|(n, v)| format!("{n}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        samples.push(sample);
+    }
+    let step = |name: &str| -> Result<Vec<f64>, String> {
+        samples
+            .iter()
+            .map(|s| {
+                s.step(name)
+                    .ok_or_else(|| format!("{case}: a run's estimates line has no {name}"))
+            })
+            .collect()
+    };
+    let mut peak: Vec<f64> = samples.iter().map(run::ResizeSample::peak_mb).collect();
+    Ok(CaseResult::new(
+        case,
+        &[
+            (
+                "estimates_ms",
+                report::median(&mut step("estimates-done-ms")?),
+            ),
+            (
+                "first_estimate_ms",
+                report::median(&mut step("first-estimate-ms")?),
+            ),
+            ("peak_private_mb", report::median(&mut peak)),
+        ],
+    ))
+}
+
+/// Whether an estimates line says every one of `photos` photos got a result: a photo
+/// that failed or could not fit also ends the wait, and must not pass as a fast run.
+fn all_ready(steps: &[(String, f64)], photos: usize) -> Result<(), String> {
+    let value = |name: &str| steps.iter().find(|(n, _)| n == name).map(|s| s.1);
+    match (value("photos"), value("ready")) {
+        (Some(p), Some(r)) if p == photos as f64 && r == photos as f64 => Ok(()),
+        (Some(p), Some(r)) => Err(format!(
+            "{r} of {p} photos have an estimate, {photos} expected (a failed or 맞추기 불가 estimate?)"
+        )),
+        _ => Err("the estimates line has no photos= or ready=".into()),
+    }
 }
 
 /// The picture a case opens, written into `folder`; `None` (with a note) for a case
@@ -176,12 +274,17 @@ fn summarize(case: &str, samples: &[run::Sample]) -> Result<CaseResult, String> 
             .collect()
     };
     let mut memory: Vec<f64> = samples.iter().map(|s| s.app_mb + s.workers_mb).collect();
-    Ok(CaseResult {
-        case: case.to_string(),
-        first_pixel_ms: report::median(&mut step("first-present-ms")?),
-        decode_ms: report::median(&mut step("decode-ms")?),
-        private_mb: report::median(&mut memory),
-    })
+    Ok(CaseResult::new(
+        case,
+        &[
+            (
+                "first_pixel_ms",
+                report::median(&mut step("first-present-ms")?),
+            ),
+            ("decode_ms", report::median(&mut step("decode-ms")?)),
+            ("private_mb", report::median(&mut memory)),
+        ],
+    ))
 }
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -224,4 +327,31 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         args.cases = CASES.iter().map(|c| c.to_string()).collect();
     }
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_ready;
+
+    fn line(photos: f64, ready: f64) -> Vec<(String, f64)> {
+        vec![
+            ("estimates-done-ms".to_string(), 2400.0),
+            ("photos".to_string(), photos),
+            ("ready".to_string(), ready),
+        ]
+    }
+
+    #[test]
+    fn a_resize_run_counts_only_when_every_photo_is_ready() {
+        assert!(all_ready(&line(10.0, 10.0), 10).is_ok());
+        // Failed or 맞추기 불가 estimates end the wait too, but are not a measurement.
+        assert!(all_ready(&line(10.0, 9.0), 10)
+            .unwrap_err()
+            .contains("9 of 10"));
+        assert!(all_ready(&line(0.0, 0.0), 10).is_err());
+        // Fewer photos joined the session than were opened.
+        assert!(all_ready(&line(9.0, 9.0), 10).is_err());
+        // An app too old to say how many are ready.
+        assert!(all_ready(&line(10.0, 10.0)[..2], 10).is_err());
+    }
 }

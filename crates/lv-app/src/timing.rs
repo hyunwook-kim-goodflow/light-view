@@ -7,6 +7,14 @@
 //! step's time in milliseconds, except `*-at`, which is a time since the start, and
 //! `private-mb`, this process's private bytes when the image was presented. lv-bench
 //! reads the line.
+//!
+//! On the resize screen a second line follows once every photo has its estimate:
+//!
+//! `estimates-done-ms=2400 photos=10 ready=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640`
+//!
+//! (times since the start; `ready` counts the photos with a result, not 맞추기 불가 or a
+//! failure; `peak-private-mb` is this process's highest private bytes so far, the HEIF
+//! and WebP workers not included).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,6 +31,10 @@ static START: OnceLock<Instant> = OnceLock::new();
 static TARGET: OnceLock<PathBuf> = OnceLock::new();
 static STEPS: Mutex<Vec<(String, f64)>> = Mutex::new(Vec::new());
 static REPORTED: AtomicBool = AtomicBool::new(false);
+/// The first resize estimate's time since the start, and whether the estimates line was
+/// printed.
+static FIRST_ESTIMATE: OnceLock<f64> = OnceLock::new();
+static ESTIMATES_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Starts the clock; without this call nothing here does anything.
 pub fn enable(start: Instant) {
@@ -83,7 +95,50 @@ pub fn first_image_presented() {
         return;
     }
     let steps = std::mem::take(&mut *STEPS.lock().unwrap_or_else(|e| e.into_inner()));
-    let line = format_line(elapsed, private_mb(), &steps);
+    emit(&format_line(elapsed, private_mb(), &steps));
+}
+
+/// Call when a resize estimate arrived, with the session's photo count, how many still
+/// wait for theirs and how many have a result. The first time none waits, prints the
+/// estimates line.
+pub fn estimate_arrived(photos: usize, pending: usize, ready: usize) {
+    let Some(start) = START.get() else { return };
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let first = *FIRST_ESTIMATE.get_or_init(|| ms);
+    if pending > 0 || ESTIMATES_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mem = counters();
+    let mb = |b: usize| (b as u64) >> 20;
+    emit(&format_estimates_line(
+        ms,
+        photos,
+        ready,
+        first,
+        // PeakPagefileUsage is the peak of the commit charge, which for a process is its
+        // private bytes: the peak of PrivateUsage.
+        mem.map(|c| (mb(c.PrivateUsage), mb(c.PeakPagefileUsage))),
+    ));
+}
+
+fn format_estimates_line(
+    ms: f64,
+    photos: usize,
+    ready: usize,
+    first: f64,
+    mem: Option<(u64, u64)>,
+) -> String {
+    let mut line = format!(
+        "estimates-done-ms={ms:.0} photos={photos} ready={ready} first-estimate-ms={first:.0}"
+    );
+    if let Some((now, peak)) = mem {
+        line.push_str(&format!(" private-mb={now} peak-private-mb={peak}"));
+    }
+    line
+}
+
+/// Prints `line` to stderr and appends it to the timing log.
+fn emit(line: &str) {
     eprintln!("{line}");
     // The release build has no console, so stderr may go nowhere: also log to a file.
     let path = std::env::temp_dir().join("light-view-timing.log");
@@ -109,6 +164,11 @@ fn format_line(first_present_ms: u128, private_mb: Option<u64>, steps: &[(String
 
 /// This process's private bytes, in MB (2^20).
 fn private_mb() -> Option<u64> {
+    counters().map(|c| c.PrivateUsage as u64 >> 20)
+}
+
+/// This process's memory counters.
+fn counters() -> Option<PROCESS_MEMORY_COUNTERS_EX> {
     let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
     let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
     // SAFETY: `counters` is a live local of `size` bytes; the pseudo handle needs no
@@ -121,7 +181,7 @@ fn private_mb() -> Option<u64> {
         )
     }
     .ok()?;
-    Some(counters.PrivateUsage as u64 >> 20)
+    Some(counters)
 }
 
 #[cfg(test)]
@@ -139,6 +199,18 @@ mod tests {
             "first-present-ms=40 private-mb=7 decode-ms=12.3 shown-at=5.0"
         );
         assert_eq!(format_line(3, None, &[]), "first-present-ms=3");
+    }
+
+    #[test]
+    fn estimates_line_names_its_values() {
+        assert_eq!(
+            format_estimates_line(2400.4, 10, 9, 519.6, Some((310, 640))),
+            "estimates-done-ms=2400 photos=10 ready=9 first-estimate-ms=520 private-mb=310 peak-private-mb=640"
+        );
+        assert_eq!(
+            format_estimates_line(9.0, 1, 0, 9.0, None),
+            "estimates-done-ms=9 photos=1 ready=0 first-estimate-ms=9"
+        );
     }
 
     #[test]

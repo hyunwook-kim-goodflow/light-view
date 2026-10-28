@@ -67,6 +67,8 @@ korean.AppDescription=가볍고 빠른 사진 뷰어
 english.AppDescription=A light, fast photo viewer
 korean.GrantingAccess=사진 해석 프로세스의 격리를 준비하고 있어요...
 english.GrantingAccess=Preparing the isolated image decoder...
+korean.ResizeVerb=light-view로 크기 조정
+english.ResizeVerb=Resize with light-view
 
 [InstallDelete]
 ; A portable.txt left in the install folder would move settings beside the exe.
@@ -154,6 +156,41 @@ Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\shell\open\command
 Root: HKCU; Subkey: "Software\Classes\.heif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heif"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heif"; ValueData: ""
 Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heif"; ValueData: "goodflow.lightview.heif"
+; Explorer right-click verb (M6): one process per selected file (MultiSelectModel=Player),
+; which forwards its path to the running instance (--resize, ruling R4). Windows 11 shows it
+; under "Show more options". Only our own verb key is deleted on uninstall.
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
 
 [Run]
 ; The decoder worker runs in an AppContainer only where ALL APPLICATION PACKAGES

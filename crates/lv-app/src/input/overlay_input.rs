@@ -68,6 +68,8 @@ pub fn show_toast(app: &RefCell<App>, hwnd: HWND, make: impl FnOnce(u64) -> Toas
     // SAFETY: plain call on our window; setting the same id again restarts the timer.
     unsafe { SetTimer(hwnd, TOAST_TIMER, ms as u32, None) };
     invalidate(hwnd);
+    // A replaced "N장 대체 · 실행 취소" is final now.
+    crate::resize::toasts::toast_check(app, hwnd);
 }
 
 /// Input for the overlay, seen before everything else. An open dialog takes keys
@@ -211,7 +213,10 @@ pub fn overlay(
             let mut a = app.try_borrow_mut().ok()?;
             let now = a.pointer.now_ms();
             if a.overlay.expire(now) {
+                drop(a);
                 invalidate(hwnd);
+                // A replace whose toast went is final; a waiting report shows.
+                crate::resize::toasts::toast_check(app, hwnd);
             } else if let Some(t) = &a.overlay.toast {
                 // Fired early: wait out the rest.
                 let left = (t.shown_at_ms + t.duration_ms).saturating_sub(now).max(1);
@@ -271,6 +276,8 @@ pub fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEven
     if let Some(path) = deferred {
         commands::open(app, hwnd, &path);
     }
+    // Photos sent to the resize screen meanwhile.
+    crate::resize::flush_queued(app, hwnd);
     // Then a rescan held back by the dialog (of the newly opened folder, if any; it
     // waits again if the open asks to save first).
     watch::rescan_if_due(app, hwnd);

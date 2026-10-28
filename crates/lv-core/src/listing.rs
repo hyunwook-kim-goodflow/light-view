@@ -1,9 +1,11 @@
 //! Folder listing and navigation in Explorer order.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use crate::explorer_sort::{file_meta, sort_paths, FileMeta, SortSpec};
 use crate::format::is_supported_extension;
 
 /// Natural ("Explorer") string comparison of two file names.
@@ -104,62 +106,129 @@ pub struct FolderList {
     hidden: Vec<PathBuf>,
     /// The listed folder (the parent of the file the list was made for).
     dir: Option<PathBuf>,
+    /// The order, chosen when the folder was opened and kept by every refresh.
+    spec: SortSpec,
+    /// Size and modification time of the listed and hidden files, as first read: a
+    /// listed file keeps its place when it changes (a saved rotation does not move it).
+    meta: HashMap<PathBuf, FileMeta>,
 }
 
+/// A file of a folder with its size and modification time, if they could be read.
+pub type Entry = (PathBuf, Option<FileMeta>);
+
 impl FolderList {
-    fn build(paths: Vec<PathBuf>, keep: Option<&Path>) -> Vec<PathBuf> {
+    fn build(
+        paths: Vec<PathBuf>,
+        keep: Option<&Path>,
+        spec: SortSpec,
+        meta: &HashMap<PathBuf, FileMeta>,
+    ) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = paths
             .into_iter()
             .filter(|p| is_supported_extension(p) || keep.is_some_and(|c| same_path(p, c)))
             .collect();
-        v.sort_by(|a, b| {
-            natural_cmp(
-                a.file_name().unwrap_or_default(),
-                b.file_name().unwrap_or_default(),
-            )
-        });
+        sort_paths(&mut v, spec, &|p| meta.get(p).copied());
         v
     }
 
     /// Keeps only supported files (plus `current`, always) sorted by `natural_cmp`.
-    pub fn from_paths(mut paths: Vec<PathBuf>, current: &Path) -> FolderList {
+    pub fn from_paths(paths: Vec<PathBuf>, current: &Path) -> FolderList {
+        Self::from_paths_sorted(paths, current, SortSpec::NATURAL)
+    }
+
+    /// Like `from_paths`, in the order `spec`; sizes and times are read from disk when
+    /// `spec` compares them (a file that cannot be read goes last).
+    pub fn from_paths_sorted(paths: Vec<PathBuf>, current: &Path, spec: SortSpec) -> FolderList {
+        let entries = paths
+            .into_iter()
+            .map(|p| {
+                let m = if spec.needs_meta() {
+                    read_meta(&p)
+                } else {
+                    None
+                };
+                (p, m)
+            })
+            .collect();
+        Self::from_entries(entries, current, spec)
+    }
+
+    /// Like `from_paths_sorted`, with the sizes and times already read.
+    pub fn from_entries(entries: Vec<Entry>, current: &Path, spec: SortSpec) -> FolderList {
+        let mut meta = HashMap::new();
+        let mut paths = Vec::with_capacity(entries.len() + 1);
+        for (p, m) in entries {
+            if let Some(m) = m {
+                meta.insert(p.clone(), m);
+            }
+            paths.push(p);
+        }
         if !paths.iter().any(|p| same_path(p, current)) {
+            if let Some(m) = read_meta(current) {
+                meta.insert(current.to_path_buf(), m);
+            }
             paths.push(current.to_path_buf());
         }
-        let entries = Self::build(paths, Some(current));
+        let entries = Self::build(paths, Some(current), spec, &meta);
         let current_index = entries.iter().position(|p| same_path(p, current));
         FolderList {
             entries,
             current: current_index,
             hidden: Vec::new(),
             dir: current.parent().map(Path::to_path_buf),
+            spec,
+            meta,
         }
     }
 
     /// Lists the files (not sub-folders) in the parent folder of `file`.
     pub fn scan(file: &Path) -> std::io::Result<FolderList> {
+        Self::scan_sorted(file, SortSpec::NATURAL)
+    }
+
+    /// Like `scan`, in the order `spec`.
+    pub fn scan_sorted(file: &Path, spec: SortSpec) -> std::io::Result<FolderList> {
         let file = std::path::absolute(file)?;
         let file = file.as_path();
         let dir = file.parent().unwrap_or(file);
-        Ok(Self::from_paths(Self::read_files(dir)?, file))
+        Ok(Self::from_entries(Self::read_entries(dir)?, file, spec))
     }
 
-    /// The files (not sub-folders) of `dir`, unsorted and unfiltered: the input of
-    /// `from_paths` and `refresh`.
-    pub fn read_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-        let mut paths = Vec::new();
+    /// The files (not sub-folders) of `dir` with their sizes and times, unsorted and
+    /// unfiltered: the input of `from_entries` and `refresh_entries`. The sizes and
+    /// times come with the folder listing; no file is opened.
+    pub fn read_entries(dir: &Path) -> std::io::Result<Vec<Entry>> {
+        let mut out = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
-                paths.push(entry.path());
+                let meta = entry.metadata().ok().map(|m| file_meta(&m));
+                out.push((entry.path(), meta));
             }
         }
-        Ok(paths)
+        Ok(out)
     }
 
     /// The listed folder.
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
+    }
+
+    /// The order the folder is walked in.
+    pub fn spec(&self) -> SortSpec {
+        self.spec
+    }
+
+    /// Sorts the listing by `spec` from now on (refreshes too), keeping the current
+    /// file current. True if the order changed.
+    pub fn resort(&mut self, spec: SortSpec) -> bool {
+        self.spec = spec;
+        let before = self.entries.clone();
+        let current = self.current().map(Path::to_path_buf);
+        let meta = &self.meta;
+        sort_paths(&mut self.entries, spec, &|p| meta.get(p).copied());
+        self.current = current.and_then(|c| self.entries.iter().position(|p| *p == c));
+        self.entries != before
     }
 
     pub fn current(&self) -> Option<&Path> {
@@ -196,18 +265,37 @@ impl FolderList {
         self.entries.get(i).map(PathBuf::as_path)
     }
 
+    /// `refresh_entries` without sizes and times (a new file goes last in an order that
+    /// compares them).
+    pub fn refresh(&mut self, paths: Vec<PathBuf>, keep: Option<&Path>) {
+        self.refresh_entries(paths.into_iter().map(|p| (p, None)).collect(), keep);
+    }
+
     /// Replaces the listing, keeping the current file by path; if it is gone,
     /// moves to the same index (or the last entry). Hidden files stay hidden. `keep` is
     /// listed even without a supported extension (the current file, opened as such).
-    pub fn refresh(&mut self, paths: Vec<PathBuf>, keep: Option<&Path>) {
+    /// The order stays the one the list was made with (ruling R5), and a file listed
+    /// before keeps its first size and time, so its own changes do not move it.
+    pub fn refresh_entries(&mut self, entries: Vec<Entry>, keep: Option<&Path>) {
         let old_path = self.current().map(Path::to_path_buf);
         let old_index = self.current.unwrap_or(0);
-        let hidden = &self.hidden;
-        let paths = paths
-            .into_iter()
-            .filter(|p| !hidden.iter().any(|h| same_path(p, h)))
+        let mut meta: HashMap<PathBuf, FileMeta> = self
+            .hidden
+            .iter()
+            .filter_map(|h| Some((h.clone(), *self.meta.get(h)?)))
             .collect();
-        self.entries = Self::build(paths, keep);
+        let mut paths = Vec::with_capacity(entries.len());
+        for (p, m) in entries {
+            if self.hidden.iter().any(|h| same_path(&p, h)) {
+                continue;
+            }
+            if let Some(m) = self.meta.get(&p).copied().or(m) {
+                meta.insert(p.clone(), m);
+            }
+            paths.push(p);
+        }
+        self.meta = meta;
+        self.entries = Self::build(paths, keep, self.spec, &self.meta);
         self.current = if self.entries.is_empty() {
             None
         } else {
@@ -216,6 +304,11 @@ impl FolderList {
                 .or(Some(old_index.min(self.entries.len() - 1)))
         };
     }
+}
+
+/// The size and time of `path` from disk (`None` if it cannot be read).
+fn read_meta(path: &Path) -> Option<FileMeta> {
+    std::fs::metadata(path).ok().map(|m| file_meta(&m))
 }
 
 impl FolderList {
@@ -239,7 +332,7 @@ impl FolderList {
         true
     }
 
-    /// Puts a hidden file of this folder back in Explorer order. The current file stays
+    /// Puts a hidden file of this folder back in the list's order. The current file stays
     /// current (the restored one becomes current in an empty list). A hidden file of
     /// another folder is only dropped from the hidden set. False if nothing was listed.
     pub fn unhide(&mut self, path: &Path) -> bool {
@@ -254,10 +347,11 @@ impl FolderList {
         if !here {
             return false;
         }
-        let name = p.file_name().unwrap_or_default().to_owned();
+        let (spec, meta) = (self.spec, &self.meta);
+        let p_meta = meta.get(&p).copied();
         let i = self
             .entries
-            .partition_point(|e| natural_cmp(e.file_name().unwrap_or_default(), &name).is_lt());
+            .partition_point(|e| spec.compare(e, meta.get(e).copied(), &p, p_meta).is_lt());
         self.entries.insert(i, p);
         self.current = match self.current {
             Some(c) if c >= i => Some(c + 1),
@@ -280,6 +374,7 @@ impl FolderList {
     pub fn forget(&mut self, path: &Path) -> bool {
         let before = self.hidden.len();
         self.hidden.retain(|p| !same_path(p, path));
+        self.meta.retain(|p, _| !same_path(p, path));
         self.hidden.len() != before
     }
 
@@ -455,5 +550,95 @@ mod tests {
         assert!(!l.unhide(&p("b.jpg")));
         l.refresh(vec![p("a.jpg"), p("b.jpg")], None);
         assert_eq!(l.position(), Some((1, 2)));
+    }
+
+    fn newest_first() -> SortSpec {
+        SortSpec {
+            key: crate::explorer_sort::SortKey::Modified,
+            descending: true,
+        }
+    }
+
+    fn e(name: &str, modified: u64) -> Entry {
+        (p(name), Some((1, modified)))
+    }
+
+    #[test]
+    fn rescan_keeps_sort_spec() {
+        let mut l = FolderList::from_entries(
+            vec![e("a.jpg", 10), e("b.jpg", 30), e("c.jpg", 20)],
+            &p("c.jpg"),
+            newest_first(),
+        );
+        assert_eq!(l.position(), Some((2, 3)));
+        assert_eq!(l.neighbor(-1), Some(p("b.jpg").as_path()));
+        // A new file takes its place in the same order; `c.jpg` was saved (newer now)
+        // and stays where it was.
+        l.refresh_entries(
+            vec![
+                e("a.jpg", 10),
+                e("b.jpg", 30),
+                e("c.jpg", 99),
+                e("d.jpg", 25),
+            ],
+            None,
+        );
+        assert_eq!(l.spec(), newest_first());
+        let order: Vec<_> = (-2..=1)
+            .filter_map(|o| l.neighbor(o))
+            .map(Path::to_path_buf)
+            .collect();
+        assert_eq!(order, [p("b.jpg"), p("d.jpg"), p("c.jpg"), p("a.jpg")]);
+        assert_eq!(l.position(), Some((3, 4)));
+        // A pending delete comes back at its place in that order.
+        l.hide(&p("d.jpg"));
+        l.refresh_entries(
+            vec![
+                e("a.jpg", 10),
+                e("b.jpg", 30),
+                e("c.jpg", 99),
+                e("d.jpg", 25),
+            ],
+            None,
+        );
+        assert_eq!(l.position(), Some((2, 3)));
+        assert!(l.unhide(&p("d.jpg")));
+        assert_eq!(l.neighbor(-1), Some(p("d.jpg").as_path()));
+    }
+
+    #[test]
+    fn resort_keeps_the_current_file() {
+        let mut l = FolderList::from_entries(
+            vec![e("a.jpg", 10), e("b.jpg", 30), e("c.jpg", 20)],
+            &p("a.jpg"),
+            SortSpec::NATURAL,
+        );
+        assert_eq!(l.position(), Some((1, 3)));
+        assert!(l.resort(newest_first()));
+        assert_eq!(l.current(), Some(p("a.jpg").as_path()));
+        assert_eq!(l.position(), Some((3, 3)));
+        assert!(!l.resort(newest_first()));
+    }
+
+    #[test]
+    fn scan_sorted_reads_sizes_from_the_folder() {
+        let dir = tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap();
+        for (n, len) in [("a.jpg", 3), ("b.jpg", 1), ("c.jpg", 2)] {
+            std::fs::write(dir.path().join(n), vec![0u8; len]).unwrap();
+        }
+        let by_size = SortSpec {
+            key: crate::explorer_sort::SortKey::Size,
+            descending: false,
+        };
+        let l = FolderList::scan_sorted(&dir.path().join("c.jpg"), by_size).unwrap();
+        assert_eq!(l.position(), Some((2, 3)));
+        assert_eq!(l.neighbor(-1), Some(dir.path().join("b.jpg").as_path()));
+        let paths = vec![
+            dir.path().join("a.jpg"),
+            dir.path().join("b.jpg"),
+            dir.path().join("c.jpg"),
+        ];
+        let l = FolderList::from_paths_sorted(paths, &dir.path().join("a.jpg"), by_size);
+        assert_eq!(l.position(), Some((3, 3)));
     }
 }

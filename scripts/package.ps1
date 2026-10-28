@@ -11,7 +11,9 @@
     2. Builds light-view.exe (lv-app) and lv-worker.exe in release mode with the C runtime
        linked statically (-C target-feature=+crt-static): light-view.exe resolves its
        imports from System32 only, so it must not need vcruntime140.dll. Skipped with
-       -SkipBuild (the release workflow signs the built exes first).
+       -SkipBuild (the release workflow signs the built exes first). Then checks the
+       import tables: the C libraries (the vcpkg DLLs) are imported by lv-worker.exe only,
+       never by light-view.exe, and lv-worker.exe imports each library it serves.
     3. Writes THIRD_PARTY_NOTICES.md: notices/native.md (the C libraries), then
        `cargo about generate` over about.hbs (every crate in the shipped executables), then
        the full license texts in notices/ as an appendix.
@@ -50,8 +52,11 @@ $DistDir = Join-Path $RepoRoot 'dist'
 $StageDir = Join-Path $DistDir 'stage'
 # Spec §7: installed size at most 30 MB (decimal megabytes, the stricter reading).
 $MaxUnpackedBytes = 30 * 1000 * 1000
-# The DLLs lv-worker.exe loads: heif.dll -> libde265.dll; turbojpeg.dll -> spng.dll -> z.dll.
-$NativeDlls = @('heif.dll', 'libde265.dll', 'turbojpeg.dll', 'spng.dll', 'z.dll')
+# The DLLs lv-worker.exe loads: heif.dll -> libde265.dll; turbojpeg.dll -> spng.dll -> z.dll;
+# libwebp.dll -> libsharpyuv.dll.
+$NativeDlls = @('heif.dll', 'libde265.dll', 'turbojpeg.dll', 'spng.dll', 'z.dll', 'libwebp.dll', 'libsharpyuv.dll')
+# The ones lv-worker.exe imports itself (the rest come in through these).
+$WorkerImports = @('heif.dll', 'turbojpeg.dll', 'libwebp.dll')
 # The Visual C++ runtime those DLLs import (app-local; lv-worker.exe looks in its own folder).
 $VcRuntimeDlls = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll')
 
@@ -112,7 +117,8 @@ function New-Notices {
             @('D', 'libjpeg-turbo README.ijg (IJG License)', 'libjpeg-turbo-README.ijg.txt'),
             @('E', 'libspng (BSD-2-Clause)', 'libspng-LICENSE.txt'),
             @('F', 'libpng-2.0 (libspng의 libpng 유래 코드)', 'libpng-LICENSE.txt'),
-            @('G', 'zlib', 'zlib-LICENSE.txt')
+            @('G', 'zlib', 'zlib-LICENSE.txt'),
+            @('H', 'libwebp COPYING and PATENTS (BSD-3-Clause, WebM patent grant)', 'libwebp-COPYING.txt')
         )
         $parts = New-Object System.Collections.Generic.List[string]
         $parts.Add((Read-Text (Join-Path $notices 'native.md')))
@@ -210,6 +216,28 @@ function Assert-NoVcRuntimeImport {
     Write-Host "$(Split-Path -Leaf $Exe) imports: $($imports -join ', ')"
 }
 
+# C code runs in the sandboxed worker only: light-view.exe imports none of the vcpkg DLLs
+# (and none of the DLLs vcpkg builds for them, such as libwebp's), and lv-worker.exe imports
+# the libraries it serves.
+function Assert-NativeImportsInWorkerOnly {
+    param([string]$AppExe, [string]$WorkerExe)
+    $vcpkgDlls = @(Get-ChildItem -Path (Join-Path $RepoRoot 'vcpkg_installed\x64-windows\bin') -Filter '*.dll' |
+        ForEach-Object { $_.Name })
+    $appImports = @(Get-PeImports $AppExe)
+    $leaked = @($appImports | Where-Object { ($vcpkgDlls + $NativeDlls) -contains $_ })
+    if ($leaked.Count -gt 0) {
+        throw "$AppExe imports $($leaked -join ', '); C libraries belong to lv-worker.exe only"
+    }
+    # (PowerShell names are case-insensitive: this must not be called $workerImports.)
+    $imported = @(Get-PeImports $WorkerExe)
+    foreach ($dll in $WorkerImports) {
+        if (-not ($imported -contains $dll)) {
+            throw "$WorkerExe does not import $dll"
+        }
+    }
+    Write-Host "Native libraries ($($WorkerImports -join ', ')) imported by lv-worker.exe only."
+}
+
 # This version's zip and, once built, its installer.
 function Write-Checksums {
     $names = @("light-view-$Version-portable.zip", "light-view-$Version-setup.exe")
@@ -268,6 +296,7 @@ foreach ($exe in @($appExe, $workerExe)) {
     if (-not (Test-Path $exe)) { throw "$exe not found" }
     Assert-NoVcRuntimeImport $exe
 }
+Assert-NativeImportsInWorkerOnly -AppExe $appExe -WorkerExe $workerExe
 
 # --- 3, 4. Stage -------------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null

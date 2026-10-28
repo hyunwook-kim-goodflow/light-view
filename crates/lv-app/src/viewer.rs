@@ -16,9 +16,11 @@ use lv_core::viewport::{Viewport, ZOOM_STEP};
 use crate::strings::{self, t, text, Lang, S};
 
 mod leave;
+mod open;
 mod rescan;
 
 pub use leave::{LeaveDecision, LeaveReason};
+pub use open::SortSource;
 pub use rescan::RescanFound;
 
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
@@ -106,6 +108,8 @@ pub struct Viewer {
     /// A save of the shown photo failed: leaving it asks again even with `auto_save`, so
     /// a file that cannot be saved never traps the user.
     save_failed: bool,
+    /// Asks which order a newly opened folder is shown in (ruling R5); `None` in tests.
+    sort_source: Option<Box<dyn SortSource>>,
     /// What waits for the save prompt or a running save.
     pending_leave: Option<LeaveReason>,
 }
@@ -193,29 +197,8 @@ impl Viewer {
             auto_save: false,
             save_failed: false,
             pending_leave: None,
+            sort_source: None,
         }
-    }
-
-    /// Opens `path` within its folder. Never decodes on this thread.
-    pub fn open(&mut self, path: &Path) {
-        let mut list = FolderList::scan(path)
-            .unwrap_or_else(|_| FolderList::from_paths(vec![path.to_path_buf()], path));
-        // A pending delete stays hidden in the new listing.
-        for hidden in self.list.hidden() {
-            list.hide(hidden);
-        }
-        self.open_list(list);
-    }
-
-    fn open_list(&mut self, list: FolderList) {
-        self.list = list;
-        self.backward = false;
-        self.quarters = 0;
-        if self.showing_current() {
-            // Reopening the shown photo: rebuild it unrotated and unzoomed.
-            self.shown = None;
-        }
-        self.after_move();
     }
 
     /// The image area size in DIPs and the DIPs per device pixel. An untouched
@@ -636,7 +619,7 @@ mod tests {
     }
 
     /// A viewer on a.jpg … e.jpg, opened at `name`, and its ready notifications.
-    fn viewer_at(name: &str) -> (Viewer, Receiver<PathBuf>) {
+    pub(super) fn viewer_at(name: &str) -> (Viewer, Receiver<PathBuf>) {
         viewer_with(name, None)
     }
 
@@ -699,6 +682,67 @@ mod tests {
             Scene::Image { rect, .. } => assert_eq!((rect.2, rect.3), (400.0, 300.0)),
             _ => panic!("the photo should be shown"),
         }
+    }
+
+    #[test]
+    fn close_shows_the_empty_screen() {
+        // The resize screen closing back to an empty start (M6).
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        let generation = v.generation();
+        assert_eq!(v.close(), Redraw::Full);
+        assert!(!v.has_file() && !v.unsaved_rotation());
+        assert_eq!(v.current_path(), None);
+        assert!(matches!(v.scene(), Scene::Empty));
+        assert_ne!(v.generation(), generation);
+    }
+
+    /// M6 ruling: the resize screen opened from the menu leaves the viewer on the rotated
+    /// photo; Esc returns to it with the rotation still pending and no prompt.
+    #[test]
+    fn menu_entry_then_esc_keeps_the_pending_rotation() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        let generation = v.generation();
+        // Esc: back to c.jpg, which the screen never moved away from.
+        assert_eq!(v.return_to(&p("c.jpg"), 1), Redraw::Full);
+        assert_eq!(v.current_path(), Some(p("c.jpg").as_path()));
+        assert_eq!(v.view_rotation_quarters(), 1);
+        assert!(v.unsaved_rotation());
+        assert_eq!(v.generation(), generation, "not reopened");
+        assert_eq!(v.take_pending_leave(), None, "no prompt waits");
+        match v.scene() {
+            Scene::Image { quarters, .. } => assert_eq!(quarters, 1),
+            _ => panic!("the photo should be shown"),
+        }
+    }
+
+    /// M6 ruling: a drop or a forwarded launch opens the screen on other photos, so the
+    /// viewer shows those; Esc brings back the rotated photo with its pending rotation.
+    #[test]
+    fn drop_or_forwarded_entry_then_esc_keeps_the_pending_rotation() {
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateLeft);
+        assert_eq!(v.view_rotation_quarters(), 3);
+        // The screen shows its first photo (what `resize::show_current` does).
+        v.open(&p("a.jpg"));
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.view_rotation_quarters(), 0);
+        // Esc.
+        v.return_to(&p("c.jpg"), 3);
+        wait_shown(&mut v, &rx);
+        assert_eq!(v.current_path(), Some(p("c.jpg").as_path()));
+        assert_eq!(v.view_rotation_quarters(), 3);
+        assert!(v.unsaved_rotation());
+        match v.scene() {
+            Scene::Image { quarters, .. } => assert_eq!(quarters, 3),
+            _ => panic!("the photo should be shown"),
+        }
+        // Saving it later saves that rotation.
+        assert_eq!(v.save_request().map(|r| r.quarters), Some(3));
     }
 
     #[test]

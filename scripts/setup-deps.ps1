@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Fetches and builds the C dependencies of light-view (libheif + libde265 for HEIF decoding,
-    libjpeg-turbo for lossless JPEG rotation; lv-worker alone links them) with vcpkg and
-    copies their DLLs next to the cargo build outputs.
+    libjpeg-turbo for lossless JPEG rotation, libwebp for lossy WebP encoding; lv-worker alone
+    links them) with vcpkg and copies their DLLs next to the cargo build outputs.
 
 .DESCRIPTION
     Runs under Windows PowerShell 5.1:
@@ -14,8 +14,8 @@
        or if libheif was built with its 'jpeg' feature. libjpeg-turbo itself is allowed: it
        serves lv-worker's TurboJPEG transforms, never libheif.
     4. Copies the runtime DLLs into target\debug and target\release, next to the executables.
-       (`cargo test`/`cargo run` also find them through libheif-sys's and lv-jpegtran's
-       OUT_DIR, which cargo puts on PATH.)
+       (`cargo test`/`cargo run` also find them through libheif-sys's, lv-jpegtran's and
+       lv-webp's OUT_DIR, which cargo puts on PATH.)
     5. Prints the environment the build uses (pinned in .cargo\config.toml [env]).
 
     With -CopyOnly it only does step 4, from an existing vcpkg_installed\ (for example after
@@ -55,11 +55,12 @@ function Invoke-Native {
     }
 }
 
-# Copies heif.dll, libde265.dll, turbojpeg.dll and the other DLLs they need (turbojpeg.dll
-# imports spng.dll, which imports zlib's z.dll) next to the executables.
+# Copies heif.dll, libde265.dll, turbojpeg.dll, libwebp.dll and the other DLLs they need
+# (turbojpeg.dll imports spng.dll, which imports zlib's z.dll; libwebp.dll imports
+# libsharpyuv.dll) next to the executables.
 function Copy-RuntimeDlls {
     $binDir = Join-Path $TripletDir 'bin'
-    foreach ($required in @('heif.dll', 'libde265.dll', 'turbojpeg.dll', 'spng.dll', 'z.dll')) {
+    foreach ($required in @('heif.dll', 'libde265.dll', 'turbojpeg.dll', 'spng.dll', 'z.dll', 'libwebp.dll', 'libsharpyuv.dll')) {
         if (-not (Test-Path (Join-Path $binDir $required))) {
             throw "$required not found in $binDir"
         }

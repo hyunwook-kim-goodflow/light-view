@@ -3,8 +3,10 @@
 
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
 
+use std::path::PathBuf;
+
 use crate::about;
-use crate::strings::{t, S};
+use crate::strings::{photo_count, t, S};
 use crate::toolbar::Rect;
 
 pub(super) const VK_TAB: u16 = 0x09;
@@ -32,6 +34,10 @@ pub enum Prompt {
     About,
     /// "새 버전이 나오면 알려 드릴까요?", once, after the first photo (spec §6.6).
     UpdateCheck,
+    /// Several photos dropped on the viewer: [보기] or [크기 조정] (M6, spec §3).
+    DropMany {
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +54,10 @@ pub enum PromptResult {
     NotifyMe,
     /// Update question: [괜찮아요].
     NoThanks,
+    /// Several photos dropped: [보기] opens the first.
+    View,
+    /// Several photos dropped: [크기 조정].
+    Resize,
 }
 
 /// A focusable part of a dialog.
@@ -64,6 +74,7 @@ impl Prompt {
             Prompt::PermanentDelete { .. } => t(S::PromptPermanentDelete),
             Prompt::About => t(S::AboutTitle),
             Prompt::UpdateCheck => t(S::PromptUpdateCheck),
+            Prompt::DropMany { .. } => t(S::PromptDropMany),
         }
     }
 
@@ -88,6 +99,11 @@ impl Prompt {
                 Item::Button(PromptResult::NotifyMe),
                 Item::Button(PromptResult::NoThanks),
             ],
+            Prompt::DropMany { .. } => &[
+                Item::Button(PromptResult::View),
+                Item::Button(PromptResult::Resize),
+                Item::Button(PromptResult::Cancel),
+            ],
         }
     }
 
@@ -101,6 +117,8 @@ impl Prompt {
             Prompt::PermanentDelete { .. } => PromptResult::Cancel,
             Prompt::About => PromptResult::Close,
             Prompt::UpdateCheck => PromptResult::NoThanks,
+            // A drop has always opened the photo; Enter keeps doing that.
+            Prompt::DropMany { .. } => PromptResult::View,
         }
     }
 
@@ -108,15 +126,20 @@ impl Prompt {
     /// question wraps.
     fn estimated_title_lines(&self) -> u32 {
         match self {
-            Prompt::SaveRotation | Prompt::About | Prompt::UpdateCheck => 1,
+            Prompt::SaveRotation
+            | Prompt::About
+            | Prompt::UpdateCheck
+            | Prompt::DropMany { .. } => 1,
             Prompt::PermanentDelete { .. } => 2,
         }
     }
 
-    /// Lines under the title in ink2: the file name, or About's version and license.
+    /// Lines under the title in ink2: the file name, About's version and license, or how
+    /// many photos were dropped.
     pub fn details(&self) -> Vec<String> {
         match self {
             Prompt::SaveRotation | Prompt::UpdateCheck => Vec::new(),
+            Prompt::DropMany { paths } => vec![photo_count(paths.len())],
             Prompt::PermanentDelete { name } => vec![name.clone()],
             Prompt::About => vec![about::version_line(), about::license_line().to_owned()],
         }
@@ -134,6 +157,8 @@ impl PromptResult {
             PromptResult::Close => t(S::BtnClose),
             PromptResult::NotifyMe => t(S::BtnNotifyMe),
             PromptResult::NoThanks => t(S::BtnNoThanks),
+            PromptResult::View => t(S::BtnView),
+            PromptResult::Resize => t(S::Resize),
         }
     }
 }

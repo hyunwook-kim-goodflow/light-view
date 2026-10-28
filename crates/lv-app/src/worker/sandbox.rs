@@ -2,7 +2,8 @@
 //!
 //! Mandatory layers (a worker that misses one is not used): a restricted token at low
 //! integrity, and a Job (kill on close, one active process, a memory cap) that the process
-//! joins while still suspended, so it never runs outside the Job. Best-effort layers (logged
+//! is created in (PROC_THREAD_ATTRIBUTE_JOB_LIST; where Windows refuses that, it joins
+//! while still suspended), so it never runs outside the Job. Best-effort layers (logged
 //! when they fail): the worker's AppContainer with no capabilities (ruling R2, see
 //! [`appcontainer`](super::appcontainer)), win32k system call lockdown and the
 //! no-child-process policy at creation, and the Job's UI restrictions. Only the three pipe
@@ -11,24 +12,21 @@
 //! the container's own folder), so neither the DLL search nor anything environment-driven
 //! reaches other folders.
 
-use std::ffi::{c_void, OsStr};
 use std::fs::File;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::appcontainer::Container;
-
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    SetHandleInformation, BOOL, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+    SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
-    TokenIntegrityLevel, WinLowLabelSid, DISABLE_MAX_PRIVILEGE, PSID, SECURITY_CAPABILITIES,
-    SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenIntegrityLevel, WinLowLabelSid, DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL,
+    TOKEN_QUERY,
 };
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
@@ -43,21 +41,16 @@ use windows::Win32::System::JobObjects::{
 use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, DeleteProcThreadAttributeList, GetCurrentProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject,
 };
+
+use super::appcontainer::Container;
+use launch::Launch;
+
+mod launch;
 
 /// Pipe buffer for requests and responses; responses are tens of MB.
 const PIPE_BUFFER: u32 = 1024 * 1024;
-/// PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON.
-const WIN32K_SYSTEM_CALL_DISABLE: u64 = 1 << 28;
-/// PROCESS_CREATION_CHILD_PROCESS_RESTRICTED.
-const CHILD_PROCESS_RESTRICTED: u32 = 1;
 
 /// A running sandboxed worker. Dropping it terminates the Job and with it the process.
 pub struct Sandboxed {
@@ -129,6 +122,10 @@ pub fn log(msg: &str) {
     eprintln!("light-view: worker: {msg}");
 }
 
+/// Whether CreateProcessAsUserW refused PROC_THREAD_ATTRIBUTE_JOB_LIST once (before
+/// Windows 10): later starts go straight to the assign-after-creation path.
+static JOB_LIST_REFUSED: AtomicBool = AtomicBool::new(false);
+
 /// Starts `exe --max-pixels <max_pixels> <extra_args>` in the sandbox, inside `container`
 /// when given. With `mitigations` false the best-effort creation attributes (AppContainer,
 /// win32k lockdown, child process policy) are left out; the mandatory layers are always
@@ -141,6 +138,48 @@ pub fn spawn(
     mitigations: bool,
     container: Option<&Container>,
 ) -> Result<(Sandboxed, Pipes), String> {
+    start_suspended(exe, max_pixels, extra_args, mitigations, container)?.resume()
+}
+
+/// A worker created suspended and already inside its Job, not yet resumed. Dropping it
+/// ends the Job and with it the process.
+pub struct Suspended {
+    sandboxed: Sandboxed,
+    thread: OwnedHandle,
+    pipes: Pipes,
+    /// The process was created inside the Job (PROC_THREAD_ATTRIBUTE_JOB_LIST), not
+    /// assigned to it afterwards. Read by the tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    born_in_job: bool,
+}
+
+impl Suspended {
+    /// Lets the worker run.
+    pub fn resume(self) -> Result<(Sandboxed, Pipes), String> {
+        // SAFETY: valid thread handle of the suspended main thread.
+        if unsafe { ResumeThread(raw(&self.thread)) } == u32::MAX {
+            // `self.sandboxed` drops here and ends the Job.
+            return Err(format!(
+                "ResumeThread: {}",
+                windows::core::Error::from_win32()
+            ));
+        }
+        Ok((self.sandboxed, self.pipes))
+    }
+}
+
+/// [`spawn`] up to the point before the worker runs: the process exists, suspended, inside
+/// its kill-on-close Job. Where Windows accepts PROC_THREAD_ATTRIBUTE_JOB_LIST the process
+/// is born inside the Job, so a parent that dies at any moment takes it along; otherwise
+/// it is assigned to the Job right after creation (a parent killed in between would leave
+/// it suspended outside any Job).
+pub fn start_suspended(
+    exe: &Path,
+    max_pixels: u64,
+    extra_args: &[&str],
+    mitigations: bool,
+    container: Option<&Container>,
+) -> Result<Suspended, String> {
     let token = low_integrity_token().map_err(|e| format!("low integrity token: {e}"))?;
     let job = create_job(max_pixels).map_err(|e| format!("job object: {e}"))?;
 
@@ -155,24 +194,41 @@ pub fn spawn(
     let child_ends = [raw(&stdin_child), raw(&stdout_child), raw(&stderr_child)];
 
     let launch = Launch::new(exe, max_pixels, extra_args)?;
+    // One step of the AppContainer/mitigation fallback: inside the Job from creation when
+    // Windows takes the attribute, else the same step without it. The bool says which.
+    let create = |mitigations: bool, container: Option<&Container>| {
+        let without_job = || launch.create(&token, child_ends, mitigations, container, None);
+        if JOB_LIST_REFUSED.load(Ordering::Relaxed) {
+            return without_job().map(|info| (info, false));
+        }
+        match launch.create(&token, child_ends, mitigations, container, Some(raw(&job))) {
+            Ok(info) => Ok((info, true)),
+            Err(with_job) => {
+                let info = without_job()?;
+                log(&format!(
+                    "start inside the job refused ({with_job}); assigning after creation"
+                ));
+                JOB_LIST_REFUSED.store(true, Ordering::Relaxed);
+                Ok((info, false))
+            }
+        }
+    };
     let container = container.filter(|_| mitigations);
     let mut container_failure = None;
     let first = match container {
-        Some(container) => launch
-            .create(&token, child_ends, mitigations, Some(container))
-            .or_else(|e| {
-                container_failure = Some(e);
-                launch.create(&token, child_ends, mitigations, None)
-            }),
-        None => launch.create(&token, child_ends, mitigations, None),
+        Some(container) => create(mitigations, Some(container)).or_else(|e| {
+            container_failure = Some(e);
+            create(mitigations, None)
+        }),
+        None => create(mitigations, None),
     };
-    let info = match first {
-        Ok(info) => info,
+    let (info, born_in_job) = match first {
+        Ok(created) => created,
         Err(e) if mitigations => {
             log(&format!(
                 "start with mitigation attributes failed ({e}); retrying without"
             ));
-            launch.create(&token, child_ends, false, None)?
+            create(false, None)?
         }
         Err(e) => return Err(e),
     };
@@ -191,38 +247,36 @@ pub fn spawn(
     if let Err(e) =
         unsafe { SetHandleInformation(raw(&stdin_child), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
     {
-        // SAFETY: valid process handle; the suspended process never ran and is not in the
-        // Job yet, so it must not be left behind.
+        // SAFETY: valid process handle; the suspended process never ran and may not be in
+        // the Job yet, so it must not be left behind.
         let _ = unsafe { TerminateProcess(raw(&process), 1) };
         return Err(format!("SetHandleInformation: {e}"));
     }
 
-    // SAFETY: both handles are valid; the process is suspended and has run no code.
-    if let Err(e) = unsafe { AssignProcessToJobObject(raw(&job), raw(&process)) } {
-        // SAFETY: valid process handle; the suspended process never ran outside the Job.
-        let _ = unsafe { TerminateProcess(raw(&process), 1) };
-        return Err(format!("AssignProcessToJobObject: {e}"));
+    if !born_in_job {
+        // SAFETY: both handles are valid; the process is suspended and has run no code.
+        if let Err(e) = unsafe { AssignProcessToJobObject(raw(&job), raw(&process)) } {
+            // SAFETY: valid process handle; the suspended process never ran outside the Job.
+            let _ = unsafe { TerminateProcess(raw(&process), 1) };
+            return Err(format!("AssignProcessToJobObject: {e}"));
+        }
     }
-    let sandboxed = Sandboxed {
-        pid: info.dwProcessId,
-        process,
-        job: Arc::new(job),
-        container_failure,
-    };
-    // SAFETY: valid thread handle of the suspended main thread.
-    if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
-        return Err(format!(
-            "ResumeThread: {}",
-            windows::core::Error::from_win32()
-        ));
-    }
-    let pipes = Pipes {
-        stdin: File::from(stdin_ours),
-        stdin_monitor: StdinMonitor(stdin_child),
-        stdout: File::from(stdout_ours),
-        stderr: File::from(stderr_ours),
-    };
-    Ok((sandboxed, pipes))
+    Ok(Suspended {
+        sandboxed: Sandboxed {
+            pid: info.dwProcessId,
+            process,
+            job: Arc::new(job),
+            container_failure,
+        },
+        thread,
+        pipes: Pipes {
+            stdin: File::from(stdin_ours),
+            stdin_monitor: StdinMonitor(stdin_child),
+            stdout: File::from(stdout_ours),
+            stderr: File::from(stderr_ours),
+        },
+        born_in_job,
+    })
 }
 
 fn raw(handle: &OwnedHandle) -> HANDLE {
@@ -352,207 +406,48 @@ fn create_job(max_pixels: u64) -> windows::core::Result<OwnedHandle> {
     Ok(job)
 }
 
-/// Wide strings for one CreateProcessAsUserW call.
-struct Launch {
-    application: Vec<u16>,
-    command_line: Vec<u16>,
-    directory: Vec<u16>,
-    /// `SystemRoot` alone (an AppContainer start uses [`Container::environment`]).
-    environment: Vec<u16>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn wide(s: &OsStr) -> Vec<u16> {
-    s.encode_wide().chain(Some(0)).collect()
-}
+    use std::time::Duration;
 
-/// An environment block (`NAME=value` strings, then an empty one) of these variables of
-/// ours that are set.
-fn environment_block(names: &[&str]) -> Vec<u16> {
-    let mut block = Vec::new();
-    for name in names {
-        let value = match std::env::var_os(name) {
-            Some(value) => value,
-            None if *name == "SystemRoot" => r"C:\Windows".into(),
-            None => continue,
-        };
-        block.extend(OsStr::new(name).encode_wide());
-        block.push(u16::from(b'='));
-        block.extend(value.encode_wide());
-        block.push(0);
-    }
-    block.push(0);
-    block
-}
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::JobObjects::IsProcessInJob;
 
-impl Launch {
-    fn new(exe: &Path, max_pixels: u64, extra_args: &[&str]) -> Result<Launch, String> {
-        let directory = exe
-            .parent()
-            .ok_or_else(|| format!("{} has no parent folder", exe.display()))?;
-        let mut command_line = format!("\"{}\" --max-pixels {max_pixels}", exe.display());
-        for arg in extra_args {
-            command_line.push(' ');
-            command_line.push_str(arg);
-        }
-        Ok(Launch {
-            application: wide(exe.as_os_str()),
-            command_line: wide(OsStr::new(&command_line)),
-            directory: wide(directory.as_os_str()),
-            environment: environment_block(&["SystemRoot"]),
-        })
+    use crate::worker::tests::{worker_exe, Process};
+
+    fn in_job(sandboxed: &Sandboxed) -> bool {
+        let mut in_job = BOOL::default();
+        // SAFETY: both handles are valid and owned by `sandboxed`.
+        unsafe { IsProcessInJob(raw(&sandboxed.process), raw(&sandboxed.job), &mut in_job) }
+            .expect("IsProcessInJob");
+        in_job.as_bool()
     }
 
-    /// Creates the process suspended, inheriting only `child_ends` (stdin, stdout, stderr),
-    /// in AppContainer `container` (with no capabilities) when given.
-    fn create(
-        &self,
-        token: &OwnedHandle,
-        child_ends: [HANDLE; 3],
-        mitigations: bool,
-        container: Option<&Container>,
-    ) -> Result<PROCESS_INFORMATION, String> {
-        let win32k = WIN32K_SYSTEM_CALL_DISABLE;
-        let child_policy = CHILD_PROCESS_RESTRICTED;
-        let capabilities = container.map(|container| SECURITY_CAPABILITIES {
-            AppContainerSid: container.sid().as_psid(),
-            Capabilities: std::ptr::null_mut(),
-            CapabilityCount: 0,
-            Reserved: 0,
-        });
-        let count = 1 + if mitigations { 2 } else { 0 } + u32::from(capabilities.is_some());
-        let mut attributes = AttributeList::new(count)?;
-        attributes.set(
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            child_ends.as_ptr().cast(),
-            std::mem::size_of_val(&child_ends),
-        )?;
-        if mitigations {
-            if let Err(e) = attributes.set(
-                PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-                std::ptr::from_ref(&win32k).cast(),
-                std::mem::size_of_val(&win32k),
-            ) {
-                log(&format!("win32k lockdown not applied: {e}"));
-            }
-            if let Err(e) = attributes.set(
-                PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
-                std::ptr::from_ref(&child_policy).cast(),
-                std::mem::size_of_val(&child_policy),
-            ) {
-                log(&format!("child process policy not applied: {e}"));
-            }
-        }
-        if let Some(capabilities) = &capabilities {
-            // A failure here fails the start, and `spawn` retries without the container.
-            attributes.set(
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-                std::ptr::from_ref(capabilities).cast(),
-                std::mem::size_of_val(capabilities),
-            )?;
-        }
+    #[test]
+    fn worker_is_born_inside_its_job_before_it_runs() {
+        let suspended =
+            start_suspended(&worker_exe(), 100_000_000, &[], true, None).expect("starts");
+        assert!(
+            suspended.born_in_job,
+            "Windows 10+ creates the worker inside the Job"
+        );
+        assert!(in_job(&suspended.sandboxed), "in the Job while suspended");
+        assert!(!suspended.sandboxed.has_exited());
 
-        let mut startup = STARTUPINFOEXW::default();
-        startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        [
-            startup.StartupInfo.hStdInput,
-            startup.StartupInfo.hStdOutput,
-            startup.StartupInfo.hStdError,
-        ] = child_ends;
-        startup.lpAttributeList = attributes.as_ptr();
-
-        // DETACHED_PROCESS, not CREATE_NO_WINDOW: a console would need a conhost.exe child,
-        // which the child process policy forbids (the worker then dies with
-        // STATUS_DLL_INIT_FAILED). The standard handles are the pipes either way.
-        // CreateProcessAsUserW may write into the command line buffer.
-        let mut command_line = self.command_line.clone();
-        let container_environment = container.map(|c| environment_block(c.environment()));
-        let environment = container_environment.as_ref().unwrap_or(&self.environment);
-        let mut info = PROCESS_INFORMATION::default();
-        // SAFETY: every string is NUL-terminated (the environment double-NUL-terminated)
-        // and, like the attribute list and what it points to (the handle array, the
-        // policies, the capabilities and their SID), outlives the call.
-        unsafe {
-            CreateProcessAsUserW(
-                raw(token),
-                PCWSTR(self.application.as_ptr()),
-                PWSTR(command_line.as_mut_ptr()),
-                None,
-                None,
-                BOOL::from(true),
-                EXTENDED_STARTUPINFO_PRESENT
-                    | CREATE_SUSPENDED
-                    | DETACHED_PROCESS
-                    | CREATE_UNICODE_ENVIRONMENT,
-                Some(environment.as_ptr().cast::<c_void>()),
-                PCWSTR(self.directory.as_ptr()),
-                &startup.StartupInfo,
-                &mut info,
-            )
-        }
-        .map_err(|e| format!("CreateProcessAsUserW: {e}"))?;
-        Ok(info)
-    }
-}
-
-/// An initialized PROC_THREAD_ATTRIBUTE_LIST, deleted on drop.
-struct AttributeList {
-    // usize elements keep the opaque list pointer-aligned.
-    buf: Vec<usize>,
-}
-
-impl AttributeList {
-    fn new(count: u32) -> Result<AttributeList, String> {
-        let mut size = 0usize;
-        // SAFETY: a null list asks for the required size only; this "fails" by design.
-        let _ = unsafe {
-            InitializeProcThreadAttributeList(
-                LPPROC_THREAD_ATTRIBUTE_LIST::default(),
-                count,
-                0,
-                &mut size,
-            )
-        };
-        let mut buf = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
-        // SAFETY: `buf` holds at least `size` writable bytes.
-        unsafe {
-            InitializeProcThreadAttributeList(
-                LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr().cast()),
-                count,
-                0,
-                &mut size,
-            )
-        }
-        .map_err(|e| format!("InitializeProcThreadAttributeList: {e}"))?;
-        // Only an initialized list gets the Drop that deletes it.
-        Ok(AttributeList { buf })
+        // Never resumed: dropping it ends the Job, which ends the process.
+        let watch = Process::open(suspended.sandboxed.pid);
+        drop(suspended);
+        assert!(watch.wait_for_exit(Duration::from_secs(10)));
     }
 
-    fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
-        LPPROC_THREAD_ATTRIBUTE_LIST(self.buf.as_mut_ptr().cast())
-    }
-
-    /// The list stores `value` by pointer: it must outlive every use of the list.
-    fn set(&mut self, attribute: u32, value: *const c_void, size: usize) -> Result<(), String> {
-        // SAFETY: initialized list; the caller keeps `value` (of `size` bytes) alive.
-        unsafe {
-            UpdateProcThreadAttribute(
-                self.as_ptr(),
-                0,
-                attribute as usize,
-                Some(value),
-                size,
-                None,
-                None,
-            )
-        }
-        .map_err(|e| format!("UpdateProcThreadAttribute({attribute:#x}): {e}"))
-    }
-}
-
-impl Drop for AttributeList {
-    fn drop(&mut self) {
-        // SAFETY: the list was initialized in `new` and is deleted exactly once.
-        unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+    #[test]
+    fn resumed_worker_without_mitigations_is_in_its_job() {
+        let suspended =
+            start_suspended(&worker_exe(), 100_000_000, &[], false, None).expect("starts");
+        assert!(suspended.born_in_job);
+        let (sandboxed, _pipes) = suspended.resume().expect("resumes");
+        assert!(in_job(&sandboxed));
     }
 }

@@ -15,8 +15,10 @@ use crate::start::StartLayout;
 use crate::strings::{t, text, Lang, S};
 use crate::toolbar::{self, pinned_bar_height, Rect, ToolButton, ToolbarInput};
 
+mod resize_tree;
 mod uia_glue;
 
+pub use resize_tree::ResizeInput;
 pub use uia_glue::{main_tree_of, run_main};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +52,8 @@ pub enum Act {
     Pick(usize, usize),
     /// Settings window: the checkbox or the button (control index).
     Press(usize),
+    /// The resize screen: a click on that part.
+    Resize(crate::resize::sidebar::Hit),
 }
 
 /// A rectangle in client pixels.
@@ -259,6 +263,8 @@ pub struct MainInput<'a> {
     pub menu: Option<MenuInput>,
     pub dialog: Option<&'a Dialog>,
     pub toast: Option<ToastInput<'a>>,
+    /// The resize screen, while it is open (it replaces the photo, card and toolbar).
+    pub resize: Option<ResizeInput<'a>>,
 }
 
 /// Collects nodes with their rects converted to pixels.
@@ -310,6 +316,8 @@ pub fn main_tree(i: &MainInput) -> Tree {
         add_dialog(&mut b, d, i.client);
     } else if let Some(m) = &i.menu {
         add_menu(&mut b, m);
+    } else if let Some(r) = &i.resize {
+        resize_tree::add_resize(&mut b, r);
     } else {
         if let Some(p) = &i.photo {
             let bar = match i.toolbar {
@@ -605,6 +613,7 @@ mod tests {
             menu: None,
             dialog: None,
             toast: None,
+            resize: None,
         }
     }
 
@@ -732,8 +741,8 @@ mod tests {
         i.toolbar = Some((toolbar_input(false), true));
         i.menu = Some(MenuInput {
             layout: menu_layout((100.0, 100.0), CLIENT),
-            selected: Some(3),
-            enabled: [true, false, false, true, true, true],
+            selected: Some(4),
+            enabled: [true, false, false, false, true, true, true],
         });
         let tree = main_tree(&i);
         // The menu is modal: the toolbar is not exposed while it is open.
@@ -744,9 +753,10 @@ mod tests {
         assert_eq!(names, want);
         assert!(!named(&tree, MenuItem::ShowInFolder.label()).enabled);
         assert!(!named(&tree, MenuItem::CopyPath.label()).enabled);
+        assert!(!named(&tree, MenuItem::Resize.label()).enabled);
         let focused = &tree.nodes[tree.focused().unwrap()];
         assert_eq!(focused.name, MenuItem::DefaultApps.label());
-        assert_eq!(focused.act, Some(Act::Menu(3)));
+        assert_eq!(focused.act, Some(Act::Menu(4)));
         assert_eq!(by_role(&tree, Role::Menu)[0].name, t(S::UiaMenu));
     }
 
@@ -907,12 +917,16 @@ mod tests {
         assert_eq!(tree.nodes.iter().filter(|n| n.focused).count(), 1);
         let button = named(&tree, text(Lang::Ko, S::MenuDefaultApps));
         assert_eq!(button.role, Role::Button);
-        assert_eq!(button.act, Some(Act::Press(6)));
+        assert_eq!(button.act, Some(Act::Press(7)));
         // Update checks: a checkbox too, off until the user said yes.
         let update = named(&tree, text(Lang::Ko, S::SettingsUpdateCheck));
         assert_eq!(update.role, Role::CheckBox);
         assert_eq!(update.toggle, Some(false));
-        assert_eq!(update.act, Some(Act::Press(5)));
+        assert_eq!(update.act, Some(Act::Press(6)));
+        // 사이드바 위치 (M6): a radio group like the other choices.
+        let side = named(&tree, text(Lang::Ko, S::ResizeSidebar));
+        assert_eq!(side.role, Role::Group);
+        assert_eq!(named(&tree, "오른쪽").selected, Some(true));
         // Focus on the language choice: its chosen option has it.
         let tree = settings_tree(0, &s, Lang::Ko, 1.0);
         assert_eq!(tree.nodes[tree.focused().unwrap()].name, "자동");
@@ -921,7 +935,7 @@ mod tests {
             memory_budget_mb: Some(300),
             ..Settings::default()
         };
-        let tree = settings_tree(4, &odd, Lang::En, 1.0);
+        let tree = settings_tree(5, &odd, Lang::En, 1.0);
         let focused = &tree.nodes[tree.focused().unwrap()];
         assert_eq!(focused.role, Role::Group);
         assert_eq!(focused.name, "Memory limit");

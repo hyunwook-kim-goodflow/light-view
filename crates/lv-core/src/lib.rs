@@ -5,6 +5,7 @@ pub mod command;
 pub mod decode;
 pub mod exif_edit;
 pub mod exif_info;
+pub mod explorer_sort;
 pub mod format;
 #[doc(hidden)]
 pub mod fuzzing;
@@ -18,6 +19,7 @@ pub mod listing;
 pub mod portable;
 pub mod prefetch;
 pub mod profile;
+pub mod resize;
 pub mod settings;
 #[cfg(test)]
 pub(crate) mod test_fixtures;

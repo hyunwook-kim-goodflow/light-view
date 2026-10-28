@@ -15,7 +15,7 @@ use lv_core::jpeg_extent::check_single_image;
 
 use crate::worker::{PoolError, Reply, WorkerPool};
 
-mod atomic;
+pub(crate) mod atomic;
 use atomic::replace;
 #[cfg(test)]
 use atomic::{
@@ -48,7 +48,7 @@ impl RotateService for WorkerPool {
         match WorkerPool::rotate_jpeg(self, quarters, data)? {
             Reply::Bytes { data } => Ok(data),
             // The pool only lets a `Bytes` answer through for a rotation.
-            Reply::Image { .. } => Err(PoolError::WorkerUnavailable),
+            Reply::Image { .. } | Reply::Fit(_) => Err(PoolError::WorkerUnavailable),
         }
     }
 

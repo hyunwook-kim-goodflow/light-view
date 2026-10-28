@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lv_core::command::Command;
 use lv_core::identity::FileIdentity;
+use lv_core::listing::FolderList;
 
 use super::{Redraw, Viewer};
 
@@ -139,6 +140,42 @@ impl Viewer {
         self.wanted.clear();
         self.prefetcher.request(&[]);
         Redraw::Full
+    }
+
+    /// Shows nothing: the empty start screen (the resize screen closing back to it).
+    pub fn close(&mut self) -> Redraw {
+        self.list = FolderList::default();
+        self.quarters = 0;
+        self.backward = false;
+        self.pending_leave = None;
+        self.clear_shown()
+    }
+
+    /// Back from the resize screen (M6 ruling): shows `path` with the view rotation
+    /// `quarters` it had pending when the screen opened, without asking. Opens it unless
+    /// it is already the current photo.
+    pub fn return_to(&mut self, path: &Path, quarters: u8) -> Redraw {
+        if self.list.current() != Some(path) {
+            self.open(path);
+        }
+        let q = quarters % 4;
+        if self.quarters != q {
+            self.quarters = q;
+            if self.showing_current() {
+                if let Some(s) = &mut self.shown {
+                    s.quarters = q;
+                }
+                self.touched = false;
+                let (size, dip) = (self.view_size, self.dip);
+                self.set_view(size, dip);
+            }
+        }
+        Redraw::Full
+    }
+
+    /// Drops the kept decode of `path` (the file was rewritten), so it is decoded again.
+    pub fn forget_decode(&mut self, path: &Path) {
+        self.prefetcher.invalidate(path);
     }
 
     /// Like `hide`, for good (the photo was deleted permanently).

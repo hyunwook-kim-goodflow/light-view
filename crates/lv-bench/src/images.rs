@@ -44,6 +44,23 @@ pub fn prepare(dir: &Path, picture: Picture) -> std::io::Result<PathBuf> {
     Ok(dir.join(format!("p{}.{}", COPIES / 2, picture.extension())))
 }
 
+/// Writes `count` copies of `picture` into `dir` (created), named `r0.<ext>`, `r1.<ext>`…,
+/// and returns them in order.
+pub fn prepare_many(dir: &Path, picture: Picture, count: usize) -> std::io::Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let ext = picture.extension();
+    let files: Vec<PathBuf> = (0..count)
+        .map(|i| dir.join(format!("r{i}.{ext}")))
+        .collect();
+    if let Some(first) = files.first() {
+        write(first, picture)?;
+        for f in &files[1..] {
+            std::fs::copy(first, f)?;
+        }
+    }
+    Ok(files)
+}
+
 /// Copies `file` (a picture the user supplied, e.g. a 12 MP HEIC) `COPIES` times into
 /// `dir` and returns the middle copy.
 pub fn prepare_copies(dir: &Path, file: &Path) -> std::io::Result<PathBuf> {
@@ -143,5 +160,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(count, COPIES);
         assert_eq!((decoded.width(), decoded.height()), (64, 48));
+    }
+
+    #[test]
+    fn prepare_many_writes_that_many_copies() {
+        let dir = std::env::temp_dir().join(format!("lv-bench-many-{}", std::process::id()));
+        let files = prepare_many(
+            &dir,
+            Picture::Jpeg {
+                width: 32,
+                height: 16,
+            },
+            3,
+        )
+        .unwrap();
+        let same = std::fs::read(&files[0]).unwrap() == std::fs::read(&files[2]).unwrap();
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(files, [0, 1, 2].map(|i| dir.join(format!("r{i}.jpg"))));
+        assert!(same);
+        assert_eq!(count, 3);
     }
 }
