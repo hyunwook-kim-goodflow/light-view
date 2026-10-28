@@ -19,6 +19,17 @@ pub const VK_DOWN: u16 = 0x28;
 
 /// The quality choices: 원본 수준, then fixed qualities (never below 60).
 pub const QUALITIES: [Option<u8>; 5] = [None, Some(90), Some(80), Some(70), Some(MIN_QUALITY)];
+
+/// A fixed quality not among the choices (one from the settings file) becomes the
+/// nearest offered one; a tie goes to the higher.
+pub fn snap_quality(q: Option<u8>) -> Option<u8> {
+    let q = q?;
+    QUALITIES
+        .iter()
+        .flatten()
+        .copied()
+        .min_by_key(|o| (o.abs_diff(q), std::cmp::Reverse(*o)))
+}
 const TABS: [ResizeTab; 3] = [ResizeTab::Resolution, ResizeTab::FileSize, ResizeTab::Scale];
 const AXES: [ResizeAxis; 3] = [ResizeAxis::LongEdge, ResizeAxis::Width, ResizeAxis::Height];
 const FORMATS: [ResizeFormat; 3] = [ResizeFormat::Jpeg, ResizeFormat::Png, ResizeFormat::WebP];
@@ -378,11 +389,17 @@ impl Sidebar {
     }
 
     /// Mouse down on `hit`; a control takes the focus.
+    /// A mouse pick on a choice never gives it the keyboard focus (← → stay the photo
+    /// keys; a choice takes them only once Tab reached it). It does take the focus
+    /// from a field.
     pub fn press(&mut self, hit: Option<Hit>) {
         self.pressed = hit;
         match hit {
-            Some(Hit::Option(c, _) | Hit::Control(c)) => self.focus = c,
+            Some(Hit::Control(c)) => self.focus = c,
             Some(Hit::Row(_)) => self.focus = Ctl::List,
+            Some(Hit::Option(..)) if matches!(self.focus, Ctl::Field(_)) => {
+                self.focus = Ctl::List;
+            }
             _ => {}
         }
     }

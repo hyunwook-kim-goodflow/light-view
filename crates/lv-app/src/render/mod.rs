@@ -32,6 +32,7 @@ use crate::theme::Rgb;
 
 mod mips;
 mod text;
+mod thumbs;
 mod tiles;
 
 /// Posted to the window by a mip build once its levels are ready to upload; the
@@ -71,6 +72,8 @@ struct Device {
     image: Option<TiledBitmap>,
     /// Levels 1, 2, … of the image, once built (tiled images only).
     mips: Vec<TiledBitmap>,
+    /// Small bitmaps by id (the resize screen's filmstrip tiles).
+    thumbs: thumbs::ThumbCache,
 }
 
 pub struct Renderer {
@@ -481,6 +484,7 @@ impl Renderer {
             brush,
             image: None,
             mips: Vec::new(),
+            thumbs: thumbs::ThumbCache::default(),
         });
         Ok(())
     }

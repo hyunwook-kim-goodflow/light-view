@@ -2,13 +2,15 @@
 //! shown, the settings and each photo's estimate. Pure: no Win32, no threads.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lv_core::identity::FileIdentity;
 use lv_core::listing::same_path;
 use lv_core::resize::{OutputFormat, Quality, ResizeSpec, Target};
 use lv_core::settings::{ResizeAxis, ResizeFormat, ResizeMemory, ResizeTab, MIN_QUALITY};
 
-use super::save::ItemResult;
+use super::save::{FailReason, ItemResult};
+use super::thumb::Thumb;
 
 /// One megabyte in the 용량 tab: decimal, so a site's "5 MB" is met whichever way it
 /// counts.
@@ -45,6 +47,10 @@ pub struct ResizeItem {
     /// Clockwise quarter turns of an unsaved viewer rotation, applied to the result's
     /// pixels (spec §10); the original is not touched.
     pub quarters: u8,
+    /// The filmstrip's tile, once the photo was first decoded.
+    pub thumb: Option<Arc<Thumb>>,
+    /// Why the last save did not save this photo (spec §6: the reason stays in the list).
+    pub save_error: Option<FailReason>,
 }
 
 impl ResizeItem {
@@ -59,17 +65,21 @@ impl ResizeItem {
             scaled: false,
             estimate: Estimate::Pending,
             quarters: quarters % 4,
+            thumb: None,
+            save_error: None,
         }
     }
 }
 
 /// What decoding a photo told about it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
     pub size: (u32, u32),
     pub bytes: u64,
     pub animated: bool,
     pub scaled: bool,
+    /// Its filmstrip tile.
+    pub thumb: Option<Arc<Thumb>>,
 }
 
 /// The resize screen's state while it is open.
@@ -142,8 +152,49 @@ impl ResizeSession {
         self.generation += 1;
         for item in &mut self.items {
             item.estimate = Estimate::Pending;
+            item.save_error = None;
         }
         true
+    }
+
+    /// After a save (spec §6): the photos it saved leave the session; those it did
+    /// not save stay, each with why ("맞추기 불가", or the failure in `save_error`). The
+    /// first left is shown. True when any stayed.
+    pub fn keep_unsaved(&mut self, results: &[(PathBuf, ItemResult)]) -> bool {
+        self.items.retain_mut(|item| {
+            let result = results
+                .iter()
+                .find(|(p, _)| same_path(p, &item.path))
+                .map(|(_, r)| r);
+            match result {
+                Some(ItemResult::Saved(_) | ItemResult::Replaced { .. }) => false,
+                Some(ItemResult::CantFit) => {
+                    item.estimate = Estimate::CantFit;
+                    item.save_error = None;
+                    true
+                }
+                Some(ItemResult::Failed(reason)) => {
+                    item.save_error = Some(reason.clone());
+                    true
+                }
+                None => true,
+            }
+        });
+        self.current = 0;
+        // Back to the photo opened from: under its new name if the save replaced it.
+        let replaced = self.entered_from.as_deref().and_then(|from| {
+            results.iter().find_map(|(original, r)| match r {
+                ItemResult::Replaced { result, .. } if same_path(original, from) => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })
+        });
+        if let Some(result) = replaced {
+            self.entered_from = Some(result);
+            self.entered_quarters = 0;
+        }
+        !self.items.is_empty()
     }
 
     /// An estimate for `index` made under `generation`: taken unless it is stale (another
@@ -167,6 +218,9 @@ impl ResizeSession {
             item.src_bytes = s.bytes;
             item.animated = s.animated;
             item.scaled = s.scaled;
+            if s.thumb.is_some() {
+                item.thumb = s.thumb;
+            }
         }
         item.estimate = estimate;
         true
@@ -352,6 +406,7 @@ mod tests {
             bytes: 5_000_000,
             animated: true,
             scaled: false,
+            thumb: None,
         };
         assert!(s.apply_estimate(gen, 0, &p, Some(source), Estimate::CantFit));
         assert_eq!(s.items[0].estimate, Estimate::CantFit);
@@ -411,6 +466,60 @@ mod tests {
             Some(PathBuf::from(r"C:\p\a.jpg"))
         );
         assert_eq!(return_target(Some(&b), &replaced), Some(b));
+    }
+
+    /// I5 (ruling): after a save, the saved photos leave; failed and "맞추기 불가" ones
+    /// stay with their reasons, the first shown; all saved leaves nothing.
+    #[test]
+    fn a_save_keeps_only_the_photos_it_did_not_save() {
+        let mut s = session(&["a.jpg", "bb.jpg", "ccc.jpg", "dddd.jpg"]);
+        s.entered_from = Some(PathBuf::from("a.jpg"));
+        s.entered_quarters = 1;
+        s.current = 3;
+        s.items[3].estimate = ready();
+        let results = vec![
+            (
+                PathBuf::from("a.jpg"),
+                ItemResult::Replaced {
+                    result: PathBuf::from("a.png"),
+                    backup: PathBuf::from(".a.jpg.lvbak-1-0"),
+                },
+            ),
+            (PathBuf::from("bb.jpg"), ItemResult::CantFit),
+            (
+                PathBuf::from("ccc.jpg"),
+                ItemResult::Saved(PathBuf::from("ccc_small.jpg")),
+            ),
+            (
+                PathBuf::from("dddd.jpg"),
+                ItemResult::Failed(FailReason::NameTaken),
+            ),
+        ];
+        assert!(s.keep_unsaved(&results));
+        let left: Vec<_> = s.items.iter().map(|i| i.path.clone()).collect();
+        assert_eq!(left, [PathBuf::from("bb.jpg"), PathBuf::from("dddd.jpg")]);
+        assert_eq!(s.current, 0);
+        assert_eq!(s.items[0].estimate, Estimate::CantFit);
+        assert_eq!(s.items[0].save_error, None);
+        assert_eq!(s.items[1].save_error, Some(FailReason::NameTaken));
+        // The photo opened from was replaced: Esc goes back to its new name, plain.
+        assert_eq!(s.entered_from, Some(PathBuf::from("a.png")));
+        assert_eq!(s.entered_quarters, 0);
+        // A new setting clears the old reasons.
+        let m = ResizeMemory {
+            long_edge: 800,
+            ..s.memory
+        };
+        assert!(s.set_memory(m));
+        assert_eq!(s.items[1].save_error, None);
+        // Everything saved: nothing stays.
+        let mut s = session(&["a.jpg"]);
+        let all = vec![(
+            PathBuf::from("a.jpg"),
+            ItemResult::Saved(PathBuf::from("a_small.jpg")),
+        )];
+        assert!(!s.keep_unsaved(&all));
+        assert!(s.items.is_empty());
     }
 
     #[test]

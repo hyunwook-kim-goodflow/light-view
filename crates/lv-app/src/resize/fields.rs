@@ -152,7 +152,7 @@ impl Fields {
                 if old.as_ref().map(|o| &o.name) != Some(&want.name) {
                     set_name(e.hwnd, &want.name);
                 }
-                if *replace && old.as_ref().map(|o| &o.text) != Some(&want.text) {
+                if needs_text(*replace, &text_of(e.hwnd), &want.text) {
                     let _ = SetWindowTextW(e.hwnd, &HSTRING::from(want.text.as_str()));
                 }
                 if old.as_ref().map(|o| o.enabled) != Some(want.enabled) {
@@ -180,14 +180,7 @@ impl Fields {
                     }
                 }
             }
-            e.shown = Some(Wanted {
-                text: if *replace {
-                    want.text.clone()
-                } else {
-                    old.map(|o| o.text).unwrap_or_default()
-                },
-                ..want.clone()
-            });
+            e.shown = Some(want.clone());
         }
     }
 
@@ -354,8 +347,32 @@ pub fn text_of(hwnd: HWND) -> String {
     }
 }
 
+/// Whether a field gets `want` as its text: only when it may (it is not being typed
+/// in) and what it shows differs. Compared with what the field really shows, so an
+/// invalid or cleared entry is put back to the value in effect once it is left.
+pub fn needs_text(replace: bool, shown: &str, want: &str) -> bool {
+    replace && shown != want
+}
+
 /// The field a posted key came from and whether Shift was down.
 pub fn posted(lparam: LPARAM) -> Option<(Field, bool)> {
     let f = FIELDS.get((lparam.0 & 0xFF) as usize)?;
     Some((*f, lparam.0 & SHIFT_BIT != 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_text;
+
+    /// I1: a cleared or invalid entry shows the value in effect again once the field
+    /// is left, however often the same value was set before; never while typing.
+    #[test]
+    fn a_left_field_shows_the_value_in_effect() {
+        assert!(needs_text(true, "", "1920"));
+        assert!(needs_text(true, "abc", "2"));
+        assert!(needs_text(true, "2.0", "2"));
+        assert!(!needs_text(true, "1920", "1920"));
+        // Being typed in: left alone.
+        assert!(!needs_text(false, "", "1920"));
+    }
 }

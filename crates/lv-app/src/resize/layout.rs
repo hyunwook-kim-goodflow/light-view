@@ -35,6 +35,22 @@ const OPTION_GAP: f32 = 4.0;
 /// Estimate list rows: two lines, three with a note.
 pub const LIST_ROW_H: f32 = 44.0;
 pub const LIST_NOTE_H: f32 = 18.0;
+/// The client height the sidebar needs: every row, one list row with its note, the
+/// total and the buttons (the window is kept at least this tall while it is open).
+pub const MIN_SIDEBAR_H: f32 = TOP
+    + TITLE_H
+    + TABS_H
+    + 4.0
+    + 5.0 * ROW_H
+    + 2.0 * SECTION_H
+    + NOTE_H
+    + ROW_H
+    + LIST_ROW_H
+    + LIST_NOTE_H
+    + BUTTON_GAP
+    + TOTAL_H
+    + BUTTON_H
+    + PAD;
 
 // Stage layout (DIPs): the band under the photo holds the filmstrip and the caption.
 const BAND_H: f32 = 84.0;

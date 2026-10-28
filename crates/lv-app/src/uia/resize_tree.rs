@@ -211,7 +211,12 @@ pub(super) fn add_resize(b: &mut Builder, i: &ResizeInput) {
     match i.progress {
         Some((done, total)) => {
             let line = text::progress(lang, done, total);
-            b.add(Some(panel), PROGRESS, Role::Text, &line, l.cancel);
+            // The row drawn over both buttons.
+            let row = crate::toolbar::Rect {
+                w: l.save.x + l.save.w - l.cancel.x,
+                ..l.cancel
+            };
+            b.add(Some(panel), PROGRESS, Role::Text, &line, row);
         }
         None => {
             let save = text::save_button(lang, save_count(s));

@@ -66,10 +66,12 @@ pub fn caption(lang: Lang, item: &ResizeItem) -> (String, String) {
     )
 }
 
-/// A list row's note: an animation keeps its first frame; a photo opened at reduced
-/// size says so.
+/// A list row's note: why the last save did not save it; an animation keeps its first
+/// frame; a photo opened at reduced size says so.
 pub fn note(lang: Lang, item: &ResizeItem) -> Option<&'static str> {
-    if item.animated {
+    if let Some(reason) = &item.save_error {
+        Some(fail_reason(lang, reason))
+    } else if item.animated {
         Some(text(lang, S::ResizeAnimated))
     } else if item.scaled {
         Some(text(lang, S::ScaledOpen))
@@ -144,7 +146,7 @@ pub fn fail_reason(lang: Lang, reason: &FailReason) -> &'static str {
             FailReason::Changed => S::ResizeChanged,
             FailReason::OverLimit => S::ResizeOverLimit,
             FailReason::ReplaceRefused(ReplaceRefusal::Animated) => S::ResizeAnimated,
-            FailReason::ReplaceRefused(ReplaceRefusal::Scaled) => S::ScaledOpen,
+            FailReason::ReplaceRefused(ReplaceRefusal::Scaled) => S::ResizeScaledRefusal,
             // Free-form system errors are only logged.
             FailReason::Io(_) => S::ResizeSaveFailed,
         },
@@ -186,12 +188,12 @@ impl ToastText {
                 let Some(first) = v.first() else {
                     return String::new();
                 };
-                let line = format!(
-                    "{} · {}",
+                format!(
+                    "{} · {} · {}",
                     text(lang, S::ResizeNotRecycled),
+                    with_more(lang, file_name(&first.original), v.len()),
                     kept_as(lang, &first.kept_at)
-                );
-                with_more(lang, line, v.len())
+                )
             }
             ToastText::Unrestored(v) => {
                 let Some(first) = v.first() else {
@@ -200,19 +202,19 @@ impl ToastText {
                 let mut line = format!(
                     "{} · {} · {}",
                     text(lang, S::ResizeUndoIncomplete),
-                    file_name(&first.original),
+                    with_more(lang, file_name(&first.original), v.len()),
                     undo_reason(lang, &first.reason)
                 );
                 if let Some(kept) = &first.kept_at {
                     line = format!("{line} · {}", kept_as(lang, kept));
                 }
-                with_more(lang, line, v.len())
+                line
             }
         }
     }
 }
 
-/// `line` about the first of `n` photos, with how many more: "… 외 2장" / "… (+2)".
+/// The first of `n` photos' name, with how many more: "a.jpg 외 2장" / "a.jpg (+2)".
 fn with_more(lang: Lang, line: String, n: usize) -> String {
     match (n, lang) {
         (0 | 1, _) => line,
@@ -243,7 +245,8 @@ pub fn summary(lang: Lang, s: &SaveSummary) -> String {
         parts.push(count(s.cant_fit, S::ResizeCantFit));
     }
     if let Some((path, reason)) = s.failed.first() {
-        let why = format!("{}: {}", file_name(path), fail_reason(lang, reason));
+        let name = with_more(lang, file_name(path), s.failed.len());
+        let why = format!("{name}: {}", fail_reason(lang, reason));
         parts.push(format!(
             "{} ({why})",
             count(s.failed.len(), S::ResizeFailed)

@@ -201,11 +201,11 @@ fn toasts_after_a_save_commit_or_undo() {
     }]);
     assert_eq!(
         kept.render(Lang::Ko),
-        "원본 휴지통 이동 실패 · 원본은 IMG (원본).jpg로 보관"
+        "원본 휴지통 이동 실패 · IMG.jpg · 원본은 IMG (원본).jpg로 보관"
     );
     assert_eq!(
         kept.render(Lang::En),
-        "Original not recycled · Original kept as IMG (원본).jpg"
+        "Original not recycled · IMG.jpg · Original kept as IMG (원본).jpg"
     );
     let left = ToastText::Unrestored(vec![
         Unrestored {
@@ -221,10 +221,10 @@ fn toasts_after_a_save_commit_or_undo() {
     ]);
     assert_eq!(
         left.render(Lang::Ko),
-        "실행 취소 불가 · IMG.jpg · 같은 이름의 파일 있음 · 원본은 IMG (원본).jpg로 보관 외 1장"
+        "일부 복원 실패 · IMG.jpg 외 1장 · 같은 이름의 파일 있음 · 원본은 IMG (원본).jpg로 보관"
     );
     assert_eq!(
         left.render(Lang::En),
-        "Undo incomplete · IMG.jpg · Name already taken · Original kept as IMG (원본).jpg (+1)"
+        "Not fully restored · IMG.jpg (+1) · Name already taken · Original kept as IMG (원본).jpg"
     );
 }

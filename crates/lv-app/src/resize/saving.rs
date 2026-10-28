@@ -288,11 +288,11 @@ pub fn on_saved(app: &RefCell<App>, hwnd: HWND) {
             }
             Event::Finished { batch } => {
                 finish_save(app, hwnd, batch);
-                super::screen::after_save(app, hwnd);
+                super::toasts::after_save(app, hwnd);
             }
             Event::Committed(kept) => report(app, hwnd, BatchReport::Unrecycled(kept)),
             Event::Undone { left, paths } => {
-                super::screen::undone(app, hwnd, &paths);
+                super::toasts::undone(app, hwnd, &paths);
                 report(app, hwnd, BatchReport::Unrestored(left));
             }
         }
@@ -309,13 +309,15 @@ fn report(app: &RefCell<App>, hwnd: HWND, r: BatchReport) {
             a.resize.reports.push(r);
         }
         // Shown once no toast is up (never over "N장 대체 · 실행 취소").
-        super::screen::toast_check(app, hwnd);
+        super::toasts::toast_check(app, hwnd);
         invalidate(hwnd);
     }
 }
 
-/// The save ended: its summary and batch are kept, the screen closes back to where it
-/// was opened (spec §6), and photos that came meanwhile open it again (spec §10).
+/// The save ended: its summary and batch are kept. When every photo was saved the
+/// screen closes back to where it was opened (spec §6); otherwise it stays on the
+/// photos not saved, each with its reason in the list. Photos that came meanwhile
+/// join it (or open it again, spec §10).
 fn finish_save(app: &RefCell<App>, hwnd: HWND, batch: ReplaceBatch) {
     let Some((results, close, queued)) = app.try_borrow_mut().ok().and_then(|mut a| {
         let progress = a.resize.saving.take()?;
@@ -326,7 +328,9 @@ fn finish_save(app: &RefCell<App>, hwnd: HWND, batch: ReplaceBatch) {
     }) else {
         return;
     };
-    close_session(app, hwnd, &results);
+    if close || !keep_unsaved(app, hwnd, &results) {
+        close_session(app, hwnd, &results);
+    }
     if close {
         window::close(app, hwnd);
         return;
@@ -334,6 +338,39 @@ fn finish_save(app: &RefCell<App>, hwnd: HWND, batch: ReplaceBatch) {
     if !queued.is_empty() {
         add(app, hwnd, queued);
     }
+}
+
+/// Keeps the session on the photos `results` did not save (spec §6 ruling). Photos
+/// replaced under their own names are decoded again. False when none is left.
+fn keep_unsaved(app: &RefCell<App>, hwnd: HWND, results: &[(PathBuf, ItemResult)]) -> bool {
+    let kept = {
+        let Ok(mut guard) = app.try_borrow_mut() else {
+            return false;
+        };
+        let a = &mut *guard;
+        let Some(s) = &mut a.resize.session else {
+            return false;
+        };
+        if !s.keep_unsaved(results) {
+            return false;
+        }
+        for (original, result) in results {
+            if let ItemResult::Replaced { result, .. } = result {
+                a.viewer.forget_decode(original);
+                a.viewer.forget_decode(result);
+            }
+        }
+        // Estimates of what is left (their kept bytes went to the save) come again.
+        let left: Vec<usize> = (0..s.items.len()).collect();
+        a.resize.schedule(&left);
+        a.resize.refresh_block();
+        true
+    };
+    if kept {
+        super::show_current(app, hwnd);
+        invalidate(hwnd);
+    }
+    kept
 }
 
 /// WM_CLOSE while a resize save runs: the window closes once it ends (a replace is
