@@ -80,12 +80,16 @@ impl ReplaceBatch {
         });
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the resize screen's toast (M6 Task 6) shows it")
-    )]
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Each replaced photo's (original, result) paths.
+    pub fn paths(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.items
+            .iter()
+            .map(|i| (i.original.clone(), i.result.clone()))
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {

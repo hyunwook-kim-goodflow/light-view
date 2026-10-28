@@ -57,8 +57,12 @@ pub enum Event {
     Finished { batch: ReplaceBatch },
     /// A commit could not send these originals to the Recycle Bin; they are visible.
     Committed(Vec<Unrecycled>),
-    /// An undo could not fully restore these.
-    Undone(Vec<Unrestored>),
+    /// An undo ended: these it could not fully restore, of the photos (original,
+    /// result) it was for.
+    Undone {
+        left: Vec<Unrestored>,
+        paths: Vec<(PathBuf, PathBuf)>,
+    },
 }
 
 /// Saves every photo of `job` in order, reporting each through `send`, then the batch.
@@ -282,9 +286,15 @@ pub fn on_saved(app: &RefCell<App>, hwnd: HWND) {
                 }
                 invalidate(hwnd);
             }
-            Event::Finished { batch } => finish_save(app, hwnd, batch),
+            Event::Finished { batch } => {
+                finish_save(app, hwnd, batch);
+                super::screen::after_save(app, hwnd);
+            }
             Event::Committed(kept) => report(app, hwnd, BatchReport::Unrecycled(kept)),
-            Event::Undone(left) => report(app, hwnd, BatchReport::Unrestored(left)),
+            Event::Undone { left, paths } => {
+                super::screen::undone(app, hwnd, &paths);
+                report(app, hwnd, BatchReport::Unrestored(left));
+            }
         }
     }
 }
@@ -298,6 +308,8 @@ fn report(app: &RefCell<App>, hwnd: HWND, r: BatchReport) {
         if let Ok(mut a) = app.try_borrow_mut() {
             a.resize.reports.push(r);
         }
+        // Shown once no toast is up (never over "N장 대체 · 실행 취소").
+        super::screen::toast_check(app, hwnd);
         invalidate(hwnd);
     }
 }
@@ -340,7 +352,6 @@ pub fn defer_close(app: &RefCell<App>) -> bool {
 
 /// The "N장 대체 · 실행 취소" toast went: the replaced originals go to the Recycle Bin,
 /// on a thread of its own (it may wait up to 10 s).
-#[expect(dead_code, reason = "the resize screen's toast (M6 Task 6) calls it")]
 pub fn commit_batch(app: &RefCell<App>) {
     let Some((batch, trash)) = app.try_borrow_mut().ok().and_then(|mut a| {
         let batch = a.resize.batch.take()?;
@@ -357,7 +368,6 @@ pub fn commit_batch(app: &RefCell<App>) {
 
 /// [실행 취소] on that toast: every replaced photo comes back (spec §10), off the UI
 /// thread; what could not be restored is reported (`reports`).
-#[expect(dead_code, reason = "the resize screen's toast (M6 Task 6) calls it")]
 pub fn undo_batch(app: &RefCell<App>) {
     let Some((batch, trash)) = app.try_borrow_mut().ok().and_then(|mut a| {
         let batch = a.resize.batch.take()?;
@@ -365,7 +375,15 @@ pub fn undo_batch(app: &RefCell<App>) {
     }) else {
         return;
     };
-    spawn_batch(app, move |trash| Event::Undone(batch.undo(trash)), trash);
+    let paths = batch.paths();
+    spawn_batch(
+        app,
+        move |trash| Event::Undone {
+            left: batch.undo(trash),
+            paths,
+        },
+        trash,
+    );
 }
 
 fn spawn_batch(

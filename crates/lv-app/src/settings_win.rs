@@ -62,7 +62,7 @@ pub use model::{Control, CONTROLS};
 
 pub const CLASS_NAME: PCWSTR = w!("goodflow.LightView.Settings");
 /// Client size in DIPs; the window cannot be resized.
-pub const SIZE_DIP: (f32, f32) = (420.0, 532.0);
+pub const SIZE_DIP: (f32, f32) = (420.0, 606.0);
 /// A caption and a close box: no sizing border, no minimize or maximize.
 const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0);
 
@@ -586,6 +586,7 @@ mod tests {
             [
                 "언어",
                 "메뉴 고정",
+                "사이드바 위치",
                 "다른 사진을 열 때",
                 "회전한 사진을",
                 "메모리 한도",
@@ -595,6 +596,7 @@ mod tests {
         );
         let options = |c: Control| c.option_labels(Lang::Ko);
         assert_eq!(options(Control::Language), ["자동", "한국어", "English"]);
+        assert_eq!(options(Control::Sidebar), ["왼쪽", "오른쪽"]);
         assert_eq!(options(Control::OpenIn), ["같은 창", "새 창"]);
         assert_eq!(options(Control::Rotation), ["저장할지 묻기", "바로 저장"]);
         assert_eq!(
@@ -643,12 +645,12 @@ mod tests {
         assert_eq!(m.focused, 0);
         assert_eq!(m.on_key(VK_TAB, NONE, false, &s), Some(Action::Redraw));
         assert_eq!(m.focused, 1);
-        for _ in 0..6 {
+        for _ in 0..7 {
             m.on_key(VK_TAB, NONE, false, &s);
         }
         assert_eq!(m.focused, 0);
         m.on_key(VK_TAB, SHIFT, false, &s);
-        assert_eq!(m.focused, 6);
+        assert_eq!(m.focused, 7);
     }
 
     #[test]
@@ -728,6 +730,7 @@ mod tests {
         assert_eq!(m.on_key(VK_RETURN, NONE, true, &s), Some(Action::Nothing));
         // Held arrows and Tab still repeat.
         assert_eq!(m.on_key(VK_TAB, NONE, true, &s), Some(Action::Redraw));
+        assert_eq!(m.on_key(VK_TAB, NONE, true, &s), Some(Action::Redraw));
         assert_eq!(
             m.on_key(VK_RIGHT, NONE, true, &s),
             Some(Action::Change(Change::NewWindow(true)))
@@ -748,19 +751,19 @@ mod tests {
         let s = Settings::default();
         let mut m = Model::default();
         assert_eq!(
-            m.invoke(4, Some(2), &s),
+            m.invoke(5, Some(2), &s),
             Action::Change(Change::Memory(Some(512)))
         );
-        assert_eq!(m.focused, 4);
+        assert_eq!(m.focused, 5);
         // The chosen option again: only the focus moves.
         assert_eq!(m.invoke(0, Some(0), &s), Action::Redraw);
         assert_eq!(m.focused, 0);
         assert_eq!(m.invoke(1, None, &s), Action::Change(Change::PinMenu(true)));
         assert_eq!(
-            m.invoke(5, None, &s),
+            m.invoke(6, None, &s),
             Action::Change(Change::UpdateCheck(true))
         );
-        assert_eq!(m.invoke(6, None, &s), Action::OpenDefaultApps);
+        assert_eq!(m.invoke(7, None, &s), Action::OpenDefaultApps);
         // Mismatched or out-of-range parts do nothing.
         assert_eq!(m.invoke(0, None, &s), Action::Redraw);
         assert_eq!(m.invoke(1, Some(0), &s), Action::Redraw);
@@ -797,10 +800,10 @@ mod tests {
             m.release(px, py, &l, &s),
             Action::Change(Change::PinMenu(true))
         );
-        let (bx, by) = center(l.controls[6].options[0]);
+        let (bx, by) = center(l.controls[7].options[0]);
         m.press(bx, by, &l);
         assert_eq!(m.release(bx, by, &l, &s), Action::OpenDefaultApps);
-        assert_eq!(m.focused, 6);
+        assert_eq!(m.focused, 7);
         // Outside every control: not taken, nothing happens.
         assert!(!m.press(2.0, 2.0, &l));
         assert_eq!(m.release(2.0, 2.0, &l, &s), Action::Nothing);
@@ -839,11 +842,31 @@ mod tests {
                         .unwrap_or(l.controls[c + 1].options[0])
                         .y
         };
-        assert!(under(l.note, 4));
-        assert!(under(l.open_note, 2));
+        assert!(under(l.note, 5));
+        assert!(under(l.open_note, 3));
         assert!(inside(l.open_note));
         assert!(l.version.y >= bottom);
         assert!(inside(l.note) && inside(l.version));
+    }
+
+    /// M6: "사이드바 위치" picks the resize screen's side; the window lays out again.
+    #[test]
+    fn sidebar_position_moves_the_sidebar() {
+        use lv_core::settings::SidebarSide;
+        let mut s = Settings::default();
+        assert_eq!(Control::Sidebar.selected(&s), Some(1));
+        let mut m = Model::default();
+        focus(&mut m, Control::Sidebar);
+        let Some(Action::Change(c)) = m.on_key(VK_LEFT, NONE, false, &s) else {
+            panic!("left");
+        };
+        assert_eq!(c, Change::Sidebar(SidebarSide::Left));
+        let update = apply_change(&mut s, c).unwrap();
+        assert!(update.relayout);
+        assert_eq!(s.sidebar_side, SidebarSide::Left);
+        assert_eq!(Control::Sidebar.selected(&s), Some(0));
+        assert_eq!(apply_change(&mut s, c), None);
+        assert_eq!(Control::Sidebar.option_labels(Lang::En), ["Left", "Right"]);
     }
 
     #[test]

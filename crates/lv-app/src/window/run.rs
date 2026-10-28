@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::DragAcceptFiles;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, LoadCursorW, RegisterClassExW,
     SetWindowPlacement, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    IDC_ARROW, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    IDC_ARROW, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell};
@@ -117,7 +117,8 @@ pub fn run(
             WINDOW_EX_STYLE(0),
             CLASS_NAME,
             w!("light-view"),
-            WS_OVERLAPPEDWINDOW,
+            // Clip children: the resize screen's number fields are child windows.
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

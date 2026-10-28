@@ -1,6 +1,7 @@
 //! Toasts (spec §5.6): the message, its optional action and where they go.
 
-use crate::strings::{t, text, tf, Lang, S};
+use crate::resize::text::ToastText;
+use crate::strings::{current, t, text, tf, Lang, S};
 use crate::toolbar::{pinned_bar_height, Rect};
 
 use super::TOAST_MS;
@@ -18,6 +19,8 @@ pub(super) const HIT_MIN: f32 = 44.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastAction {
     Undo,
+    /// [실행 취소] on "N장 대체": the replaced photos come back (M6).
+    UndoReplace,
     /// [보기]: opens the new release's page.
     ViewUpdate,
 }
@@ -25,9 +28,8 @@ pub enum ToastAction {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Toast {
     pub text: String,
-    /// What `text` is made of (a string key, a file name or version after it, and
-    /// maybe a closing key), so a language change can rebuild it.
-    source: (S, String, Option<S>),
+    /// What `text` is made of, so a language change can rebuild it.
+    source: Source,
     /// The highlighter pill's label and what it does.
     pub action: Option<(String, ToastAction)>,
     pub shown_at_ms: u64,
@@ -45,7 +47,7 @@ impl Toast {
     pub fn with_suffix(key: S, suffix: &str, now_ms: u64) -> Toast {
         Toast {
             text: tf(key, &[&suffix]),
-            source: (key, suffix.to_owned(), None),
+            source: Source::Key(key, suffix.to_owned(), None),
             action: None,
             shown_at_ms: now_ms,
             duration_ms: TOAST_MS,
@@ -66,20 +68,42 @@ impl Toast {
         let (head, tail) = (S::ToastUpdateAvailable, S::ToastUpdateAvailableEnd);
         Toast {
             text: format!("{}{version}{}", t(head), t(tail)),
-            source: (head, version.to_owned(), Some(tail)),
+            source: Source::Key(head, version.to_owned(), Some(tail)),
             action: Some((t(S::BtnView).to_owned(), ToastAction::ViewUpdate)),
             ..Toast::new(head, now_ms)
         }
     }
 
+    /// After a resize save, commit or undo (M6): its summary, with [실행 취소] when
+    /// photos were replaced ("3장 대체 · 실행 취소").
+    pub fn resize(what: ToastText, undo: bool, now_ms: u64) -> Toast {
+        Toast {
+            text: what.render(current()),
+            source: Source::Resize(what),
+            action: undo.then(|| (t(S::ToastUndo).to_owned(), ToastAction::UndoReplace)),
+            ..Toast::new(S::ToastUndo, now_ms)
+        }
+    }
+
+    /// Whether this is the "N장 대체 · 실행 취소" toast.
+    pub fn undoes_replace(&self) -> bool {
+        self.action
+            .as_ref()
+            .is_some_and(|(_, a)| *a == ToastAction::UndoReplace)
+    }
+
     /// Rebuilds the text and the action's label in `lang`.
     pub fn retranslate(&mut self, lang: Lang) {
-        let (key, suffix, tail) = &self.source;
-        let tail = tail.map_or("", |k| text(lang, k));
-        self.text = format!("{}{suffix}{tail}", text(lang, *key));
+        self.text = match &self.source {
+            Source::Key(key, suffix, tail) => {
+                let tail = tail.map_or("", |k| text(lang, k));
+                format!("{}{suffix}{tail}", text(lang, *key))
+            }
+            Source::Resize(what) => what.render(lang),
+        };
         if let Some((label, action)) = &mut self.action {
             *label = match action {
-                ToastAction::Undo => text(lang, S::ToastUndo).to_owned(),
+                ToastAction::Undo | ToastAction::UndoReplace => text(lang, S::ToastUndo).to_owned(),
                 ToastAction::ViewUpdate => text(lang, S::BtnView).to_owned(),
             };
         }
@@ -108,6 +132,14 @@ impl Toast {
     pub fn place(&mut self, parts: ToastParts) {
         self.parts = Some(parts);
     }
+}
+
+/// What a toast's text is made of.
+#[derive(Clone, Debug, PartialEq)]
+enum Source {
+    /// A string key, a file name or version after it, and maybe a closing key.
+    Key(S, String, Option<S>),
+    Resize(ToastText),
 }
 
 /// Where toasts go: bottom-left, 16 DIP from the window edges and above a pinned

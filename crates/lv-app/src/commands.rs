@@ -207,7 +207,10 @@ pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f3
                 return;
             };
             let redraw = match anchor {
-                Some(p) => a.viewer.apply_at(cmd, p),
+                Some(p) => {
+                    let p = a.view_point(p);
+                    a.viewer.apply_at(cmd, p)
+                }
                 None => a.viewer.apply(cmd),
             };
             drop(a);
@@ -306,6 +309,10 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
         }
         OverlayEvent::Toast(ToastAction::Undo) => {
             delete::request_undo(app, hwnd);
+            true
+        }
+        OverlayEvent::Toast(ToastAction::UndoReplace) => {
+            resize::screen::undo(app, hwnd);
             true
         }
         OverlayEvent::Toast(ToastAction::ViewUpdate) => {

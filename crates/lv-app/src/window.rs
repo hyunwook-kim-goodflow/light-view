@@ -137,8 +137,12 @@ impl App {
         self.client_dips
     }
 
-    /// The image area: the client area above a pinned toolbar.
+    /// The image area: the client area above a pinned toolbar; on the resize screen,
+    /// its photo area.
     fn view_dips(&self) -> (f32, f32) {
+        if let Some(r) = crate::resize::screen::photo_rect(self) {
+            return (r.w, r.h);
+        }
         let (w, h) = self.client_dips;
         let bar = if self.settings.toolbar_pinned {
             pinned_bar_height()
@@ -148,9 +152,19 @@ impl App {
         (w, (h - bar).max(0.0))
     }
 
-    /// The toolbar's layout input, or `None` when no file is open (no toolbar).
+    /// A point in client DIPs as the viewer sees it (its view starts at the resize
+    /// screen's photo area).
+    pub fn view_point(&self, (x, y): (f32, f32)) -> (f32, f32) {
+        match crate::resize::screen::photo_rect(self) {
+            Some(r) => (x - r.x, y - r.y),
+            None => (x, y),
+        }
+    }
+
+    /// The toolbar's layout input, or `None` when no file is open or the resize screen
+    /// is (no toolbar).
     pub fn toolbar_input(&self) -> Option<ToolbarInput> {
-        if !self.viewer.has_file() {
+        if !self.viewer.has_file() || self.resize.is_open() {
             return None;
         }
         Some(ToolbarInput {
@@ -173,7 +187,7 @@ impl App {
 
     /// Like `card_model`, without touching the card's state (for hit tests).
     pub fn card_layout(&self) -> Option<exif_card::Model> {
-        if !self.exif_card.is_open() || !self.viewer.has_file() {
+        if !self.exif_card.is_open() || !self.viewer.has_file() || self.resize.is_open() {
             return None;
         }
         let info = CardInfo {
@@ -288,6 +302,8 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_PAINT => {
+            // The resize screen's layout and number fields first (they are windows).
+            crate::resize::screen::sync(app, hwnd);
             let mut ps = PAINTSTRUCT::default();
             // SAFETY: paired BeginPaint/EndPaint on our window with a live PAINTSTRUCT.
             unsafe { BeginPaint(hwnd, &mut ps) };
@@ -302,7 +318,7 @@ fn handle(
             Some(LRESULT(0))
         }
         WM_GETOBJECT => uia_provider::get_object(hwnd, wparam, lparam, || {
-            app.try_borrow().ok().map(|a| uia::main_tree_of(&a))
+            app.try_borrow().ok().map(|a| uia::main_tree_of(&a, hwnd))
         }),
         render::WM_APP_MIPS_READY => {
             invalidate(hwnd);
@@ -393,6 +409,7 @@ fn handle(
         }
         // The overlay sees input first: an open dialog takes it all.
         _ => input::overlay(app, hwnd, msg, wparam, lparam)
+            .or_else(|| crate::resize::screen::on_message(app, hwnd, msg, wparam, lparam))
             .or_else(|| commands::handle(app, hwnd, msg, wparam, lparam))
             .or_else(|| input::handle(app, hwnd, msg, wparam, lparam)),
     }
