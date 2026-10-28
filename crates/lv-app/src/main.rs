@@ -14,6 +14,7 @@ mod menu;
 mod overlay;
 mod placement;
 mod render;
+mod resize;
 mod routing;
 mod save;
 mod settings_win;
@@ -32,7 +33,7 @@ mod watch;
 mod window;
 mod worker;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Context;
@@ -100,6 +101,12 @@ fn main() -> anyhow::Result<()> {
         .map(load_settings)
         .unwrap_or_default();
     strings::set(settings.language);
+    // Originals a crashed save left under their backup names come back (ruling R2).
+    if !bench {
+        if let Some(dir) = initial.as_deref().and_then(photo_folder) {
+            timing::step("recover-ms", || resize::save::recover_backups(&dir));
+        }
+    }
     // Held until the window closes, so later launches forward to it.
     let _guard = if settings.open_in_new_window || bench {
         None
@@ -116,6 +123,19 @@ fn main() -> anyhow::Result<()> {
     // the window is gone.
     let _com = shell::ComApartment::init();
     window::run(initial, settings, settings_path)
+}
+
+/// The folder of the photo (or the folder) the app was started with.
+fn photo_folder(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        return Some(path.to_path_buf());
+    }
+    let parent = path.parent()?;
+    Some(if parent.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        parent.to_path_buf()
+    })
 }
 
 /// Where this copy keeps settings and crash records: beside the exe when `portable.txt` is
@@ -142,6 +162,21 @@ mod tests {
     use windows::Win32::System::Diagnostics::Debug::{
         GetErrorMode, SetErrorMode, THREAD_ERROR_MODE,
     };
+
+    #[test]
+    fn recovery_looks_in_the_photo_folder() {
+        use std::path::Path;
+        let dir = tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap();
+        assert_eq!(super::photo_folder(dir.path()).unwrap(), dir.path());
+        assert_eq!(
+            super::photo_folder(&dir.path().join("a.jpg")).unwrap(),
+            dir.path()
+        );
+        assert_eq!(
+            super::photo_folder(Path::new("a.jpg")).unwrap(),
+            Path::new(".")
+        );
+    }
 
     #[test]
     fn system_error_dialogs_are_off() {

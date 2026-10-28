@@ -15,7 +15,7 @@ use lv_core::jpeg_extent::check_single_image;
 
 use crate::worker::{PoolError, Reply, WorkerPool};
 
-mod atomic;
+pub(crate) mod atomic;
 use atomic::replace;
 #[cfg(test)]
 use atomic::{

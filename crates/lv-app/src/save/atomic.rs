@@ -110,11 +110,11 @@ pub(super) fn replace(
 }
 
 /// Longest file name (UTF-16 units) NTFS takes.
-const MAX_NAME: usize = 255;
+pub(crate) const MAX_NAME: usize = 255;
 
 /// Tells Explorer the photo changed, so it redraws the thumbnail even though the
 /// modification time was put back.
-fn notify_shell(path: &Path) {
+pub(crate) fn notify_shell(path: &Path) {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: `wide` is NUL-terminated and lives for the whole call; SHCNF_PATHW says
     // that is what the first item points to, and the second is unused.
@@ -129,7 +129,7 @@ fn notify_shell(path: &Path) {
 }
 
 /// `.<name>.lvtmp-<pid>`.
-fn temp_name(name: &OsStr, pid: u32) -> OsString {
+pub(crate) fn temp_name(name: &OsStr, pid: u32) -> OsString {
     let mut temp = OsString::from(".");
     temp.push(name);
     temp.push(format!(".lvtmp-{pid}"));
@@ -138,9 +138,9 @@ fn temp_name(name: &OsStr, pid: u32) -> OsString {
 
 /// A save's temp file: removed when dropped unless `keep` is set (it became the photo,
 /// or it may be the only copy left).
-pub(super) struct TempFile {
-    pub(super) path: PathBuf,
-    pub(super) keep: bool,
+pub(crate) struct TempFile {
+    pub(crate) path: PathBuf,
+    pub(crate) keep: bool,
 }
 
 impl Drop for TempFile {
@@ -197,7 +197,7 @@ pub(super) fn after_replace_error(
 
 /// `MoveFileExW` without MOVEFILE_REPLACE_EXISTING: an existing file at `to` is never
 /// replaced.
-fn move_no_replace(from: &Path, to: &Path) -> windows::core::Result<()> {
+pub(crate) fn move_no_replace(from: &Path, to: &Path) -> windows::core::Result<()> {
     // SAFETY: both strings are NUL-terminated and live for the whole call.
     unsafe {
         MoveFileExW(
@@ -353,7 +353,7 @@ pub(super) fn is_stale(pid: u32, own: u32, hidden: bool, running: impl Fn(u32) -
 /// exactly `.<name>.lvtmp-<pid>` in its folder ([`temp_pid`], [`is_stale`]), found with
 /// the pattern `.<name>.lvtmp-*`. A kept copy is never removed: one still under its temp
 /// name ([`KEPT`]) gets another try at a copy name, so the save can use the name.
-fn sweep_stale_temps(target: &Path, own: u32) {
+pub(crate) fn sweep_stale_temps(target: &Path, own: u32) {
     let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
         return;
     };
@@ -393,7 +393,7 @@ fn sweep_stale_temps(target: &Path, own: u32) {
 }
 
 /// The names and attributes of the entries matching `pattern` (`FindFirstFileW`).
-fn find_files(pattern: &Path) -> Vec<(OsString, u32)> {
+pub(crate) fn find_files(pattern: &Path) -> Vec<(OsString, u32)> {
     let mut found = Vec::new();
     let mut data = WIN32_FIND_DATAW::default();
     // SAFETY: the string is NUL-terminated and lives for the whole call; `data` is a
@@ -424,7 +424,7 @@ fn find_files(pattern: &Path) -> Vec<(OsString, u32)> {
 
 /// Whether a process with this pid exists; when that cannot be told (access denied),
 /// it counts as running.
-pub(super) fn process_running(pid: u32) -> bool {
+pub(crate) fn process_running(pid: u32) -> bool {
     const STILL_ACTIVE: u32 = 259;
     // SAFETY: plain call; the handle is closed below.
     match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
@@ -444,7 +444,10 @@ pub(super) fn process_running(pid: u32) -> bool {
 
 /// Puts back the original's creation and modification times. The new content is saved
 /// either way, so a failure is only logged.
-fn restore_times(target: &Path, (created, modified): (Option<SystemTime>, Option<SystemTime>)) {
+pub(crate) fn restore_times(
+    target: &Path,
+    (created, modified): (Option<SystemTime>, Option<SystemTime>),
+) {
     let mut times = FileTimes::new();
     if let Some(t) = created {
         times = times.set_created(t);

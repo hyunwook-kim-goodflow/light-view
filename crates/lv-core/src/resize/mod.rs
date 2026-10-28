@@ -6,12 +6,14 @@ mod encode;
 mod fit;
 mod geometry;
 mod meta;
+mod naming;
 mod quality;
 
 pub use encode::{encode, EncodeError};
 pub use fit::{fit, Encoder, FitOutcome};
 pub use geometry::{floor_long_edge, resample, target_size};
 pub use meta::{attach_exif, exif_overhead, whitelist_exif};
+pub use naming::{new_file_name, replace_target};
 pub use quality::estimate_jpeg_quality;
 
 use crate::decode::Frame;
