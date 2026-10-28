@@ -1,5 +1,5 @@
-//! light-view's sandboxed worker: decodes HEIF files, rotates JPEGs losslessly and encodes
-//! lossy WebP files from the app's pixels.
+//! light-view's sandboxed worker: decodes HEIF files, rotates JPEGs losslessly and fits
+//! the app's pixels into lossy WebP files.
 //!
 //! Reads [`Request`]s from stdin and writes [`Response`]s to stdout (see `lv-ipc`). stdout
 //! carries framed responses only; diagnostics go to stderr. Exit codes: 0 after `Shutdown` or
@@ -9,6 +9,8 @@
 //! Usage: `lv-worker --max-pixels <N>` (debug builds also take
 //! `--test-mode=hang|crash|die-at-start|wrong-kind` and `--test-mode=probe-read=<path>`).
 
+mod webp;
+
 use std::io::{self, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
@@ -17,8 +19,8 @@ use lv_core::color::{premultiply_to_bgra, to_srgb_in_place, ColorSource};
 use lv_core::decode::{max_file_bytes, DecodeLimits};
 use lv_heif::{decode_heif, ColorInfo, HeifError};
 use lv_ipc::{
-    max_bytes_response, max_request_data, max_response_pixels, read_request, webp_encode_fits,
-    write_response, FailKind, Request, Response, REQUEST_FIXED_LEN,
+    max_bytes_response, max_request_data, max_response_pixels, read_request, write_response,
+    FailKind, Request, Response, REQUEST_FIXED_LEN,
 };
 use lv_jpegtran::{rotate_lossless, Quarter, TransformError};
 
@@ -35,7 +37,7 @@ enum TestMode {
     /// Exit with code 3 before reading anything (a worker that cannot start).
     DieAtStart,
     /// Answer every request with the other kind of answer (`Bytes` for a decode, `Image`
-    /// for a rotation or an encode).
+    /// for a rotation or a fit).
     WrongKind,
     /// Answer every request with `Corrupt("probe-read: opened")` if the file at this path
     /// can be opened for reading, else `Corrupt("probe-read: <error>")`: shows what the
@@ -116,10 +118,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     })
 }
 
-/// Largest request payload the worker accepts, for a decode, a rotation and an encode alike:
+/// Largest request payload the worker accepts, for a decode, a rotation and a fit alike:
 /// the file bytes the app may send (ruling R10; the pool uses the same `max_request_data`
-/// rule) plus the largest fixed part of a request. An encode's pixels count as file bytes:
-/// the pool sends no more than this either.
+/// rule) plus the largest fixed part of a request. A fit's pixels count as file bytes: the
+/// pool sends no more than this either.
 fn request_cap(max_pixels: u64) -> u64 {
     max_request_data(max_file_bytes(&DecodeLimits { max_pixels })) + REQUEST_FIXED_LEN
 }
@@ -153,7 +155,7 @@ fn serve(config: &Config) -> ExitCode {
             Some(TestMode::WrongKind) => {
                 let id = request.id();
                 let response = match request {
-                    Request::RotateJpeg { .. } | Request::EncodeWebp { .. } => Response::Image {
+                    Request::RotateJpeg { .. } | Request::FitWebp { .. } => Response::Image {
                         id,
                         width: 1,
                         height: 1,
@@ -201,13 +203,21 @@ fn serve(config: &Config) -> ExitCode {
                 max_pixels,
                 data,
             } => rotate(id, quarters, &data, max_pixels.min(config.max_pixels)),
-            Request::EncodeWebp {
+            Request::FitWebp {
                 id,
                 width,
                 height,
-                quality,
+                start_quality,
+                target,
                 rgba,
-            } => encode_webp(id, width, height, quality, &rgba, config.max_pixels),
+            } => webp::fit_webp(
+                id,
+                (width, height),
+                start_quality,
+                target,
+                &rgba,
+                config.max_pixels,
+            ),
             Request::Shutdown => return ExitCode::SUCCESS,
         };
         if let Err(e) = write_response(&mut output, &response).and_then(|()| output.flush()) {
@@ -293,37 +303,6 @@ fn rotate(id: u64, quarters: u8, data: &[u8], max_pixels: u64) -> Response {
             height: 0,
         },
         Err(TransformError::Corrupt(msg)) => FailKind::Corrupt(msg),
-    };
-    Response::Failed { id, kind }
-}
-
-/// Encodes the app's straight RGBA pixels as a lossy WebP (lv-ipc has checked that `rgba`
-/// is `width * height * 4` bytes). An image with a side over WebP's 16383, over the worker's
-/// pixel limit or over what its Job leaves for libwebp ([`webp_encode_fits`]) is `TooLarge`
-/// with its size, before libwebp sees it; a failure inside libwebp (out of memory included)
-/// is `Corrupt`. Crashes in libwebp end the process.
-fn encode_webp(
-    id: u64,
-    width: u32,
-    height: u32,
-    quality: u8,
-    rgba: &[u8],
-    max_pixels: u64,
-) -> Response {
-    let kind = if !webp_encode_fits(width, height, max_pixels) {
-        FailKind::TooLarge { width, height }
-    } else {
-        match lv_webp::encode_rgba(rgba, width, height, quality) {
-            Ok(data) if data.len() as u64 <= max_bytes_response(rgba.len() as u64) => {
-                return Response::Bytes { id, data }
-            }
-            Ok(data) => FailKind::Corrupt(format!(
-                "{}-byte WebP for {} bytes of pixels",
-                data.len(),
-                rgba.len()
-            )),
-            Err(msg) => FailKind::Corrupt(msg),
-        }
     };
     Response::Failed { id, kind }
 }

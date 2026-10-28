@@ -21,10 +21,14 @@
 //! - `0x02` `Shutdown`: empty payload.
 //! - `0x03` `RotateJpeg`: `id: u64 | max_pixels: u64 | quarters: u8 | data` (`data` is the
 //!   rest of the payload). `quarters` is the clockwise rotation in quarter turns, `1..=3`.
-//! - `0x04` `EncodeWebp`: `id: u64 | width: u32 | height: u32 | quality: u8 | rgba` (`rgba`
-//!   is the rest of the payload: straight RGBA8, rows top to bottom). `width` and `height`
-//!   must be non-zero, `quality` at most 100, and `width * height * 4` (checked u64) must
-//!   equal `rgba.len()`.
+//! - `0x04` `FitWebp`: `id: u64 | width: u32 | height: u32 | start_quality: u8 | target |
+//!   rgba` (`rgba` is the rest of the payload: the source's straight RGBA8, rows top to
+//!   bottom). `width` and `height` must be non-zero, `start_quality` `1..=100`, and
+//!   `width * height * 4` (checked u64) must equal `rgba.len()`. `target` is
+//!   `tag: u8 | value: u64 | long_edge: u32`: tag `0` long edge, `1` width, `2` height
+//!   (`value` a side of at least 1 that fits a u32, `long_edge` 0), `3` max bytes (`value`
+//!   the budget, at least 1; `long_edge` the optional long-edge limit, 0 for none), `4`
+//!   percent (`value` `1..=100`, `long_edge` 0). See [`FitTarget`].
 //!
 //! Responses (worker to app):
 //! - `0x81` `Image`: `id: u64 | width: u32 | height: u32 | bgra` (the rest of the payload).
@@ -36,7 +40,12 @@
 //!   cannot be rotated losslessly because its size is not a multiple of its MCU), tag `4`
 //!   `HasTrailingData` (none: data after EOI or an MPF segment, ruling R7).
 //! - `0x83` `Bytes`: `id: u64 | data` (the rest of the payload), the answer to `RotateJpeg`
-//!   (the rotated JPEG) and to `EncodeWebp` (the WebP file).
+//!   (the rotated JPEG).
+//! - `0x84` `Fitted`: `id: u64 | width: u32 | height: u32 | quality: u8 | data` (the rest of
+//!   the payload), the WebP file a `FitWebp` produced, its size and quality. `width` and
+//!   `height` must be non-zero and `quality` `1..=100`.
+//! - `0x85` `CantFit`: `id: u64 | smallest: u64`: no WebP met the `FitWebp` byte budget,
+//!   `smallest` is the shortest one tried.
 //!
 //! # Reading
 //!
@@ -65,27 +74,40 @@
 //! Readers *reject* (`Malformed`) a longer string rather than truncating it, and also reject
 //! invalid UTF-8.
 
+mod fit;
+mod frame;
 #[doc(hidden)]
 pub mod fuzzing;
 mod limits;
 
+pub use fit::FitTarget;
 pub use limits::{
-    decoder_memory, max_bytes_response, max_request_data, max_response_pixels, webp_encode_fits,
-    webp_encode_memory, worker_memory_limit, WEBP_MAX_DIMENSION,
+    decoder_memory, max_bytes_response, max_request_data, max_response_pixels, webp_fit_fits,
+    webp_fit_memory, worker_memory_limit, WEBP_MAX_DIMENSION,
 };
 
 use std::io::{self, Read, Write};
+
+use frame::{
+    expect_consumed, invalid, pixel_bytes, read_exact_vec, read_header, read_u32, read_u64,
+    read_u8, write_frame,
+};
 
 pub const MAGIC: [u8; 4] = *b"LVW1";
 pub const MAX_PAYLOAD: u64 = 1 << 30;
 /// Maximum byte length of a `Corrupt` message on the wire.
 pub const MAX_CORRUPT_LEN: usize = 4096;
-/// The most fixed bytes in front of a request's file bytes or pixels: `RotateJpeg`'s `id`,
-/// `max_pixels` and `quarters`, or `EncodeWebp`'s `id`, `width`, `height` and `quality`
-/// (`DecodeHeif` has one byte less).
-pub const REQUEST_FIXED_LEN: u64 = 17;
+/// The most fixed bytes in front of a request's file bytes or pixels: `FitWebp`'s `id`,
+/// `width`, `height`, `start_quality` and target (`RotateJpeg` has 17, `DecodeHeif` 16).
+pub const REQUEST_FIXED_LEN: u64 = 17 + fit::TARGET_LEN;
 /// Fixed fields in front of a `DecodeHeif` request's file bytes (`id`, `max_pixels`).
 const DECODE_FIXED_LEN: u64 = 16;
+/// Fixed fields in front of a `RotateJpeg` request's file bytes (`id`, `max_pixels`,
+/// `quarters`).
+const ROTATE_FIXED_LEN: u64 = 17;
+/// Fixed fields in front of a `Fitted` response's WebP (`id`, `width`, `height`,
+/// `quality`).
+pub const FITTED_FIXED_LEN: u64 = 17;
 /// Fixed fields in front of an `Image` response's pixels (`id`, `width`, `height`).
 pub const IMAGE_FIXED_LEN: u64 = 16;
 /// Fixed field in front of a `Bytes` response's data (`id`).
@@ -98,10 +120,12 @@ pub const MAX_RESPONSE_PIXELS: u64 = (MAX_PAYLOAD - IMAGE_FIXED_LEN) / 4;
 const KIND_DECODE_HEIF: u8 = 0x01;
 const KIND_SHUTDOWN: u8 = 0x02;
 const KIND_ROTATE_JPEG: u8 = 0x03;
-const KIND_ENCODE_WEBP: u8 = 0x04;
+const KIND_FIT_WEBP: u8 = 0x04;
 const KIND_IMAGE: u8 = 0x81;
 const KIND_FAILED: u8 = 0x82;
 const KIND_BYTES: u8 = 0x83;
+const KIND_FITTED: u8 = 0x84;
+const KIND_CANT_FIT: u8 = 0x85;
 
 const TAG_TOO_LARGE: u8 = 0;
 const TAG_CORRUPT: u8 = 1;
@@ -123,13 +147,15 @@ pub enum Request {
         max_pixels: u64,
         data: Vec<u8>,
     },
-    /// Encode straight RGBA8 pixels (`width * height * 4` bytes) as a lossy WebP at
-    /// `quality` (`0..=100`); answered by `Bytes`.
-    EncodeWebp {
+    /// Resize the source (straight RGBA8, `width * height * 4` bytes) to `target` and encode
+    /// it as a lossy WebP, searching quality down from `start_quality` and then resolution
+    /// for a byte budget (`lv_core::resize::fit`); answered by `Fitted` or `CantFit`.
+    FitWebp {
         id: u64,
         width: u32,
         height: u32,
-        quality: u8,
+        start_quality: u8,
+        target: FitTarget,
         rgba: Vec<u8>,
     },
     Shutdown,
@@ -141,7 +167,7 @@ impl Request {
         match self {
             Request::DecodeHeif { id, .. }
             | Request::RotateJpeg { id, .. }
-            | Request::EncodeWebp { id, .. } => *id,
+            | Request::FitWebp { id, .. } => *id,
             Request::Shutdown => 0,
         }
     }
@@ -159,10 +185,23 @@ pub enum Response {
         id: u64,
         kind: FailKind,
     },
-    /// The rotated JPEG (the answer to `RotateJpeg`) or the WebP file (to `EncodeWebp`).
+    /// The rotated JPEG, the answer to `RotateJpeg`.
     Bytes {
         id: u64,
         data: Vec<u8>,
+    },
+    /// The WebP file a `FitWebp` produced, at `width` x `height` and `quality`.
+    Fitted {
+        id: u64,
+        width: u32,
+        height: u32,
+        quality: u8,
+        data: Vec<u8>,
+    },
+    /// No WebP met the `FitWebp` byte budget; `smallest` is the shortest one tried.
+    CantFit {
+        id: u64,
+        smallest: u64,
     },
 }
 
@@ -216,104 +255,6 @@ impl From<io::Error> for IpcError {
     }
 }
 
-fn check_len(len: u64, max_payload: u64) -> Result<(), IpcError> {
-    if len > max_payload.min(MAX_PAYLOAD) {
-        Err(IpcError::TooLong(len))
-    } else {
-        Ok(())
-    }
-}
-
-fn invalid(msg: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, msg)
-}
-
-fn write_frame(w: &mut impl Write, kind: u8, len: u64) -> io::Result<()> {
-    if len > MAX_PAYLOAD {
-        return Err(invalid("payload exceeds MAX_PAYLOAD"));
-    }
-    let mut header = [0u8; 13];
-    header[..4].copy_from_slice(&MAGIC);
-    header[4] = kind;
-    header[5..].copy_from_slice(&len.to_le_bytes());
-    w.write_all(&header)
-}
-
-/// Reads and validates the frame header; returns `None` on a clean EOF (zero bytes of the
-/// next header available), `(kind, len)` otherwise.
-fn read_header(r: &mut impl Read, max_payload: u64) -> Result<Option<(u8, u64)>, IpcError> {
-    let mut header = [0u8; 13];
-    let mut filled = 0;
-    while filled < header.len() {
-        match r.read(&mut header[filled..]) {
-            Ok(0) if filled == 0 => return Ok(None),
-            Ok(0) => return Err(IpcError::Io(io::ErrorKind::UnexpectedEof.into())),
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    if header[..4] != MAGIC {
-        return Err(IpcError::BadMagic);
-    }
-    let len = u64::from_le_bytes(header[5..].try_into().expect("8 bytes"));
-    check_len(len, max_payload)?;
-    Ok(Some((header[4], len)))
-}
-
-type Payload<'a, R> = io::Take<&'a mut R>;
-
-/// Reads `N` fixed bytes; a payload too short for them is `Malformed`, not an I/O error.
-fn read_fixed<const N: usize, R: Read>(p: &mut Payload<'_, R>) -> Result<[u8; N], IpcError> {
-    if p.limit() < N as u64 {
-        return Err(IpcError::Malformed("payload shorter than fixed fields"));
-    }
-    let mut b = [0u8; N];
-    p.read_exact(&mut b)?;
-    Ok(b)
-}
-
-fn read_u8<R: Read>(p: &mut Payload<'_, R>) -> Result<u8, IpcError> {
-    Ok(read_fixed::<1, R>(p)?[0])
-}
-
-fn read_u32<R: Read>(p: &mut Payload<'_, R>) -> Result<u32, IpcError> {
-    Ok(u32::from_le_bytes(read_fixed(p)?))
-}
-
-fn read_u64<R: Read>(p: &mut Payload<'_, R>) -> Result<u64, IpcError> {
-    Ok(u64::from_le_bytes(read_fixed(p)?))
-}
-
-/// Reads exactly `n` bytes into a buffer allocated once (`n` must already be bounded by the
-/// validated frame length). Allocation failure is `Io(OutOfMemory)`.
-fn read_exact_vec<R: Read>(p: &mut Payload<'_, R>, n: u64) -> Result<Vec<u8>, IpcError> {
-    let n = usize::try_from(n).map_err(|_| IpcError::Io(io::ErrorKind::OutOfMemory.into()))?;
-    let mut buf = Vec::new();
-    buf.try_reserve_exact(n)
-        .map_err(|_| IpcError::Io(io::ErrorKind::OutOfMemory.into()))?;
-    buf.resize(n, 0);
-    p.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-/// `width * height * 4` for a non-empty image; `None` for a zero side or an overflow.
-fn pixel_bytes(width: u32, height: u32) -> Option<u64> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    u64::from(width)
-        .checked_mul(u64::from(height))?
-        .checked_mul(4)
-}
-
-fn expect_consumed<R: Read>(p: &Payload<'_, R>) -> Result<(), IpcError> {
-    if p.limit() != 0 {
-        return Err(IpcError::Malformed("trailing bytes in payload"));
-    }
-    Ok(())
-}
-
 pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
     match r {
         Request::DecodeHeif {
@@ -338,7 +279,7 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
             if !(1..=3).contains(quarters) {
                 return Err(invalid("quarters must be 1..=3"));
             }
-            let len = REQUEST_FIXED_LEN
+            let len = ROTATE_FIXED_LEN
                 .checked_add(data.len() as u64)
                 .ok_or_else(|| invalid("too long"))?;
             write_frame(w, KIND_ROTATE_JPEG, len)?;
@@ -347,27 +288,31 @@ pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
             w.write_all(&[*quarters])?;
             w.write_all(data)
         }
-        Request::EncodeWebp {
+        Request::FitWebp {
             id,
             width,
             height,
-            quality,
+            start_quality,
+            target,
             rgba,
         } => {
-            if *quality > 100 {
-                return Err(invalid("quality must be 0..=100"));
+            if !(1..=100).contains(start_quality) {
+                return Err(invalid("start quality must be 1..=100"));
             }
+            let (tag, value, long_edge) = target.to_wire().ok_or_else(|| invalid("bad target"))?;
             if pixel_bytes(*width, *height) != Some(rgba.len() as u64) {
                 return Err(invalid("rgba length does not match width*height*4"));
             }
             let len = REQUEST_FIXED_LEN
                 .checked_add(rgba.len() as u64)
                 .ok_or_else(|| invalid("too long"))?;
-            write_frame(w, KIND_ENCODE_WEBP, len)?;
+            write_frame(w, KIND_FIT_WEBP, len)?;
             w.write_all(&id.to_le_bytes())?;
             w.write_all(&width.to_le_bytes())?;
             w.write_all(&height.to_le_bytes())?;
-            w.write_all(&[*quality])?;
+            w.write_all(&[*start_quality, tag])?;
+            w.write_all(&value.to_le_bytes())?;
+            w.write_all(&long_edge.to_le_bytes())?;
             w.write_all(rgba)
         }
         Request::Shutdown => write_frame(w, KIND_SHUTDOWN, 0),
@@ -408,14 +353,17 @@ pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Reques
                 data,
             }))
         }
-        KIND_ENCODE_WEBP => {
+        KIND_FIT_WEBP => {
             let id = read_u64(&mut p)?;
             let width = read_u32(&mut p)?;
             let height = read_u32(&mut p)?;
-            let quality = read_u8(&mut p)?;
-            if quality > 100 {
-                return Err(IpcError::Malformed("quality out of range"));
+            let start_quality = read_u8(&mut p)?;
+            if !(1..=100).contains(&start_quality) {
+                return Err(IpcError::Malformed("start quality out of range"));
             }
+            let (tag, value, long_edge) = (read_u8(&mut p)?, read_u64(&mut p)?, read_u32(&mut p)?);
+            let target = FitTarget::from_wire(tag, value, long_edge)
+                .ok_or(IpcError::Malformed("bad fit target"))?;
             // `p.limit()` is bounded by the validated frame length, so a match bounds the
             // allocation below.
             if pixel_bytes(width, height) != Some(p.limit()) {
@@ -425,11 +373,12 @@ pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Reques
             }
             let rest = p.limit();
             let rgba = read_exact_vec(&mut p, rest)?;
-            Ok(Some(Request::EncodeWebp {
+            Ok(Some(Request::FitWebp {
                 id,
                 width,
                 height,
-                quality,
+                start_quality,
+                target,
                 rgba,
             }))
         }
@@ -437,7 +386,7 @@ pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Reques
             expect_consumed(&p)?;
             Ok(Some(Request::Shutdown))
         }
-        KIND_IMAGE | KIND_FAILED | KIND_BYTES => {
+        KIND_IMAGE | KIND_FAILED | KIND_BYTES | KIND_FITTED | KIND_CANT_FIT => {
             Err(IpcError::Malformed("response kind where request expected"))
         }
         _ => Err(IpcError::Malformed("unknown kind")),
@@ -508,6 +457,31 @@ pub fn write_response(w: &mut impl Write, r: &Response) -> io::Result<()> {
             write_frame(w, KIND_BYTES, len)?;
             w.write_all(&id.to_le_bytes())?;
             w.write_all(data)
+        }
+        Response::Fitted {
+            id,
+            width,
+            height,
+            quality,
+            data,
+        } => {
+            if *width == 0 || *height == 0 || !(1..=100).contains(quality) {
+                return Err(invalid("fitted size must be non-zero and quality 1..=100"));
+            }
+            let len = FITTED_FIXED_LEN
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| invalid("too long"))?;
+            write_frame(w, KIND_FITTED, len)?;
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(&width.to_le_bytes())?;
+            w.write_all(&height.to_le_bytes())?;
+            w.write_all(&[*quality])?;
+            w.write_all(data)
+        }
+        Response::CantFit { id, smallest } => {
+            write_frame(w, KIND_CANT_FIT, 16)?;
+            w.write_all(&id.to_le_bytes())?;
+            w.write_all(&smallest.to_le_bytes())
         }
     }
 }
@@ -580,7 +554,31 @@ pub fn read_response(r: &mut impl Read, max_payload: u64) -> Result<Option<Respo
             let data = read_exact_vec(&mut p, rest)?;
             Ok(Some(Response::Bytes { id, data }))
         }
-        KIND_DECODE_HEIF | KIND_SHUTDOWN | KIND_ROTATE_JPEG | KIND_ENCODE_WEBP => {
+        KIND_FITTED => {
+            let id = read_u64(&mut p)?;
+            let width = read_u32(&mut p)?;
+            let height = read_u32(&mut p)?;
+            let quality = read_u8(&mut p)?;
+            if width == 0 || height == 0 || !(1..=100).contains(&quality) {
+                return Err(IpcError::Malformed("fitted size or quality out of range"));
+            }
+            let rest = p.limit();
+            let data = read_exact_vec(&mut p, rest)?;
+            Ok(Some(Response::Fitted {
+                id,
+                width,
+                height,
+                quality,
+                data,
+            }))
+        }
+        KIND_CANT_FIT => {
+            let id = read_u64(&mut p)?;
+            let smallest = read_u64(&mut p)?;
+            expect_consumed(&p)?;
+            Ok(Some(Response::CantFit { id, smallest }))
+        }
+        KIND_DECODE_HEIF | KIND_SHUTDOWN | KIND_ROTATE_JPEG | KIND_FIT_WEBP => {
             Err(IpcError::Malformed("request kind where response expected"))
         }
         _ => Err(IpcError::Malformed("unknown kind")),
@@ -681,7 +679,7 @@ mod tests {
                 id: 1,
                 quarters: 1,
                 max_pixels: 1,
-                data: vec![0u8; (MAX_REQUEST_DATA + 1) as usize],
+                data: vec![0u8; (MAX_PAYLOAD - ROTATE_FIXED_LEN + 1) as usize],
             },
         ];
         for request in &requests {
@@ -782,19 +780,20 @@ mod tests {
             max_pixels: 0x0304,
             data: vec![0xEE; 5],
         });
-        let mut expected = frame(0x03, REQUEST_FIXED_LEN + 5, &[]);
+        let mut expected = frame(0x03, ROTATE_FIXED_LEN + 5, &[]);
         expected.extend_from_slice(&0x0102u64.to_le_bytes());
         expected.extend_from_slice(&0x0304u64.to_le_bytes());
         expected.push(3);
         expected.extend_from_slice(&[0xEE; 5]);
         assert_eq!(bytes, expected);
-        // A DecodeHeif request carries one fixed byte less, so the cap fits both.
+        // A DecodeHeif request carries one fixed byte less; the cap (FitWebp's) fits all.
         let decode = req_bytes(&Request::DecodeHeif {
             id: 1,
             max_pixels: 1,
             data: vec![0; 5],
         });
-        assert_eq!(decode.len() as u64, 13 + REQUEST_FIXED_LEN - 1 + 5);
+        assert_eq!(decode.len() as u64, 13 + ROTATE_FIXED_LEN - 1 + 5);
+        const { assert!(ROTATE_FIXED_LEN <= REQUEST_FIXED_LEN) }
     }
 
     #[test]
@@ -828,74 +827,163 @@ mod tests {
         ));
     }
 
-    fn webp_request(width: u32, height: u32, quality: u8, len: usize) -> Request {
-        Request::EncodeWebp {
+    fn fit_request(
+        width: u32,
+        height: u32,
+        start_quality: u8,
+        target: FitTarget,
+        len: usize,
+    ) -> Request {
+        Request::FitWebp {
             id: 21,
             width,
             height,
-            quality,
+            start_quality,
+            target,
             rgba: (0..len).map(|i| i as u8).collect(),
         }
     }
 
+    const TARGETS: [FitTarget; 8] = [
+        FitTarget::LongEdge(1920),
+        FitTarget::LongEdge(u32::MAX),
+        FitTarget::Width(1),
+        FitTarget::Height(600),
+        FitTarget::MaxBytes {
+            bytes: 2_000_000,
+            long_edge: None,
+        },
+        FitTarget::MaxBytes {
+            bytes: u64::MAX,
+            long_edge: Some(1920),
+        },
+        FitTarget::Percent(1),
+        FitTarget::Percent(100),
+    ];
+
     #[test]
-    fn encode_webp_round_trips() {
-        for (w, h, q) in [(1, 1, 0), (2, 2, 80), (64, 48, 100), (16383, 1, 60)] {
-            let r = webp_request(w, h, q, (w * h * 4) as usize);
-            assert_eq!(read_request(&mut Cursor::new(req_bytes(&r))).unwrap(), r);
-            assert_eq!(r.id(), 21);
+    fn fit_webp_round_trips() {
+        for target in TARGETS {
+            for (w, h, q) in [(1, 1, 1), (2, 2, 80), (64, 48, 100)] {
+                let r = fit_request(w, h, q, target, (w * h * 4) as usize);
+                assert_eq!(read_request(&mut Cursor::new(req_bytes(&r))).unwrap(), r);
+                assert_eq!(r.id(), 21);
+            }
         }
-        // Layout: the fixed part is as long as RotateJpeg's, so one cap fits both.
-        let bytes = req_bytes(&webp_request(2, 1, 75, 8));
+        // Layout, and the fixed part is the largest of all requests.
+        let target = FitTarget::MaxBytes {
+            bytes: 0x0A0B,
+            long_edge: Some(0x0C),
+        };
+        let bytes = req_bytes(&fit_request(2, 1, 75, target, 8));
         let mut expected = frame(0x04, REQUEST_FIXED_LEN + 8, &[]);
         expected.extend_from_slice(&21u64.to_le_bytes());
         expected.extend_from_slice(&2u32.to_le_bytes());
         expected.extend_from_slice(&1u32.to_le_bytes());
-        expected.push(75);
+        expected.extend_from_slice(&[75, 3]);
+        expected.extend_from_slice(&0x0A0Bu64.to_le_bytes());
+        expected.extend_from_slice(&0x0Cu32.to_le_bytes());
         expected.extend(0..8u8);
         assert_eq!(bytes, expected);
-        // The answer is a Bytes frame like a rotation's.
-        let answer = Response::Bytes {
-            id: 21,
-            data: b"RIFF\x04\0\0\0WEBP".to_vec(),
-        };
-        assert_eq!(rt_resp(&answer), answer);
+        assert_eq!(REQUEST_FIXED_LEN, 30);
+        // The answers.
+        for r in [
+            Response::Fitted {
+                id: 21,
+                width: 1920,
+                height: 1080,
+                quality: 73,
+                data: b"RIFF\x04\0\0\0WEBP".to_vec(),
+            },
+            Response::Fitted {
+                id: 22,
+                width: 1,
+                height: 1,
+                quality: 100,
+                data: vec![],
+            },
+            Response::CantFit {
+                id: 23,
+                smallest: 2_500_000,
+            },
+        ] {
+            assert_eq!(rt_resp(&r), r);
+        }
     }
 
     #[test]
-    fn encode_webp_size_mismatch_is_refused_both_ways() {
-        // Writer: wrong pixel count, zero sides, quality over 100. Nothing is written.
-        for r in [
-            webp_request(2, 2, 80, 15),
-            webp_request(2, 2, 80, 17),
-            webp_request(0, 2, 80, 0),
-            webp_request(2, 0, 80, 0),
-            webp_request(2, 2, 101, 16),
-            webp_request(u32::MAX, u32::MAX, 80, 4),
-        ] {
+    fn fit_webp_bad_messages_are_refused_both_ways() {
+        // Writer: wrong pixel count, zero sides, start quality outside 1..=100, bad targets.
+        // Nothing is written.
+        let good = FitTarget::LongEdge(100);
+        let bad_targets = [
+            FitTarget::LongEdge(0),
+            FitTarget::Width(0),
+            FitTarget::Height(0),
+            FitTarget::MaxBytes {
+                bytes: 0,
+                long_edge: None,
+            },
+            FitTarget::MaxBytes {
+                bytes: 10,
+                long_edge: Some(0),
+            },
+            FitTarget::Percent(0),
+            FitTarget::Percent(101),
+        ];
+        let mut requests = vec![
+            fit_request(2, 2, 80, good, 15),
+            fit_request(2, 2, 80, good, 17),
+            fit_request(0, 2, 80, good, 0),
+            fit_request(2, 0, 80, good, 0),
+            fit_request(2, 2, 0, good, 16),
+            fit_request(2, 2, 101, good, 16),
+            fit_request(u32::MAX, u32::MAX, 80, good, 4),
+        ];
+        for target in bad_targets {
+            assert!(!target.is_valid());
+            requests.push(fit_request(2, 2, 80, target, 16));
+        }
+        for r in &requests {
             let mut out = Vec::new();
-            let err = write_request(&mut out, &r).unwrap_err();
+            let err = write_request(&mut out, r).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{r:?}");
             assert!(out.is_empty(), "nothing may be written before the error");
         }
-        // Reader: the same faults in a hand-made frame are Malformed.
-        let payload = |w: u32, h: u32, q: u8, n: usize| {
+        for target in TARGETS {
+            assert!(target.is_valid());
+        }
+        // Reader: the same faults, and targets the writer never produces, in hand-made
+        // frames are Malformed.
+        let payload = |w: u32, h: u32, q: u8, (tag, value, edge): (u8, u64, u32), n: usize| {
             let mut p = 3u64.to_le_bytes().to_vec();
             p.extend_from_slice(&w.to_le_bytes());
             p.extend_from_slice(&h.to_le_bytes());
-            p.push(q);
+            p.extend_from_slice(&[q, tag]);
+            p.extend_from_slice(&value.to_le_bytes());
+            p.extend_from_slice(&edge.to_le_bytes());
             p.extend(std::iter::repeat_n(7u8, n));
             p
         };
+        let ok = (0u8, 100u64, 0u32);
         for p in [
-            payload(2, 2, 80, 15),
-            payload(2, 2, 80, 17),
-            payload(0, 2, 80, 0),
-            payload(2, 0, 80, 0),
-            payload(2, 2, 101, 16),
-            payload(u32::MAX, u32::MAX, 80, 4),
+            payload(2, 2, 80, ok, 15),
+            payload(2, 2, 80, ok, 17),
+            payload(0, 2, 80, ok, 0),
+            payload(2, 0, 80, ok, 0),
+            payload(2, 2, 0, ok, 16),
+            payload(2, 2, 101, ok, 16),
+            payload(u32::MAX, u32::MAX, 80, ok, 4),
+            payload(2, 2, 80, (0, 0, 0), 16),
+            payload(2, 2, 80, (0, 100, 5), 16),
+            payload(2, 2, 80, (1, u64::from(u32::MAX) + 1, 0), 16),
+            payload(2, 2, 80, (3, 0, 0), 16),
+            payload(2, 2, 80, (4, 0, 0), 16),
+            payload(2, 2, 80, (4, 101, 0), 16),
+            payload(2, 2, 80, (4, 50, 1), 16),
+            payload(2, 2, 80, (5, 1, 0), 16),
             // Shorter than the fixed fields.
-            payload(2, 2, 80, 0)[..16].to_vec(),
+            payload(2, 2, 80, ok, 0)[..29].to_vec(),
         ] {
             let bytes = frame(0x04, p.len() as u64, &p);
             assert!(
@@ -906,61 +994,124 @@ mod tests {
                 "{p:?}"
             );
         }
-        // A well-formed one is read.
-        let p = payload(2, 2, 80, 16);
-        let bytes = frame(0x04, p.len() as u64, &p);
-        assert!(matches!(
-            read_request(&mut Cursor::new(bytes)).unwrap(),
-            Request::EncodeWebp {
-                id: 3,
-                width: 2,
-                height: 2,
-                quality: 80,
-                ..
+        // Well-formed ones are read.
+        for (wire, target) in [
+            (ok, FitTarget::LongEdge(100)),
+            (
+                (3, 5000, 0),
+                FitTarget::MaxBytes {
+                    bytes: 5000,
+                    long_edge: None,
+                },
+            ),
+            ((4, 50, 0), FitTarget::Percent(50)),
+        ] {
+            let p = payload(2, 2, 80, wire, 16);
+            let bytes = frame(0x04, p.len() as u64, &p);
+            match read_request(&mut Cursor::new(bytes)).unwrap() {
+                Request::FitWebp {
+                    id: 3,
+                    width: 2,
+                    height: 2,
+                    start_quality: 80,
+                    target: got,
+                    ..
+                } => assert_eq!(got, target),
+                other => panic!("{other:?}"),
             }
-        ));
-        // A request frame read as a response is refused.
-        let bytes = req_bytes(&webp_request(1, 1, 50, 4));
+        }
+        // Responses: the writer refuses, and the reader rejects, a zero size or a quality
+        // outside 1..=100; CantFit is exactly 16 bytes.
+        for (w, h, q) in [(0, 1, 50), (1, 0, 50), (1, 1, 0), (1, 1, 101)] {
+            let r = Response::Fitted {
+                id: 1,
+                width: w,
+                height: h,
+                quality: q,
+                data: vec![1],
+            };
+            let mut out = Vec::new();
+            assert_eq!(
+                write_response(&mut out, &r).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(out.is_empty());
+            let mut p = 1u64.to_le_bytes().to_vec();
+            p.extend_from_slice(&w.to_le_bytes());
+            p.extend_from_slice(&h.to_le_bytes());
+            p.push(q);
+            let bytes = frame(0x84, p.len() as u64, &p);
+            assert!(matches!(
+                read_response(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        for len in [15, 17] {
+            let bytes = frame(0x85, len, &vec![0; len as usize]);
+            assert!(matches!(
+                read_response(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        // Wrong direction.
+        let bytes = req_bytes(&fit_request(1, 1, 50, good, 4));
         assert!(matches!(
             read_response(&mut Cursor::new(bytes)),
+            Err(IpcError::Malformed(_))
+        ));
+        let bytes = resp_bytes(&Response::CantFit { id: 1, smallest: 2 });
+        assert!(matches!(
+            read_request(&mut Cursor::new(bytes)),
             Err(IpcError::Malformed(_))
         ));
     }
 
     #[test]
-    fn webp_encode_budget_fits_the_job() {
-        assert_eq!(webp_encode_memory(0), 32 * MIB);
-        assert_eq!(webp_encode_memory(1_000_000), 44_000_000 + 32 * MIB);
-        assert_eq!(webp_encode_memory(u64::MAX), u64::MAX);
-        // The default limit (2^28 pixels, a 3 GiB Job) takes a 12 MP photo, and about 72 MP.
+    fn webp_fit_budget_fits_the_job() {
+        assert_eq!(webp_fit_memory(0), 32 * MIB);
+        assert_eq!(webp_fit_memory(1_000_000), 48_000_000 + 32 * MIB);
+        assert_eq!(webp_fit_memory(u64::MAX), u64::MAX);
+        let fits = |w: u32, h: u32, max: u64| webp_fit_fits((w, h), (w, h), max);
+        // The default limit (2^28 pixels, a 3 GiB Job) takes a 12 MP photo, and about 66 MP.
         let default = 1u64 << 28;
-        assert!(webp_encode_fits(4000, 3000, default));
-        assert!(webp_encode_fits(12_000, 6000, default));
-        assert!(!webp_encode_fits(12_000, 6200, default));
-        // A worker limited to 12 MP (a 302 MiB Job) takes about 6 MP.
-        assert!(webp_encode_fits(3000, 2000, 12_000_000));
-        assert!(!webp_encode_fits(4000, 3000, 12_000_000));
+        assert!(fits(4000, 3000, default));
+        assert!(fits(11_000, 6000, default));
+        assert!(!fits(11_000, 6100, default));
+        // A worker limited to 12 MP (a 302 MiB Job) takes about 5.9 MP.
+        assert!(fits(2900, 2000, 12_000_000));
+        assert!(!fits(3000, 2000, 12_000_000));
         // Never over the pixel limit, even when memory would allow it.
-        assert!(webp_encode_fits(100, 10, 1000));
-        assert!(!webp_encode_fits(1001, 1, 1000));
-        // Never a side over WebP's limit.
-        assert!(webp_encode_fits(WEBP_MAX_DIMENSION, 1, default));
-        assert!(!webp_encode_fits(WEBP_MAX_DIMENSION + 1, 1, default));
-        assert!(!webp_encode_fits(1, WEBP_MAX_DIMENSION + 1, default));
-        assert!(!webp_encode_fits(u32::MAX, u32::MAX, u64::MAX));
+        assert!(fits(100, 10, 1000));
+        assert!(!fits(1001, 1, 1000));
+        // The side limit applies to the output, not to the source.
+        assert!(webp_fit_fits((20_000, 8), (1920, 1), default));
+        assert!(!webp_fit_fits(
+            (20_000, 8),
+            (WEBP_MAX_DIMENSION + 1, 1),
+            default
+        ));
+        assert!(webp_fit_fits(
+            (WEBP_MAX_DIMENSION, 1),
+            (WEBP_MAX_DIMENSION, 1),
+            default
+        ));
+        assert!(!webp_fit_fits(
+            (1, 20_000),
+            (1, WEBP_MAX_DIMENSION + 1),
+            default
+        ));
+        assert!(!fits(u32::MAX, u32::MAX, u64::MAX));
         for n in [1u64, 1 << 20, 12_000_000, 1 << 28] {
             for side in [1u32, 100, 1000, 3000, 9000, 16383] {
-                if webp_encode_fits(side, side, n) {
+                if fits(side, side, n) {
                     let pixels = u64::from(side) * u64::from(side);
-                    assert!(webp_encode_memory(pixels) <= worker_memory_limit(n));
+                    assert!(webp_fit_memory(pixels) <= worker_memory_limit(n));
                 }
             }
         }
         // A 12 MP RGBA request (48 MB) fits one frame and the worker's request cap at any
         // limit (the file cap is at least 64 MiB).
-        assert!(
-            12_000_000 * 4 + REQUEST_FIXED_LEN <= max_request_data(64 * MIB) + REQUEST_FIXED_LEN
-        );
+        const { assert!(12_000_000 * 4 <= 64 * MIB) }
     }
 
     #[test]
@@ -1033,10 +1184,10 @@ mod tests {
 
     #[test]
     fn max_payload_boundary() {
-        assert!(check_len(MAX_PAYLOAD, MAX_PAYLOAD).is_ok());
-        assert!(check_len(0, MAX_PAYLOAD).is_ok());
+        assert!(frame::check_len(MAX_PAYLOAD, MAX_PAYLOAD).is_ok());
+        assert!(frame::check_len(0, MAX_PAYLOAD).is_ok());
         assert!(matches!(
-            check_len(MAX_PAYLOAD + 1, u64::MAX),
+            frame::check_len(MAX_PAYLOAD + 1, u64::MAX),
             Err(IpcError::TooLong(_))
         ));
         // A frame of exactly the cap passes the header check and only then hits EOF

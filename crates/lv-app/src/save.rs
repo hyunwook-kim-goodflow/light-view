@@ -48,7 +48,7 @@ impl RotateService for WorkerPool {
         match WorkerPool::rotate_jpeg(self, quarters, data)? {
             Reply::Bytes { data } => Ok(data),
             // The pool only lets a `Bytes` answer through for a rotation.
-            Reply::Image { .. } => Err(PoolError::WorkerUnavailable),
+            Reply::Image { .. } | Reply::Fit(_) => Err(PoolError::WorkerUnavailable),
         }
     }
 

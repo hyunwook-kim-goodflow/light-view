@@ -3,9 +3,10 @@
 //! Only lv-worker links this crate: libwebp is C code and runs in the sandboxed worker,
 //! loaded as `libwebp.dll` (which imports `libsharpyuv.dll`) from the worker's own folder.
 //!
-//! The pixels come from the app (decoded, resized and turned into straight RGBA there), never
-//! from a file, and no metadata is written: the app attaches the EXIF block to the result
-//! afterwards (`lv_core::resize::attach_exif`, ruling P1).
+//! The pixels come from the app (decoded and turned into straight RGBA there, resized by
+//! the worker's `lv_core::resize::fit`), never from a file, and no metadata is written: the
+//! app attaches the EXIF block to the result afterwards (`lv_core::resize::attach_exif`,
+//! ruling P1).
 //!
 //! The encoding is libwebp's default lossy configuration (`WEBP_PRESET_DEFAULT`, method 4,
 //! one thread) at the given quality. It is deterministic: the same pixels and quality give
@@ -18,7 +19,7 @@
 //! them), so its memory grows with the output: measured on 12 MP images, about 2 bytes per
 //! pixel for a smooth photo-like image and up to 28 (opaque noise at quality 100) or 33
 //! (noise with alpha) bytes per pixel, the returned `Vec` included. The worker budgets 40
-//! bytes per pixel (`lv_ipc::webp_encode_memory`) and refuses a request beyond its Job.
+//! bytes per pixel for it in `lv_ipc::webp_fit_memory` and refuses a request beyond its Job.
 //! An allocation libwebp cannot make is an error, not an abort.
 
 use std::ffi::{c_float, c_int, c_void};

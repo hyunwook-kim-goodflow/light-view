@@ -6,10 +6,14 @@ use crate::{MAX_PAYLOAD, MAX_REQUEST_DATA, MAX_RESPONSE_PIXELS};
 const MIB: u64 = 1024 * 1024;
 /// Floor of [`decoder_memory`].
 const MIN_DECODER_MEMORY: u64 = 256 * MIB;
-/// libwebp's worst case per pixel for one lossy encode, its output and the returned copy
-/// included (measured 33 bytes for 12 MP of noise with alpha at quality 100; see lv-webp).
-const WEBP_BYTES_PER_PIXEL: u64 = 40;
-/// The worker's own memory beside an encode (code, libheif's and TurboJPEG's tables, pipe
+/// What one `FitWebp` holds per source pixel at its peak: the source RGBA (4 bytes) and,
+/// for the size being tried (never more pixels than the source), its resampled RGBA (4
+/// bytes) and libwebp's worst case (40 bytes: measured 33 for 12 MP of noise with alpha at
+/// quality 100, output and the kept best result included; see lv-webp). Resampling itself
+/// peaks lower: 16-bit premultiplied copy (8), the f32 intermediate (16) and the 16-bit
+/// output (8) of `lv_core::resize::resample`.
+const WEBP_FIT_BYTES_PER_PIXEL: u64 = 4 + 4 + 40;
+/// The worker's own memory beside a fit (code, libheif's and TurboJPEG's tables, pipe
 /// buffers).
 const WEBP_OVERHEAD: u64 = 32 * MIB;
 /// The largest width or height a WebP file can store (libwebp's `WEBP_MAX_DIMENSION`).
@@ -51,24 +55,24 @@ pub fn worker_memory_limit(max_pixels: u64) -> u64 {
     decoder_memory(max_pixels).saturating_add(max_pixels.saturating_mul(4))
 }
 
-/// What one `EncodeWebp` of `pixels` pixels may take in the worker: the request's RGBA
-/// (4 bytes per pixel), libwebp's worst case (40 bytes per pixel) and 32 MiB for the rest
-/// of the worker.
-pub fn webp_encode_memory(pixels: u64) -> u64 {
+/// What one `FitWebp` of a `pixels`-pixel source may take in the worker
+/// (`WEBP_FIT_BYTES_PER_PIXEL` per source pixel plus 32 MiB).
+pub fn webp_fit_memory(pixels: u64) -> u64 {
     pixels
-        .saturating_mul(4 + WEBP_BYTES_PER_PIXEL)
+        .saturating_mul(WEBP_FIT_BYTES_PER_PIXEL)
         .saturating_add(WEBP_OVERHEAD)
 }
 
-/// Whether a worker started with `max_pixels` encodes a `width` x `height` WebP: no side over
-/// WebP's [`WEBP_MAX_DIMENSION`], within the pixel limit and, by [`webp_encode_memory`],
-/// within its Job ([`worker_memory_limit`]). Otherwise the answer is `TooLarge`. With the
-/// default limit (2^28 pixels, a 3 GiB Job) that is about 72 MP; a worker limited to 12 MP
-/// (a 302 MiB Job) takes about 6 MP.
-pub fn webp_encode_fits(width: u32, height: u32, max_pixels: u64) -> bool {
-    let pixels = u64::from(width) * u64::from(height);
-    width <= WEBP_MAX_DIMENSION
-        && height <= WEBP_MAX_DIMENSION
+/// Whether a worker started with `max_pixels` runs a `FitWebp` of a `src` source whose
+/// first output size is `out` (`lv_core::resize::target_size`; later sizes only shrink):
+/// no output side over WebP's [`WEBP_MAX_DIMENSION`], the source within the pixel limit
+/// and, by [`webp_fit_memory`], within its Job ([`worker_memory_limit`]). Otherwise the
+/// answer is `TooLarge`. With the default limit (2^28 pixels, a 3 GiB Job) sources up to
+/// about 66 MP fit; a worker limited to 12 MP (a 302 MiB Job) takes about 5.9 MP.
+pub fn webp_fit_fits(src: (u32, u32), out: (u32, u32), max_pixels: u64) -> bool {
+    let pixels = u64::from(src.0) * u64::from(src.1);
+    out.0 <= WEBP_MAX_DIMENSION
+        && out.1 <= WEBP_MAX_DIMENSION
         && pixels <= max_pixels
-        && webp_encode_memory(pixels) <= worker_memory_limit(max_pixels)
+        && webp_fit_memory(pixels) <= worker_memory_limit(max_pixels)
 }
