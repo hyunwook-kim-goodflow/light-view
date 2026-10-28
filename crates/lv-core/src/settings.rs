@@ -49,6 +49,149 @@ pub struct Settings {
     pub update_check: Option<bool>,
     /// When the last update check started, in seconds since the Unix epoch.
     pub last_update_check: Option<u64>,
+    /// The last resize settings (spec §8); `None` until the resize screen was used.
+    pub resize: Option<ResizeMemory>,
+    /// Which side of the resize screen the sidebar is on.
+    pub sidebar_side: SidebarSide,
+}
+
+/// Where the resize screen's sidebar is (spec §4).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarSide {
+    Left,
+    #[default]
+    Right,
+}
+
+impl<'de> Deserialize<'de> for SidebarSide {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match toml::Value::deserialize(d)? {
+            toml::Value::String(s) if s == "left" => SidebarSide::Left,
+            _ => SidebarSide::Right,
+        })
+    }
+}
+
+/// The resize screen's tabs: what the result must meet.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResizeTab {
+    /// 해상도: a side at most `long_edge` pixels.
+    #[default]
+    Resolution,
+    /// 용량: at most `max_mb_tenths` / 10 MB, the long edge at most `limit_long_edge`.
+    #[serde(rename = "filesize")]
+    FileSize,
+    /// 비율: `percent` of each side.
+    Scale,
+}
+
+/// Which side the 해상도 tab's number limits.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResizeAxis {
+    #[default]
+    #[serde(rename = "longedge")]
+    LongEdge,
+    Width,
+    Height,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResizeFormat {
+    #[default]
+    Jpeg,
+    Png,
+    #[serde(rename = "webp")]
+    WebP,
+}
+
+/// The resize screen's last settings: every tab's number, the format, the quality and
+/// the location choice. How to save (new file or replace) is deliberately not here:
+/// every session starts with "새 파일" (spec §8).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResizeMemory {
+    pub tab: ResizeTab,
+    /// The 해상도 tab's limit in pixels, on `axis`.
+    pub long_edge: u32,
+    pub axis: ResizeAxis,
+    /// The 용량 tab's limit in tenths of a megabyte (1 MB = 1,000,000 bytes).
+    pub max_mb_tenths: u32,
+    /// The 용량 tab's optional long-edge limit.
+    pub limit_long_edge: Option<u32>,
+    /// The 비율 tab's percentage, 1..=100.
+    pub percent: u8,
+    pub format: ResizeFormat,
+    /// `None`: 원본 수준; else a fixed quality, 60..=100.
+    pub quality: Option<u8>,
+    pub strip_gps: bool,
+}
+
+impl Default for ResizeMemory {
+    fn default() -> Self {
+        ResizeMemory {
+            tab: ResizeTab::Resolution,
+            long_edge: 1920,
+            axis: ResizeAxis::LongEdge,
+            max_mb_tenths: 20,
+            limit_long_edge: None,
+            percent: 50,
+            format: ResizeFormat::Jpeg,
+            quality: None,
+            strip_gps: true,
+        }
+    }
+}
+
+/// The lowest fixed quality (spec §10's floor).
+pub const MIN_QUALITY: u8 = 60;
+
+impl<'de> Deserialize<'de> for ResizeMemory {
+    /// Field by field: a missing or wrong value takes its default, so a hand-edited
+    /// section never resets the rest of the file. Unknown keys (an old `replace`) are
+    /// ignored.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = toml::Value::deserialize(d)?;
+        let d = ResizeMemory::default();
+        let Some(t) = value.as_table() else {
+            return Ok(d);
+        };
+        let text = |k: &str| t.get(k).and_then(toml::Value::as_str);
+        let int = |k: &str, lo: i64, hi: i64| {
+            t.get(k)
+                .and_then(toml::Value::as_integer)
+                .filter(|v| (lo..=hi).contains(v))
+        };
+        let px = |k: &str| int(k, 1, 65_535).map(|v| v as u32);
+        Ok(ResizeMemory {
+            tab: match text("tab") {
+                Some("filesize") => ResizeTab::FileSize,
+                Some("scale") => ResizeTab::Scale,
+                _ => d.tab,
+            },
+            long_edge: px("long_edge").unwrap_or(d.long_edge),
+            axis: match text("axis") {
+                Some("width") => ResizeAxis::Width,
+                Some("height") => ResizeAxis::Height,
+                _ => d.axis,
+            },
+            max_mb_tenths: int("max_mb_tenths", 1, 100_000).map_or(d.max_mb_tenths, |v| v as u32),
+            limit_long_edge: px("limit_long_edge"),
+            percent: int("percent", 1, 100).map_or(d.percent, |v| v as u8),
+            format: match text("format") {
+                Some("png") => ResizeFormat::Png,
+                Some("webp") => ResizeFormat::WebP,
+                _ => d.format,
+            },
+            quality: int("quality", i64::from(MIN_QUALITY), 100).map(|v| v as u8),
+            strip_gps: t
+                .get("strip_gps")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(d.strip_gps),
+        })
+    }
 }
 
 /// 설정을 읽는다. 파일이 없으면 기본값, 파싱에 실패하면 원본을 `.bak`으로 옮기고 기본값을 돌려준다.
@@ -260,6 +403,8 @@ mod tests {
             language: LangSetting::En,
             update_check: Some(true),
             last_update_check: Some(1_790_000_000),
+            resize: Some(ResizeMemory::default()),
+            sidebar_side: SidebarSide::Left,
         }
     }
 
@@ -322,6 +467,88 @@ mod tests {
         assert_eq!(a.window, None);
         assert_eq!(a.language, LangSetting::Auto);
         assert!(a.toolbar_pinned);
+    }
+
+    /// The last resize settings come back on the next start; how to save (new file or
+    /// replace) is never kept, so every session starts with "새 파일" (spec §8).
+    #[test]
+    fn settings_resize_memory_round_trips_without_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let memory = ResizeMemory {
+            tab: ResizeTab::FileSize,
+            long_edge: 1280,
+            axis: ResizeAxis::Height,
+            max_mb_tenths: 35,
+            limit_long_edge: Some(2400),
+            percent: 25,
+            format: ResizeFormat::WebP,
+            quality: Some(82),
+            strip_gps: false,
+        };
+        let s = Settings {
+            resize: Some(memory),
+            sidebar_side: SidebarSide::Left,
+            ..Settings::default()
+        };
+        save_settings(&path, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("replace"), "{text}");
+        assert!(text.contains("sidebar_side = \"left\""), "{text}");
+        let back = load_settings(&path);
+        assert_eq!(back.resize, Some(memory));
+        assert_eq!(back.sidebar_side, SidebarSide::Left);
+        // Defaults (spec §8, global constraints): 해상도 tab, long edge 1920, 2 MB,
+        // 50 %, JPEG at the original's quality, location removed; sidebar on the right.
+        let d = ResizeMemory::default();
+        assert_eq!(
+            (
+                d.tab,
+                d.long_edge,
+                d.axis,
+                d.max_mb_tenths,
+                d.limit_long_edge
+            ),
+            (ResizeTab::Resolution, 1920, ResizeAxis::LongEdge, 20, None)
+        );
+        assert_eq!(
+            (d.percent, d.format, d.quality),
+            (50, ResizeFormat::Jpeg, None)
+        );
+        assert!(d.strip_gps);
+        assert_eq!(Settings::default().sidebar_side, SidebarSide::Right);
+        assert_eq!(Settings::default().resize, None);
+    }
+
+    /// A damaged or hand-edited resize section never resets the rest of the file: wrong
+    /// values fall back to their defaults one by one.
+    #[test]
+    fn bad_resize_values_fall_back_without_losing_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "toolbar_pinned = true\nsidebar_side = 3\n[resize]\ntab = \"nope\"\n\
+             long_edge = \"big\"\npercent = 0\nmax_mb_tenths = 0\nformat = \"png\"\n\
+             quality = 300\nreplace = true\n",
+        )
+        .unwrap();
+        let s = load_settings(&path);
+        assert!(s.toolbar_pinned);
+        assert!(path.exists());
+        assert_eq!(s.sidebar_side, SidebarSide::Right);
+        let r = s.resize.expect("the section is kept");
+        assert_eq!(r.tab, ResizeTab::Resolution);
+        assert_eq!(r.long_edge, 1920);
+        assert_eq!(r.percent, 50);
+        assert_eq!(r.max_mb_tenths, 20);
+        assert_eq!(r.format, ResizeFormat::Png);
+        assert_eq!(r.quality, None);
+        // Not a table at all: the defaults.
+        std::fs::write(&path, "toolbar_pinned = true\nresize = 5\n").unwrap();
+        let s = load_settings(&path);
+        assert!(s.toolbar_pinned);
+        assert_eq!(s.resize, Some(ResizeMemory::default()));
     }
 
     #[test]

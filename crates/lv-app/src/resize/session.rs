@@ -1,0 +1,462 @@
+//! The resize session's state (spec §3–§6, rulings R1, R3, R4): the photos, the one
+//! shown, the settings and each photo's estimate. Pure: no Win32, no threads.
+
+use std::path::{Path, PathBuf};
+
+use lv_core::identity::FileIdentity;
+use lv_core::listing::same_path;
+use lv_core::resize::{OutputFormat, Quality, ResizeSpec, Target};
+use lv_core::settings::{ResizeAxis, ResizeFormat, ResizeMemory, ResizeTab, MIN_QUALITY};
+
+use super::save::ItemResult;
+
+/// One megabyte in the 용량 tab: decimal, so a site's "5 MB" is met whichever way it
+/// counts.
+const MB: u64 = 1_000_000;
+
+/// What the result of one photo will be, as far as is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Estimate {
+    /// Not computed yet for the current settings.
+    Pending,
+    /// The result's size and its exact length in bytes (the bytes a save writes, R1).
+    Ready { size: (u32, u32), bytes: u64 },
+    /// No result meets the 용량 limit ("맞추기 불가"); left out of the save.
+    CantFit,
+    /// The photo could not be read or encoded.
+    Failed(String),
+}
+
+/// One photo of the session.
+#[derive(Clone, Debug)]
+pub struct ResizeItem {
+    pub path: PathBuf,
+    /// The file as it was when it joined the session; saves act only on that file.
+    pub id: FileIdentity,
+    /// The size the result is made from (oriented, turned by `quarters`); (0, 0) until
+    /// the photo was first decoded.
+    pub src_size: (u32, u32),
+    pub src_bytes: u64,
+    /// An animation: only its first frame is used ("애니메이션 → 첫 장면").
+    pub animated: bool,
+    /// Opened at reduced size (over the memory limit): that size is the original.
+    pub scaled: bool,
+    pub estimate: Estimate,
+    /// Clockwise quarter turns of an unsaved viewer rotation, applied to the result's
+    /// pixels (spec §10); the original is not touched.
+    pub quarters: u8,
+}
+
+impl ResizeItem {
+    pub fn new(path: PathBuf, id: FileIdentity, quarters: u8) -> ResizeItem {
+        let src_bytes = id.size;
+        ResizeItem {
+            path,
+            id,
+            src_size: (0, 0),
+            src_bytes,
+            animated: false,
+            scaled: false,
+            estimate: Estimate::Pending,
+            quarters: quarters % 4,
+        }
+    }
+}
+
+/// What decoding a photo told about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Source {
+    pub size: (u32, u32),
+    pub bytes: u64,
+    pub animated: bool,
+    pub scaled: bool,
+}
+
+/// The resize screen's state while it is open.
+#[derive(Debug)]
+pub struct ResizeSession {
+    pub items: Vec<ResizeItem>,
+    /// Index into `items` of the photo shown.
+    pub current: usize,
+    /// What `memory` asks for, as the encoder takes it.
+    pub spec: ResizeSpec,
+    /// 원본 대체; always false when a session starts (spec §8).
+    pub replace: bool,
+    /// The photo the viewer showed before the session (none: the empty screen).
+    pub entered_from: Option<PathBuf>,
+    /// The sidebar's values, every tab's; saved to the settings as they change.
+    pub memory: ResizeMemory,
+    /// Bumped whenever `spec` changes: estimates of another generation are stale.
+    pub generation: u64,
+}
+
+impl ResizeSession {
+    pub fn new(entered_from: Option<PathBuf>, memory: ResizeMemory) -> ResizeSession {
+        ResizeSession {
+            items: Vec::new(),
+            current: 0,
+            spec: spec_for(&memory),
+            replace: false,
+            entered_from,
+            memory,
+            generation: 1,
+        }
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        self.items.iter().any(|i| same_path(&i.path, path))
+    }
+
+    /// Adds the photos not in the session yet, in order; returns the indices added.
+    pub fn add(&mut self, items: Vec<ResizeItem>) -> Vec<usize> {
+        let mut added = Vec::new();
+        for item in items {
+            if !self.contains(&item.path) {
+                added.push(self.items.len());
+                self.items.push(item);
+            }
+        }
+        added
+    }
+
+    /// New sidebar values. True when the result changes (the spec did): every estimate is
+    /// pending again under a new generation.
+    pub fn set_memory(&mut self, memory: ResizeMemory) -> bool {
+        self.memory = memory;
+        let spec = spec_for(&memory);
+        if spec == self.spec {
+            return false;
+        }
+        self.spec = spec;
+        self.generation += 1;
+        for item in &mut self.items {
+            item.estimate = Estimate::Pending;
+        }
+        true
+    }
+
+    /// An estimate for `index` made under `generation`: taken unless it is stale (another
+    /// generation, or not that photo). True if taken.
+    pub fn apply_estimate(
+        &mut self,
+        generation: u64,
+        index: usize,
+        path: &Path,
+        source: Option<Source>,
+        estimate: Estimate,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(item) = self.items.get_mut(index).filter(|i| i.path == path) else {
+            return false;
+        };
+        if let Some(s) = source {
+            item.src_size = s.size;
+            item.src_bytes = s.bytes;
+            item.animated = s.animated;
+            item.scaled = s.scaled;
+        }
+        item.estimate = estimate;
+        true
+    }
+
+    /// Why 원본 대체 is not offered (R3), or `None` when it is. `has_bin` answers for a
+    /// photo's path whether its Recycle Bin can take the files a replace makes.
+    pub fn replace_block(&self, has_bin: &dyn Fn(&Path) -> bool) -> Option<ReplaceBlock> {
+        if self.items.iter().any(|i| i.animated) {
+            return Some(ReplaceBlock::Animated);
+        }
+        if self.items.iter().any(|i| i.scaled) {
+            return Some(ReplaceBlock::Scaled);
+        }
+        if self.items.iter().any(|i| !has_bin(&i.path)) {
+            return Some(ReplaceBlock::NoRecycleBin);
+        }
+        None
+    }
+}
+
+/// Why 원본 대체 is not offered (ruling R3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaceBlock {
+    /// A photo is where no Recycle Bin can hold its original (a NAS, say).
+    NoRecycleBin,
+    /// A photo is an animation (only its first frame is kept).
+    Animated,
+    /// A photo was opened at reduced size.
+    Scaled,
+}
+
+/// The encoder's settings for the sidebar's values.
+pub fn spec_for(memory: &ResizeMemory) -> ResizeSpec {
+    let px = memory.long_edge.max(1);
+    let target = match memory.tab {
+        ResizeTab::Resolution => match memory.axis {
+            ResizeAxis::LongEdge => Target::LongEdge(px),
+            ResizeAxis::Width => Target::Width(px),
+            ResizeAxis::Height => Target::Height(px),
+        },
+        ResizeTab::FileSize => Target::MaxBytes {
+            bytes: u64::from(memory.max_mb_tenths.max(1)) * (MB / 10),
+            long_edge: memory.limit_long_edge.map(|e| e.max(1)),
+        },
+        ResizeTab::Scale => Target::Percent(memory.percent.clamp(1, 100)),
+    };
+    ResizeSpec {
+        target,
+        format: match memory.format {
+            ResizeFormat::Jpeg => OutputFormat::Jpeg,
+            ResizeFormat::Png => OutputFormat::Png,
+            ResizeFormat::WebP => OutputFormat::WebP,
+        },
+        quality: memory.quality.map_or(Quality::MatchOriginal, |q| {
+            Quality::Fixed(q.clamp(MIN_QUALITY, 100))
+        }),
+        strip_gps: memory.strip_gps,
+    }
+}
+
+/// The order estimates are made in: the shown photo first, then the ones after it, then
+/// the ones before (spec §5).
+pub fn estimate_order(current: usize, count: usize) -> Vec<usize> {
+    let start = if current < count { current } else { 0 };
+    (start..count).chain(0..start).collect()
+}
+
+/// What a drop of photos does (spec §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropAction {
+    /// One photo (or a folder) in the viewer: opened as before.
+    Open,
+    /// Several photos in the viewer: "보기 / 크기 조정".
+    Ask,
+    /// The resize screen is open: added to it.
+    Add,
+}
+
+/// `count` photo files dropped, while the resize screen is open (`in_resize`) or not.
+pub fn drop_action(count: usize, in_resize: bool) -> DropAction {
+    match (in_resize, count) {
+        (true, _) => DropAction::Add,
+        (false, 0 | 1) => DropAction::Open,
+        (false, _) => DropAction::Ask,
+    }
+}
+
+/// Where the viewer goes once a save ends (spec §6): the photo it showed before, or the
+/// result that replaced it under a new name; `None` (the empty screen) if it showed
+/// none. `results` pairs each saved photo's path with how it ended.
+pub fn return_target(
+    entered_from: Option<&Path>,
+    results: &[(PathBuf, ItemResult)],
+) -> Option<PathBuf> {
+    let from = entered_from?;
+    let replaced = results.iter().find_map(|(original, result)| match result {
+        ItemResult::Replaced { result, .. } if same_path(original, from) => Some(result.clone()),
+        _ => None,
+    });
+    Some(replaced.unwrap_or_else(|| from.to_path_buf()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u64) -> FileIdentity {
+        FileIdentity {
+            volume_serial: 1,
+            file_index: n,
+            size: 1000 + n,
+            modified: 7,
+        }
+    }
+
+    fn item(name: &str) -> ResizeItem {
+        ResizeItem::new(PathBuf::from(name), id(name.len() as u64), 0)
+    }
+
+    fn session(names: &[&str]) -> ResizeSession {
+        let mut s = ResizeSession::new(None, ResizeMemory::default());
+        s.add(names.iter().map(|n| item(n)).collect());
+        s
+    }
+
+    fn ready() -> Estimate {
+        Estimate::Ready {
+            size: (10, 10),
+            bytes: 100,
+        }
+    }
+
+    #[test]
+    fn drop_of_two_asks_view_or_resize() {
+        assert_eq!(drop_action(1, false), DropAction::Open);
+        assert_eq!(drop_action(0, false), DropAction::Open);
+        assert_eq!(drop_action(2, false), DropAction::Ask);
+        assert_eq!(drop_action(17, false), DropAction::Ask);
+        for n in [0, 1, 2, 30] {
+            assert_eq!(drop_action(n, true), DropAction::Add, "{n}");
+        }
+    }
+
+    #[test]
+    fn estimates_current_first() {
+        assert_eq!(estimate_order(2, 5), vec![2, 3, 4, 0, 1]);
+        assert_eq!(estimate_order(0, 3), vec![0, 1, 2]);
+        assert_eq!(estimate_order(4, 5), vec![4, 0, 1, 2, 3]);
+        assert_eq!(estimate_order(0, 0), Vec::<usize>::new());
+        // A stale index (past the end) starts at the beginning.
+        assert_eq!(estimate_order(9, 2), vec![0, 1]);
+    }
+
+    #[test]
+    fn spec_change_cancels_stale_estimates() {
+        let mut s = session(&["a.jpg", "bb.jpg"]);
+        let old = s.generation;
+        let p = PathBuf::from("a.jpg");
+        assert!(s.apply_estimate(old, 0, &p, None, ready()));
+        assert_eq!(s.items[0].estimate, ready());
+        // The same values again: nothing changes, the estimate stays.
+        assert!(!s.set_memory(s.memory));
+        assert_eq!(s.generation, old);
+        // Another long edge: a new generation, every estimate pending again.
+        let memory = ResizeMemory {
+            long_edge: 800,
+            ..s.memory
+        };
+        assert!(s.set_memory(memory));
+        assert_ne!(s.generation, old);
+        assert!(s.items.iter().all(|i| i.estimate == Estimate::Pending));
+        // A result computed for the old settings is dropped.
+        assert!(!s.apply_estimate(old, 0, &p, None, ready()));
+        assert_eq!(s.items[0].estimate, Estimate::Pending);
+        // So is one for another photo at that index, or past the end.
+        let gen = s.generation;
+        assert!(!s.apply_estimate(gen, 0, Path::new("bb.jpg"), None, ready()));
+        assert!(!s.apply_estimate(gen, 5, &p, None, ready()));
+        // The current one is taken, with what decoding told about the photo.
+        let source = Source {
+            size: (4032, 3024),
+            bytes: 5_000_000,
+            animated: true,
+            scaled: false,
+        };
+        assert!(s.apply_estimate(gen, 0, &p, Some(source), Estimate::CantFit));
+        assert_eq!(s.items[0].estimate, Estimate::CantFit);
+        assert_eq!(s.items[0].src_size, (4032, 3024));
+        assert!(s.items[0].animated);
+        // Only the strip-GPS choice changed: the bytes differ, so it is a new spec too.
+        let memory = ResizeMemory {
+            strip_gps: false,
+            ..s.memory
+        };
+        assert!(s.set_memory(memory));
+        // Another tab's number does not change the result.
+        let memory = ResizeMemory {
+            percent: 10,
+            ..s.memory
+        };
+        let gen = s.generation;
+        assert!(!s.set_memory(memory));
+        assert_eq!(s.generation, gen);
+        assert_eq!(s.memory.percent, 10);
+    }
+
+    #[test]
+    fn add_skips_photos_already_there() {
+        let mut s = session(&["a.jpg"]);
+        let added = s.add(vec![item("A.JPG"), item("b.jpg"), item("b.jpg")]);
+        assert_eq!(added, vec![1]);
+        assert_eq!(s.items.len(), 2);
+        assert!(s.contains(Path::new("B.jpg")));
+        assert!(!s.replace, "a session starts with 새 파일");
+    }
+
+    #[test]
+    fn save_done_returns_to_entry() {
+        let a = PathBuf::from(r"C:\p\a.heic");
+        let b = PathBuf::from(r"C:\p\b.jpg");
+        let saved = vec![
+            (
+                b.clone(),
+                ItemResult::Saved(PathBuf::from(r"C:\p\b_small.jpg")),
+            ),
+            (a.clone(), ItemResult::CantFit),
+        ];
+        // Back to the photo shown before, or the empty screen.
+        assert_eq!(return_target(Some(&b), &saved), Some(b.clone()));
+        assert_eq!(return_target(None, &saved), None);
+        // Replaced under a new name (IMG.HEIC → IMG.jpg): the result is shown.
+        let replaced = vec![(
+            a.clone(),
+            ItemResult::Replaced {
+                result: PathBuf::from(r"C:\p\a.jpg"),
+                backup: PathBuf::from(r"C:\p\.a.heic.lvbak-1-0"),
+            },
+        )];
+        assert_eq!(
+            return_target(Some(Path::new(r"c:\P\A.HEIC")), &replaced),
+            Some(PathBuf::from(r"C:\p\a.jpg"))
+        );
+        assert_eq!(return_target(Some(&b), &replaced), Some(b));
+    }
+
+    #[test]
+    fn spec_follows_the_tab() {
+        let m = ResizeMemory::default();
+        let spec = spec_for(&m);
+        assert_eq!(spec.target, Target::LongEdge(1920));
+        assert_eq!(spec.format, OutputFormat::Jpeg);
+        assert_eq!(spec.quality, Quality::MatchOriginal);
+        assert!(spec.strip_gps);
+        let m = ResizeMemory {
+            axis: ResizeAxis::Height,
+            long_edge: 1000,
+            format: ResizeFormat::WebP,
+            quality: Some(30),
+            strip_gps: false,
+            ..m
+        };
+        let spec = spec_for(&m);
+        assert_eq!(spec.target, Target::Height(1000));
+        assert_eq!(spec.format, OutputFormat::WebP);
+        // Never under the quality floor (§10).
+        assert_eq!(spec.quality, Quality::Fixed(MIN_QUALITY));
+        assert!(!spec.strip_gps);
+        let file = ResizeMemory {
+            tab: ResizeTab::FileSize,
+            max_mb_tenths: 25,
+            limit_long_edge: Some(3000),
+            ..m
+        };
+        assert_eq!(
+            spec_for(&file).target,
+            Target::MaxBytes {
+                bytes: 2_500_000,
+                long_edge: Some(3000)
+            }
+        );
+        let scale = ResizeMemory {
+            tab: ResizeTab::Scale,
+            percent: 25,
+            ..m
+        };
+        assert_eq!(spec_for(&scale).target, Target::Percent(25));
+    }
+
+    #[test]
+    fn replace_is_blocked_for_r3_cases() {
+        let mut s = session(&["a.jpg", "bb.jpg"]);
+        let bin = |_: &Path| true;
+        assert_eq!(s.replace_block(&bin), None);
+        assert_eq!(
+            s.replace_block(&|p: &Path| p != Path::new("bb.jpg")),
+            Some(ReplaceBlock::NoRecycleBin)
+        );
+        s.items[1].scaled = true;
+        assert_eq!(s.replace_block(&bin), Some(ReplaceBlock::Scaled));
+        s.items[0].animated = true;
+        assert_eq!(s.replace_block(&bin), Some(ReplaceBlock::Animated));
+    }
+}

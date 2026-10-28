@@ -58,6 +58,20 @@ const MAX_VALUE_CHARS: usize = 512;
 
 /// The EXIF summary and tag list of an image file, or `None` without readable EXIF.
 pub fn read_exif(bytes: &[u8]) -> Option<(ExifSummary, Vec<ExifEntry>)> {
+    let tiff = raw_exif_block(bytes)?;
+    let tiff = &tiff[..tiff.len().min(MAX_TIFF)];
+    let exif = parse(tiff)?;
+    if exif.fields().len() == 0 {
+        return None;
+    }
+    Some((summarize(&exif), entries(&exif)))
+}
+
+/// The raw EXIF block of an image file: the TIFF bytes, without an `Exif\0\0` header,
+/// from a JPEG APP1, a PNG `eXIf` chunk, a WebP `EXIF` chunk or a HEIF `Exif` item.
+/// `None` for GIF and BMP and for files without one. Not parsed or bounded here: feed
+/// it to `resize::whitelist_exif`, which is.
+pub fn raw_exif_block(bytes: &[u8]) -> Option<&[u8]> {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let tiff = match sniff_format(head)? {
         ImageFormat::Jpeg => jpeg_tiff(bytes),
@@ -66,12 +80,7 @@ pub fn read_exif(bytes: &[u8]) -> Option<(ExifSummary, Vec<ExifEntry>)> {
         ImageFormat::Heif => heif_edit::exif_item_tiff(bytes),
         ImageFormat::Gif | ImageFormat::Bmp => None,
     }?;
-    let tiff = &tiff[..tiff.len().min(MAX_TIFF)];
-    let exif = parse(tiff)?;
-    if exif.fields().len() == 0 {
-        return None;
-    }
-    Some((summarize(&exif), entries(&exif)))
+    Some(strip_prefix(tiff))
 }
 
 /// Parses a raw EXIF block (the `Exif\0\0` header is optional), capped like a file's.
@@ -593,6 +602,26 @@ mod tests {
             camera(heif_with(&prefixed, &[])).as_deref(),
             Some("Canon EOS R5")
         );
+    }
+
+    #[test]
+    fn raw_exif_block_per_format() {
+        let t = tiff(&rich_fields());
+        let mut prefixed = b"Exif\0\0".to_vec();
+        prefixed.extend_from_slice(&t);
+        for (name, file) in [
+            ("jpeg", app1_jpeg(&t)),
+            ("png", png_with(&t)),
+            ("webp", webp_with(&t)),
+            ("webp prefixed", webp_with(&prefixed)),
+            ("heif", heif_with(&t, &[])),
+            ("heif prefixed", heif_with(&prefixed, b"xy")),
+        ] {
+            assert_eq!(raw_exif_block(&file), Some(&t[..]), "{name}");
+        }
+        assert_eq!(raw_exif_block(&test_fixtures::png_2x1()), None);
+        assert_eq!(raw_exif_block(b"GIF89a"), None);
+        assert_eq!(raw_exif_block(&[]), None);
     }
 
     #[test]

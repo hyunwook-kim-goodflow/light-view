@@ -732,8 +732,8 @@ mod tests {
         i.toolbar = Some((toolbar_input(false), true));
         i.menu = Some(MenuInput {
             layout: menu_layout((100.0, 100.0), CLIENT),
-            selected: Some(3),
-            enabled: [true, false, false, true, true, true],
+            selected: Some(4),
+            enabled: [true, false, false, false, true, true, true],
         });
         let tree = main_tree(&i);
         // The menu is modal: the toolbar is not exposed while it is open.
@@ -744,9 +744,10 @@ mod tests {
         assert_eq!(names, want);
         assert!(!named(&tree, MenuItem::ShowInFolder.label()).enabled);
         assert!(!named(&tree, MenuItem::CopyPath.label()).enabled);
+        assert!(!named(&tree, MenuItem::Resize.label()).enabled);
         let focused = &tree.nodes[tree.focused().unwrap()];
         assert_eq!(focused.name, MenuItem::DefaultApps.label());
-        assert_eq!(focused.act, Some(Act::Menu(3)));
+        assert_eq!(focused.act, Some(Act::Menu(4)));
         assert_eq!(by_role(&tree, Role::Menu)[0].name, t(S::UiaMenu));
     }
 

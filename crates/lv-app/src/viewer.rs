@@ -702,6 +702,20 @@ mod tests {
     }
 
     #[test]
+    fn close_shows_the_empty_screen() {
+        // The resize screen closing back to an empty start (M6).
+        let (mut v, rx) = viewer_at("c.jpg");
+        wait_shown(&mut v, &rx);
+        v.apply(Command::RotateRight);
+        let generation = v.generation();
+        assert_eq!(v.close(), Redraw::Full);
+        assert!(!v.has_file() && !v.unsaved_rotation());
+        assert_eq!(v.current_path(), None);
+        assert!(matches!(v.scene(), Scene::Empty));
+        assert_ne!(v.generation(), generation);
+    }
+
+    #[test]
     fn prev_requests_prefetch_backwards() {
         let (mut v, _rx) = viewer_at("d.jpg");
         v.apply(Command::Prev);

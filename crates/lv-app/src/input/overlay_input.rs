@@ -271,6 +271,8 @@ pub fn overlay_changed(app: &RefCell<App>, hwnd: HWND, event: Option<OverlayEven
     if let Some(path) = deferred {
         commands::open(app, hwnd, &path);
     }
+    // Photos sent to the resize screen meanwhile.
+    crate::resize::flush_queued(app, hwnd);
     // Then a rescan held back by the dialog (of the newly opened folder, if any; it
     // waits again if the open asks to save first).
     watch::rescan_if_due(app, hwnd);

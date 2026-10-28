@@ -37,6 +37,10 @@ pub struct SaveDone {
 }
 /// WM_CLOSE (no dialog open): closes, after the save prompt or save if needed.
 pub fn request_close(app: &RefCell<App>, hwnd: HWND) {
+    // A resize save closes the window once it ends.
+    if crate::resize::defer_close(app) {
+        return;
+    }
     leave(app, hwnd, LeaveReason::Close);
 }
 
@@ -278,7 +282,9 @@ pub(super) fn on_save_prompt(
         | PromptResult::Notices
         | PromptResult::Close
         | PromptResult::NotifyMe
-        | PromptResult::NoThanks => {
+        | PromptResult::NoThanks
+        | PromptResult::View
+        | PromptResult::Resize => {
             a.viewer.cancel_leave();
             true
         }

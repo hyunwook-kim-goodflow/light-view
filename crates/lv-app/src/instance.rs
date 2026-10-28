@@ -29,10 +29,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::commands;
+use crate::resize;
 use crate::window::{App, CLASS_NAME};
 
 /// `dwData` of the WM_COPYDATA message that carries a path ("LV" + version 1).
 pub const COPYDATA_OPEN: usize = 0x4C56_0001;
+/// `dwData` of the WM_COPYDATA message that adds a path to the resize screen (M6, R4).
+pub const COPYDATA_RESIZE: usize = 0x4C56_1001;
 /// The longest path accepted, in UTF-16 units, without the terminating NUL.
 const MAX_PATH_UNITS: usize = 32767;
 /// The installed copy's mutex; a portable copy appends `.<key>` (see `instance_key`).
@@ -94,10 +97,10 @@ fn mutex_name(key: Option<&str>) -> String {
     }
 }
 
-/// Becomes the primary instance, or hands `path` to the running one of the same copy
-/// (`key`, from `instance_key`). Falls back to `Primary` when the running window cannot
-/// be reached, so a launch is never lost.
-pub fn acquire_or_forward(path: Option<&Path>, key: Option<&str>) -> Launch {
+/// Becomes the primary instance, or hands `items` (none: just bring it forward) to the
+/// running one of the same copy (`key`, from `instance_key`). Falls back to `Primary`
+/// when the running window cannot be reached, so a launch is never lost.
+pub fn acquire_or_forward(items: &[Forwarded], key: Option<&str>) -> Launch {
     let name: Vec<u16> = mutex_name(key)
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -112,16 +115,25 @@ pub fn acquire_or_forward(path: Option<&Path>, key: Option<&str>) -> Launch {
         }
     };
     let guard = InstanceGuard(handle);
-    if existed && forward(path, key) {
+    if existed && forward_all(items, key) {
         Launch::Forwarded
     } else {
         Launch::Primary(guard)
     }
 }
 
-/// Sends `path` to the primary window, or just brings it forward when there is no
-/// path. False when the window was not found in time or did not answer.
-fn forward(path: Option<&Path>, key: Option<&str>) -> bool {
+/// Sends each item to the primary window, or just brings it forward when there is
+/// none. False when one was not taken.
+fn forward_all(items: &[Forwarded], key: Option<&str>) -> bool {
+    if items.is_empty() {
+        return forward(None, key);
+    }
+    items.iter().all(|item| forward(Some(item), key))
+}
+
+/// Sends `item` to the primary window, or just brings it forward when there is no
+/// item. False when the window was not found in time or did not answer.
+fn forward(item: Option<&Forwarded>, key: Option<&str>) -> bool {
     let Some(hwnd) = find_primary_window(key) else {
         return false;
     };
@@ -131,7 +143,7 @@ fn forward(path: Option<&Path>, key: Option<&str>) -> bool {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let _ = AllowSetForegroundWindow(pid);
     }
-    let Some(path) = path else {
+    let Some(item) = item else {
         // SAFETY: plain calls on the primary's window.
         unsafe {
             if IsIconic(hwnd).as_bool() {
@@ -141,10 +153,11 @@ fn forward(path: Option<&Path>, key: Option<&str>) -> bool {
         }
         return true;
     };
+    let (Forwarded::Open(path) | Forwarded::Resize(path)) = item;
     // The primary has another working directory, so a relative path is resolved here.
-    let data = encode_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+    let data = encode_path(&std::path::absolute(path).unwrap_or_else(|_| path.clone()));
     let cds = COPYDATASTRUCT {
-        dwData: COPYDATA_OPEN,
+        dwData: kind_tag(item),
         cbData: (data.len() * 2) as u32,
         lpData: data.as_ptr() as *mut _,
     };
@@ -261,8 +274,17 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
         };
         decode_message(cds.dwData, bytes)
     };
-    let Some(path) = path else {
-        return LRESULT(0);
+    let path = match path {
+        Some(Forwarded::Open(path)) => path,
+        Some(Forwarded::Resize(path)) => {
+            // Added to the resize screen (opened if need be), after any dialog (R4).
+            // SAFETY: plain query on our own window handle.
+            let blocked = !unsafe { IsWindowEnabled(hwnd) }.as_bool();
+            resize::forwarded(app, hwnd, path, blocked);
+            bring_forward(hwnd);
+            return LRESULT(1);
+        }
+        None => return LRESULT(0),
     };
     if !(path.is_file() || path.is_dir()) {
         // Taken, with nothing to open: the sender must not open a window for it either.
@@ -281,14 +303,20 @@ pub fn on_copy_data(app: &RefCell<App>, hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if !deferred {
         commands::open(app, hwnd, &path);
     }
-    // SAFETY: plain calls on our window; no App borrow is held (both may re-enter).
+    bring_forward(hwnd);
+    LRESULT(1)
+}
+
+/// Restores and activates our window after a forwarded launch. No App borrow may be
+/// held (both calls may re-enter).
+fn bring_forward(hwnd: HWND) {
+    // SAFETY: plain calls on our window.
     unsafe {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let _ = SetForegroundWindow(hwnd);
     }
-    LRESULT(1)
 }
 
 /// Set once the window starts closing; later WM_COPYDATA messages are refused.
@@ -334,10 +362,33 @@ pub fn decode_path(data: &[u16]) -> Option<PathBuf> {
     (end > 0).then(|| PathBuf::from(std::ffi::OsString::from_wide(&window[..end])))
 }
 
-/// Decodes a WM_COPYDATA payload: `None` unless `dw_data` is `COPYDATA_OPEN` and
-/// `bytes` is a whole number of UTF-16 units that `decode_path` accepts.
-pub fn decode_message(dw_data: usize, bytes: &[u8]) -> Option<PathBuf> {
-    if dw_data != COPYDATA_OPEN || !bytes.len().is_multiple_of(2) {
+/// A path another launch handed over, and what to do with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Forwarded {
+    /// View it (`COPYDATA_OPEN`).
+    Open(PathBuf),
+    /// Add it to the resize screen (`COPYDATA_RESIZE`, ruling R4).
+    Resize(PathBuf),
+}
+
+/// The `dwData` that sends `f`.
+pub fn kind_tag(f: &Forwarded) -> usize {
+    match f {
+        Forwarded::Open(_) => COPYDATA_OPEN,
+        Forwarded::Resize(_) => COPYDATA_RESIZE,
+    }
+}
+
+/// Decodes a WM_COPYDATA payload: `None` unless `dw_data` is `COPYDATA_OPEN` or
+/// `COPYDATA_RESIZE` and `bytes` is a whole number of UTF-16 units that `decode_path`
+/// accepts.
+pub fn decode_message(dw_data: usize, bytes: &[u8]) -> Option<Forwarded> {
+    let kind = match dw_data {
+        COPYDATA_OPEN => Forwarded::Open,
+        COPYDATA_RESIZE => Forwarded::Resize,
+        _ => return None,
+    };
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let units: Vec<u16> = bytes
@@ -345,7 +396,7 @@ pub fn decode_message(dw_data: usize, bytes: &[u8]) -> Option<PathBuf> {
         .take(MAX_PATH_UNITS + 1)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
-    decode_path(&units)
+    decode_path(&units).map(kind)
 }
 
 #[cfg(test)]
@@ -422,7 +473,10 @@ mod tests {
         let enc = encode_path(&p);
         assert_eq!(enc.last(), Some(&0));
         assert_eq!(decode_path(&enc), Some(p.clone()));
-        assert_eq!(decode_message(COPYDATA_OPEN, &bytes(&enc)), Some(p));
+        assert_eq!(
+            decode_message(COPYDATA_OPEN, &bytes(&enc)),
+            Some(Forwarded::Open(p))
+        );
     }
 
     #[test]
@@ -451,6 +505,29 @@ mod tests {
         // Trailing data without a second NUL is still ignored.
         data.extend(std::iter::repeat_n(u16::from(b'x'), MAX_PATH_UNITS * 2));
         assert_eq!(decode_path(&data), Some(PathBuf::from("C:\\a.jpg")));
+    }
+
+    #[test]
+    fn copydata_resize_round_trips() {
+        let p = PathBuf::from(format!(r"C:\사진\{}\a b.jpg", "가".repeat(280)));
+        let b = bytes(&encode_path(&p));
+        // The same payload; only `dwData` tells a resize from an open.
+        assert_eq!(
+            decode_message(COPYDATA_RESIZE, &b),
+            Some(Forwarded::Resize(p.clone()))
+        );
+        assert_eq!(
+            decode_message(COPYDATA_OPEN, &b),
+            Some(Forwarded::Open(p.clone()))
+        );
+        assert_ne!(COPYDATA_RESIZE, COPYDATA_OPEN);
+        assert_eq!(kind_tag(&Forwarded::Resize(p.clone())), COPYDATA_RESIZE);
+        assert_eq!(kind_tag(&Forwarded::Open(p)), COPYDATA_OPEN);
+        // The same checks as an open's.
+        let mut odd = b.clone();
+        odd.push(0);
+        assert_eq!(decode_message(COPYDATA_RESIZE, &odd), None);
+        assert_eq!(decode_message(COPYDATA_RESIZE, &[]), None);
     }
 
     #[test]

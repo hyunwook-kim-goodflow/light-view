@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use lv_core::command::{command_for_key, Command, Mods};
 use lv_core::decode::DecodeLimits;
+use lv_core::format::is_supported_extension;
 use lv_core::listing::first_supported_in;
 use lv_core::prefetch::Prefetcher;
 use lv_core::settings::Settings;
@@ -34,6 +35,7 @@ use crate::delete;
 use crate::fullscreen;
 use crate::input;
 use crate::overlay::{OverlayEvent, Prompt, PromptResult, Toast, ToastAction};
+use crate::resize::{self, DropAction};
 use crate::routing::RoutingDecoder;
 use crate::start;
 use crate::strings::S;
@@ -120,7 +122,7 @@ fn max_pixels_for_budget(budget: u64) -> u64 {
 }
 
 /// `memory_budget_mb` if set and not 0, else a quarter of physical memory, at most 2 GiB.
-fn memory_budget(settings: &Settings) -> u64 {
+pub(crate) fn memory_budget(settings: &Settings) -> u64 {
     if let Some(mb) = settings.memory_budget_mb.filter(|&mb| mb > 0) {
         return u64::from(mb) << 20;
     }
@@ -136,9 +138,15 @@ fn memory_budget(settings: &Settings) -> u64 {
 }
 
 /// Opens a file, or the first supported file of a folder. Nothing is moved or deleted.
-/// Every open (start-up, drops, forwarded launches) goes through the save prompt.
+/// Every open (start-up, drops, forwarded launches) goes through the save prompt. While
+/// the resize screen is open the photo joins it instead (spec §10).
 pub fn open(app: &RefCell<App>, hwnd: HWND, path: &Path) {
-    if let Some(file) = file_to_open(path) {
+    let Some(file) = file_to_open(path) else {
+        return;
+    };
+    if resize::is_open(app) {
+        resize::add(app, hwnd, vec![file]);
+    } else {
         leave(app, hwnd, LeaveReason::Open(file));
     }
 }
@@ -154,7 +162,11 @@ pub fn file_to_open(path: &Path) -> Option<PathBuf> {
 
 /// Runs a command. `anchor` (view DIPs) is the zoom centre for pointer-driven zooms.
 pub fn run(app: &RefCell<App>, hwnd: HWND, cmd: Command, anchor: Option<(f32, f32)>) {
+    if resize::command(app, hwnd, cmd) {
+        return;
+    }
     match cmd {
+        Command::Resize => resize::enter_current(app, hwnd),
         Command::Next | Command::Prev => leave(app, hwnd, LeaveReason::Move(cmd)),
         // Ctrl+S and the Save button save without asking.
         Command::Save => start_save(app, hwnd),
@@ -276,6 +288,22 @@ pub fn on_overlay_event(app: &RefCell<App>, hwnd: HWND, event: OverlayEvent) -> 
             update::on_answer(app, hwnd, result);
             true
         }
+        OverlayEvent::Dialog {
+            prompt: Prompt::DropMany { paths },
+            result,
+            ..
+        } => {
+            match result {
+                PromptResult::View => {
+                    if let Some(path) = start::pick_drop(&paths) {
+                        open(app, hwnd, &path);
+                    }
+                }
+                PromptResult::Resize => resize::enter(app, hwnd, paths),
+                _ => {}
+            }
+            true
+        }
         OverlayEvent::Toast(ToastAction::Undo) => {
             delete::request_undo(app, hwnd);
             true
@@ -371,11 +399,15 @@ pub fn handle(
         // the shutdown with WM_QUERYENDSESSION would be worse), and so does sending the
         // pending delete to the Recycle Bin.
         WM_ENDSESSION if wparam.0 != 0 => {
-            let mut a = app.try_borrow_mut().ok()?;
-            if a.saving.is_some() {
-                let _ = a.save_rx.recv_timeout(END_SESSION_WAIT);
+            {
+                let mut a = app.try_borrow_mut().ok()?;
+                if a.saving.is_some() {
+                    let _ = a.save_rx.recv_timeout(END_SESSION_WAIT);
+                }
+                a.deleter.commit_all(END_SESSION_WAIT);
             }
-            a.deleter.commit_all(END_SESSION_WAIT);
+            // A replaced batch waiting for its toast is final now.
+            resize::flush_at_exit(app);
             Some(LRESULT(0))
         }
         WM_TIMER if wparam.0 == SAVING_TIMER => {
@@ -399,13 +431,45 @@ pub fn handle(
         }
         WM_DROPFILES => {
             let dropped = dropped_paths(HDROP(wparam.0 as *mut _));
-            match start::pick_drop(&dropped) {
-                Some(path) => open(app, hwnd, &path),
-                None => input::show_toast(app, hwnd, |now| Toast::new(S::ToastNoPhotos, now)),
-            }
+            on_drop(app, hwnd, dropped);
+            Some(LRESULT(0))
+        }
+        resize::WM_APP_RESIZE_ESTIMATE => {
+            resize::on_estimate(app, hwnd);
+            Some(LRESULT(0))
+        }
+        resize::WM_APP_RESIZE_SAVED => {
+            resize::on_saved(app, hwnd);
             Some(LRESULT(0))
         }
         _ => None,
+    }
+}
+
+/// Files dropped on the window (spec §3): one photo (or a folder) opens as before;
+/// several ask "보기 / 크기 조정"; the resize screen takes them all.
+fn on_drop(app: &RefCell<App>, hwnd: HWND, dropped: Vec<PathBuf>) {
+    let photos: Vec<PathBuf> = dropped
+        .iter()
+        .filter(|p| p.is_file() && is_supported_extension(p))
+        .cloned()
+        .collect();
+    let in_resize = resize::is_open(app);
+    let action = match resize::drop_action(photos.len(), in_resize) {
+        // The question would replace a dialog that is up: the drop opens, as before.
+        DropAction::Ask if input::dialog_open(app) => DropAction::Open,
+        action => action,
+    };
+    match action {
+        DropAction::Add if !photos.is_empty() => resize::add(app, hwnd, photos),
+        DropAction::Ask => resize::ask_drop(app, hwnd, photos),
+        DropAction::Open if !in_resize => match start::pick_drop(&dropped) {
+            Some(path) => open(app, hwnd, &path),
+            None => input::show_toast(app, hwnd, |now| Toast::new(S::ToastNoPhotos, now)),
+        },
+        DropAction::Add | DropAction::Open => {
+            input::show_toast(app, hwnd, |now| Toast::new(S::ToastNoPhotos, now));
+        }
     }
 }
 

@@ -262,10 +262,6 @@ impl WorkerPool {
     /// over the request cap) is `TooLarge` without being sent; bad arguments (wrong pixel
     /// count, a start quality outside 1 to 100, a zero side or budget in `target`) are
     /// `Corrupt`, also unsent.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the resize session (M6 Task 5) fits WebP")
-    )]
     pub fn fit_webp(
         &self,
         rgba: &[u8],
