@@ -471,6 +471,12 @@ pub fn crash_dir(data: &DataDir) -> Option<PathBuf> {
     data.crash_dir(|| known_folder(&FOLDERID_LocalAppData))
 }
 
+/// The list of folders holding replace backups not yet committed (final-review I2):
+/// `%LOCALAPPDATA%\light-view\live-backups`, or `data\live-backups` when portable.
+pub fn live_backups_dir(data: &DataDir) -> Option<PathBuf> {
+    data.live_backups_dir(|| known_folder(&FOLDERID_LocalAppData))
+}
+
 fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     // SAFETY: on success the returned PWSTR is a NUL-terminated string we own and free
     // with CoTaskMemFree after copying it.

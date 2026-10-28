@@ -5,7 +5,9 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use lv_core::resize::{ResizeSpec, Target};
@@ -47,6 +49,8 @@ pub struct SaveJob {
     pub spec: ResizeSpec,
     pub replace: bool,
     pub maker: Maker,
+    /// Set when Windows ends the session: the save stops before its next photo.
+    pub stop: Arc<AtomicBool>,
 }
 
 /// What the save and batch threads report.
@@ -66,10 +70,14 @@ pub enum Event {
 }
 
 /// Saves every photo of `job` in order, reporting each through `send`, then the batch.
-/// Runs on the save thread.
+/// Once `job.stop` is set no further photo is started (the one in hand finishes, so a
+/// replace is never cut in half). Runs on the save thread.
 pub fn save_all(job: SaveJob, send: &dyn Fn(Event)) {
     let mut batch = ReplaceBatch::new();
     for item in job.items {
+        if job.stop.load(Ordering::Relaxed) {
+            break;
+        }
         let result = save_one(&item, &job.spec, job.replace, &job.maker);
         if let ItemResult::Replaced { result, backup } = &result {
             batch.push(result, backup, &item.path);
@@ -229,14 +237,17 @@ pub fn start_save(app: &RefCell<App>, hwnd: HWND) -> bool {
             },
         })
         .collect();
+    let stop = Arc::new(AtomicBool::new(false));
     let job = SaveJob {
         items,
         spec: s.spec,
         replace: s.replace,
         maker,
+        stop: stop.clone(),
     };
     state.saving = Some(SaveProgress {
         total: job.items.len(),
+        stop,
         ..SaveProgress::default()
     });
     let pending = state.batch.take();
@@ -439,6 +450,43 @@ fn spawn_batch(
     }));
 }
 
+/// Windows is ending the session while a resize save runs: the save stops before its
+/// next photo, and this waits up to `wait` for the photo in hand, so the photos replaced
+/// so far join the batch [`flush_at_exit`] then commits. A save still running when the
+/// wait is over leaves its backups to the next start (their folders are listed,
+/// [`live`](super::save::live)).
+pub fn stop_for_end_session(app: &RefCell<App>, wait: Duration) {
+    let Ok(mut guard) = app.try_borrow_mut() else {
+        return;
+    };
+    let state = &mut guard.resize;
+    let Some(progress) = &state.saving else {
+        return;
+    };
+    progress.stop.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match state.events_rx.recv_timeout(left) {
+            Ok(Event::Finished { batch }) => {
+                state.saving = None;
+                match &mut state.batch {
+                    Some(earlier) => earlier.append(batch),
+                    None if !batch.is_empty() => state.batch = Some(batch),
+                    None => {}
+                }
+                return;
+            }
+            // Photos done, and commits or undos ended: nothing left to show.
+            Ok(_) => {}
+            Err(_) => {
+                eprintln!("light-view: the session ended during a resize save");
+                return;
+            }
+        }
+    }
+}
+
 /// At exit (and when Windows ends the session): waits for running commits and undos,
 /// then commits the batch still waiting for its toast. The window is already gone or
 /// going, so this may block (up to 10 s each, `ReplaceBatch`).
@@ -498,6 +546,7 @@ mod tests {
                 limits: DecodeLimits::default(),
                 pool: None,
             },
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -634,5 +683,48 @@ mod tests {
         assert!(!backup.exists());
         let img = image::open(&a).unwrap();
         assert_eq!((img.width(), img.height()), (40, 20));
+    }
+
+    #[test]
+    fn a_stopped_save_ends_after_the_photo_in_hand() {
+        let dir = tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap();
+        let (a, b, c) = (
+            png(dir.path(), "a.png"),
+            png(dir.path(), "b.png"),
+            png(dir.path(), "c.png"),
+        );
+        let job = job(
+            vec![
+                item(&a, Known::Make),
+                item(&b, Known::Make),
+                item(&c, Known::Make),
+            ],
+            true,
+        );
+        let stop = job.stop.clone();
+        let results = RefCell::new(Vec::new());
+        let batch = RefCell::new(None);
+        save_all(job, &|e| match e {
+            Event::Item { path, result } => {
+                // Windows ends the session while the first photo is saved.
+                stop.store(true, Ordering::Relaxed);
+                results.borrow_mut().push((path, result));
+            }
+            Event::Finished { batch: b } => *batch.borrow_mut() = Some(b),
+            _ => unreachable!(),
+        });
+        let results = results.into_inner();
+        assert_eq!(results.len(), 1, "no photo is started after the stop");
+        assert!(matches!(results[0].1, ItemResult::Replaced { .. }));
+        let batch = batch
+            .into_inner()
+            .expect("the save still reports its batch");
+        assert_eq!(batch.len(), 1, "the photo replaced so far can be committed");
+        // The others are untouched: no backup, no result.
+        let image = |p: &Path| image::open(p).unwrap();
+        assert_eq!(image(&b).width(), 40);
+        assert_eq!(image(&c).width(), 40);
+        let trash = crate::delete::fake::FakeTrash::new(dir.path(), true);
+        assert!(batch.commit(&trash).is_empty());
     }
 }

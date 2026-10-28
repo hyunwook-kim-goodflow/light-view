@@ -6,7 +6,7 @@ use std::time::Duration;
 use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
 use lv_core::listing::same_path;
 
-use super::{is_hidden, keep_visible, move_no_replace, set_hidden, taken, UNDO_WAIT};
+use super::{is_hidden, keep_visible, live, move_no_replace, set_hidden, taken, UNDO_WAIT};
 use crate::delete::{check_file, PendingDelete, Trash};
 
 /// The photos one save replaced. Either committed when its toast goes or the app ends
@@ -110,14 +110,30 @@ impl ReplaceBatch {
             }
         }
         trash.flush(COMMIT_WAIT);
-        self.items
+        let kept = self
+            .items
             .iter()
             .filter(|item| still_there(&item.backup, item.backup_id.as_ref()))
             .map(|item| Unrecycled {
                 original: item.original.clone(),
                 kept_at: keep_visible(&item.backup, &item.original),
             })
-            .collect()
+            .collect();
+        self.release();
+        kept
+    }
+
+    /// Adds the photos of `other`, a later batch.
+    pub fn append(&mut self, mut other: ReplaceBatch) {
+        self.items.append(&mut other.items);
+    }
+
+    /// No backup of this batch is hidden aside any more: their folders leave the
+    /// crash-recovery list ([`live`]).
+    fn release(&self) {
+        for item in &self.items {
+            live::release(live::folder_of(&item.backup));
+        }
     }
 
     /// Undoes the save (spec §10): every result unchanged since the save goes to the
@@ -194,6 +210,7 @@ impl ReplaceBatch {
                 kept_at: Some(keep_visible(&item.backup, &item.original)),
             });
         }
+        self.release();
         failed
     }
 }
