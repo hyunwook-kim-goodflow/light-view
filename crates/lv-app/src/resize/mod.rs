@@ -530,6 +530,14 @@ pub fn on_estimate(app: &RefCell<App>, hwnd: HWND) {
         }
     }
     if changed {
+        if let Some(s) = &state.session {
+            let pending = s
+                .items
+                .iter()
+                .filter(|i| i.estimate == Estimate::Pending)
+                .count();
+            crate::timing::estimate_arrived(s.items.len(), pending);
+        }
         state.refresh_block();
         drop(guard);
         invalidate(hwnd);

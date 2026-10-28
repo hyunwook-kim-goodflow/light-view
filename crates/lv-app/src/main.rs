@@ -101,10 +101,17 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = &settings_path {
         sweep_stale_temps(path, std::time::SystemTime::now());
     }
-    let settings = settings_path
+    let mut settings = settings_path
         .as_deref()
         .map(load_settings)
         .unwrap_or_default();
+    // lv-bench's WebP resize case: the defaults, but WebP (nothing is saved in `--bench`).
+    if args.bench_webp {
+        settings.resize = Some(lv_core::settings::ResizeMemory {
+            format: lv_core::settings::ResizeFormat::WebP,
+            ..Default::default()
+        });
+    }
     strings::set(settings.language);
     // Originals a crashed save left under their backup names come back (ruling R2).
     if !bench {
@@ -157,6 +164,8 @@ struct Args {
     timing: bool,
     /// `--bench` (lv-bench).
     bench: bool,
+    /// `--bench-webp` (lv-bench's WebP resize case): `--bench` with the resize format WebP.
+    bench_webp: bool,
     /// The photo or folder to open.
     initial: Option<PathBuf>,
     /// `--resize <path>…` (Explorer's 크기 조정 verb): the photos for the resize screen.
@@ -172,9 +181,12 @@ impl Args {
 fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Args {
     let mut args = args.peekable();
     let mut parsed = Args::default();
-    while let Some(flag) = args.next_if(|a| a == "--timing" || a == "--bench") {
+    while let Some(flag) =
+        args.next_if(|a| a == "--timing" || a == "--bench" || a == "--bench-webp")
+    {
         parsed.timing = true;
-        parsed.bench |= flag == "--bench";
+        parsed.bench |= flag != "--timing";
+        parsed.bench_webp |= flag == "--bench-webp";
     }
     if args.next_if(|a| a == RESIZE).is_some() {
         parsed.resize = args.map(|a| shell::long_form(Path::new(&a))).collect();
@@ -249,8 +261,12 @@ mod tests {
         assert_eq!(a.resize, vec![PathBuf::from("a.jpg")]);
         // A plain launch is unchanged.
         let a = args(&["--bench", "x.jpg"]);
-        assert!(a.timing && a.bench && !a.is_resize());
+        assert!(a.timing && a.bench && !a.bench_webp && !a.is_resize());
         assert_eq!(a.initial, Some(PathBuf::from("x.jpg")));
+        // lv-bench's WebP resize case.
+        let a = args(&["--bench-webp", "--resize", "a.jpg"]);
+        assert!(a.timing && a.bench && a.bench_webp);
+        assert_eq!(a.resize, vec![PathBuf::from("a.jpg")]);
         assert_eq!(args(&[]).initial, None);
         // The flag with nothing after it opens nothing.
         let a = args(&["--resize"]);

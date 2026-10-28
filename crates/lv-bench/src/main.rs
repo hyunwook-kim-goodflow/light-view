@@ -19,6 +19,17 @@
 //! baseline and the baseline + 50 ms (times) or + 30 MB (memory), or a baseline case
 //! that was asked for has no result (a case that could not run here, like `heic12mp`
 //! without `--heic`, is listed as skipped instead).
+//!
+//! The resize cases open ten copies of a 12 MP JPEG (4032×3024) on the resize screen
+//! (`--resize`) with the default settings — 해상도, 긴 변 1920, JPEG 원본 수준 — and
+//! measure until every photo has its estimate:
+//!
+//! `{"case": "resize10x12mp", "estimates_ms": 2400, "first_estimate_ms": 600, "peak_private_mb": 640}`
+//!
+//! `estimates_ms` is from process start to the last estimate, `first_estimate_ms` to the
+//! first; `peak_private_mb` is the highest private bytes of the app and its workers
+//! together while they were made. `resize10x12mp_webp` does the same with WebP output
+//! (each photo's full pixels go to a WebP worker once; needs `lv-worker.exe`).
 
 mod images;
 mod report;
@@ -30,7 +41,20 @@ use std::process::ExitCode;
 use images::Picture;
 use report::CaseResult;
 
-const CASES: [&str; 4] = ["jpeg12mp", "jpeg24mp", "png_large", "heic12mp"];
+const CASES: [&str; 6] = [
+    "jpeg12mp",
+    "jpeg24mp",
+    "png_large",
+    "heic12mp",
+    "resize10x12mp",
+    "resize10x12mp_webp",
+];
+/// Photos a resize case opens.
+const RESIZE_PHOTOS: usize = 10;
+const RESIZE_PICTURE: Picture = Picture::Jpeg {
+    width: 4032,
+    height: 3024,
+};
 
 struct Args {
     runs: usize,
@@ -95,6 +119,10 @@ fn run_cases(args: &Args, dir: &Path) -> Result<(Vec<CaseResult>, Vec<String>), 
     let mut skipped = Vec::new();
     for case in &args.cases {
         let folder = dir.join(case);
+        if case.starts_with("resize") {
+            results.push(run_resize(case, args, &folder)?);
+            continue;
+        }
         let file = match case_file(case, args, &folder)? {
             Some(file) => file,
             None => {
@@ -127,6 +155,61 @@ fn run_cases(args: &Args, dir: &Path) -> Result<(Vec<CaseResult>, Vec<String>), 
         results.push(summarize(case, &samples)?);
     }
     Ok((results, skipped))
+}
+
+/// A resize case: `RESIZE_PHOTOS` copies of a 12 MP JPEG on the resize screen.
+fn run_resize(case: &str, args: &Args, folder: &Path) -> Result<CaseResult, String> {
+    let webp = case.ends_with("_webp");
+    if webp && !args.app.with_file_name("lv-worker.exe").is_file() {
+        return Err(format!("{case} needs lv-worker.exe next to the app"));
+    }
+    let files = images::prepare_many(folder, RESIZE_PICTURE, RESIZE_PHOTOS)
+        .map_err(|e| format!("writing the {case} pictures: {e}"))?;
+    eprintln!("lv-bench: {case}: {} runs", args.runs);
+    let mut samples = Vec::new();
+    for i in 0..args.runs {
+        let sample = run::measure_resize(&args.app, &files, webp)?;
+        if args.verbose {
+            eprintln!(
+                "  run {}: peak {:.0} MB sampled (workers {:.0} MB), app's own peak {:.0} MB; {}",
+                i + 1,
+                sample.peak_total_mb,
+                sample.workers_peak_mb,
+                sample.app_peak_mb,
+                sample
+                    .steps
+                    .iter()
+                    .map(|(n, v)| format!("{n}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        samples.push(sample);
+    }
+    let step = |name: &str| -> Result<Vec<f64>, String> {
+        samples
+            .iter()
+            .map(|s| {
+                s.step(name)
+                    .ok_or_else(|| format!("{case}: a run's estimates line has no {name}"))
+            })
+            .collect()
+    };
+    let mut peak: Vec<f64> = samples.iter().map(run::ResizeSample::peak_mb).collect();
+    Ok(CaseResult::new(
+        case,
+        &[
+            (
+                "estimates_ms",
+                report::median(&mut step("estimates-done-ms")?),
+            ),
+            (
+                "first_estimate_ms",
+                report::median(&mut step("first-estimate-ms")?),
+            ),
+            ("peak_private_mb", report::median(&mut peak)),
+        ],
+    ))
 }
 
 /// The picture a case opens, written into `folder`; `None` (with a note) for a case
@@ -176,12 +259,17 @@ fn summarize(case: &str, samples: &[run::Sample]) -> Result<CaseResult, String> 
             .collect()
     };
     let mut memory: Vec<f64> = samples.iter().map(|s| s.app_mb + s.workers_mb).collect();
-    Ok(CaseResult {
-        case: case.to_string(),
-        first_pixel_ms: report::median(&mut step("first-present-ms")?),
-        decode_ms: report::median(&mut step("decode-ms")?),
-        private_mb: report::median(&mut memory),
-    })
+    Ok(CaseResult::new(
+        case,
+        &[
+            (
+                "first_pixel_ms",
+                report::median(&mut step("first-present-ms")?),
+            ),
+            ("decode_ms", report::median(&mut step("decode-ms")?)),
+            ("private_mb", report::median(&mut memory)),
+        ],
+    ))
 }
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
