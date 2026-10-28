@@ -1,9 +1,10 @@
-//! Pool of sandboxed `lv-worker.exe` processes that decode HEIF files and rotate JPEGs
-//! losslessly for the viewer.
+//! Pool of sandboxed `lv-worker.exe` processes that decode HEIF files, rotate JPEGs
+//! losslessly and encode lossy WebP files for the viewer.
 //!
-//! Decodes share the pool's long-lived workers. Each JPEG rotation runs in a worker of
-//! its own, started for it and ended after it ([`WorkerPool::single_use`]), so a worker
-//! that a hostile file took over cannot answer a rotation (ruling R21).
+//! Decodes share the pool's long-lived workers. Each JPEG rotation and each WebP encode
+//! runs in a worker of its own, started for it and ended after it
+//! ([`WorkerPool::single_use`]), so a worker that a hostile file took over cannot answer a
+//! request whose output is saved (ruling R21).
 //!
 //! Each slot holds at most one worker (see [`sandbox`]). A call ([`WorkerPool::request`])
 //! takes an idle slot, starts a worker in it if needed, sends one request and waits for the
@@ -35,6 +36,8 @@ mod appcontainer;
 mod process;
 mod protocol;
 mod sandbox;
+#[cfg(test)]
+mod webp_tests;
 
 use std::os::windows::io::OwnedHandle;
 use std::path::PathBuf;
@@ -227,11 +230,15 @@ impl WorkerPool {
             PoolRequest::DecodeHeif { data } | PoolRequest::RotateJpeg { data, .. } => {
                 data.len() as u64
             }
+            PoolRequest::EncodeWebp { rgba, .. } => rgba.len() as u64,
         };
         if bytes > self.data_cap {
             return Err(DecodeError::FileTooLarge { bytes }.into());
         }
-        let single_use = matches!(req, PoolRequest::RotateJpeg { .. });
+        let single_use = matches!(
+            req,
+            PoolRequest::RotateJpeg { .. } | PoolRequest::EncodeWebp { .. }
+        );
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (request, expect) = to_request(req, id, self.max_pixels)?;
         if single_use {
@@ -252,10 +259,11 @@ impl WorkerPool {
 
     /// Runs `request` in a sandboxed worker started for it alone (same sandbox as the
     /// pool's) and ended right after, so it never sees any other file (ruling R21). JPEG
-    /// rotations go here: a pool worker taken over by a hostile HEIF it decoded must not
-    /// be the one that answers a later rotation. The rules of [`exchange`](Self::exchange)
-    /// apply; a worker that was dead before it took its request makes later single-use
-    /// workers start without the best-effort mitigations, as a slot does.
+    /// rotations and WebP encodes go here: a pool worker taken over by a hostile HEIF it
+    /// decoded must not be the one that answers a later request whose output is saved. The
+    /// rules of [`exchange`](Self::exchange) apply; a worker that was dead before it took
+    /// its request makes later single-use workers start without the best-effort
+    /// mitigations, as a slot does.
     fn single_use(
         &self,
         request: Request,
@@ -452,6 +460,7 @@ impl WorkerPool {
             Request::DecodeHeif { data, .. } | Request::RotateJpeg { data, .. } => {
                 data.len() as u64
             }
+            Request::EncodeWebp { rgba, .. } => rgba.len() as u64,
             Request::Shutdown => 0,
         };
         let dead_before_send = worker.sandboxed.has_exited();
@@ -1152,7 +1161,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn assert_pool_not_responding(result: Result<Reply, PoolError>) {
+    pub(super) fn assert_pool_not_responding(result: Result<Reply, PoolError>) {
         match result {
             Err(PoolError::WorkerUnavailable) => {}
             Err(e) => panic!("expected WorkerUnavailable, got {e}"),
@@ -1192,7 +1201,7 @@ pub(crate) mod tests {
     }
 
     /// Whether a process with this pid is still running.
-    fn alive(pid: u32) -> bool {
+    pub(super) fn alive(pid: u32) -> bool {
         // SAFETY: plain call; the handle is owned by `Process` and closed on drop.
         match unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) } {
             Ok(handle) => !Process(handle).wait_for_exit(Duration::ZERO),

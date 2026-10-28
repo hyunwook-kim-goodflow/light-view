@@ -145,7 +145,10 @@ fn seeds_reach_the_parsers() {
             }
             count += 1;
         }
-        assert!(count >= 3, "{name}");
+        assert!(
+            count >= if name == "requests.bin" { 4 } else { 3 },
+            "{name}"
+        );
     }
 }
 
@@ -772,6 +775,13 @@ fn ipc_frame_seeds() -> Seeds {
             quarters: 3,
             max_pixels: 1 << 20,
             data: b"jpeg-bytes".to_vec(),
+        },
+        Request::EncodeWebp {
+            id: 3,
+            width: 2,
+            height: 1,
+            quality: 80,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 128],
         },
         Request::Shutdown,
     ];

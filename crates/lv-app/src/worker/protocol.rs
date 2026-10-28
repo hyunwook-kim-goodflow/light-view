@@ -1,13 +1,16 @@
 //! What the pool asks workers and what it accepts back: the request and answer types,
 //! the check of each answer against its request, the size caps and deadlines, and the
-//! decode and rotation calls built on [`WorkerPool::request`].
+//! decode, rotation and WebP encoding calls built on [`WorkerPool::request`].
 
 use std::time::Duration;
 
 use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
 use lv_core::jpeg_check;
 use lv_core::jpeg_extent::check_single_image;
-use lv_ipc::{max_bytes_response, max_request_data, FailKind, Request, Response, BYTES_FIXED_LEN};
+use lv_ipc::{
+    max_bytes_response, max_request_data, webp_encode_fits, FailKind, Request, Response,
+    BYTES_FIXED_LEN,
+};
 
 use super::{WorkerPool, DEFAULT_TIMEOUT, NOT_RESPONDING};
 
@@ -24,6 +27,14 @@ pub enum PoolRequest {
     /// Rotate a JPEG losslessly by `quarters` (`1..=3`) clockwise quarter turns; answered
     /// by [`Reply::Bytes`].
     RotateJpeg { quarters: u8, data: Vec<u8> },
+    /// Encode straight RGBA8 pixels (`width * height * 4` bytes) as a lossy WebP at
+    /// `quality` (`0..=100`); answered by [`Reply::Bytes`].
+    EncodeWebp {
+        width: u32,
+        height: u32,
+        quality: u8,
+        rgba: Vec<u8>,
+    },
 }
 
 /// A worker's answer, always the kind the request asked for.
@@ -34,8 +45,9 @@ pub enum Reply {
         height: u32,
         bgra: Vec<u8>,
     },
-    /// The rotated JPEG, at most `lv_ipc::max_bytes_response(input)` bytes. Not yet
-    /// checked beyond that: the caller verifies it before using it.
+    /// The rotated JPEG or the WebP file, at most `lv_ipc::max_bytes_response(input)`
+    /// bytes. A rotated JPEG is not checked beyond that: the caller verifies it before using
+    /// it. A WebP file has been checked to be a RIFF/WEBP container of its stated length.
     Bytes { data: Vec<u8> },
 }
 
@@ -81,10 +93,16 @@ pub(super) enum Expect {
     Bytes {
         input_len: u64,
     },
+    /// A WebP file for this many bytes of pixels.
+    Webp {
+        input_len: u64,
+    },
 }
 
 /// The wire request for `req` and the kind of answer it expects. A rotation by other
-/// than 1 to 3 quarter turns is `Corrupt`.
+/// than 1 to 3 quarter turns is `Corrupt`, and so is an encode of an empty image, of pixels
+/// that are not `width * height * 4` bytes or at a quality over 100 (the app's mistakes,
+/// which lv-ipc would refuse to write).
 pub(super) fn to_request(
     req: PoolRequest,
     id: u64,
@@ -113,7 +131,40 @@ pub(super) fn to_request(
             };
             (request, Expect::Bytes { input_len })
         }
+        PoolRequest::EncodeWebp {
+            width,
+            height,
+            quality,
+            rgba,
+        } => {
+            let expected = (u64::from(width) * u64::from(height)).checked_mul(4);
+            if width == 0 || height == 0 || expected != Some(rgba.len() as u64) || quality > 100 {
+                let msg = format!(
+                    "{} bytes of pixels for a {width}x{height} WebP at quality {quality}",
+                    rgba.len()
+                );
+                return Err(DecodeError::Corrupt(msg).into());
+            }
+            let input_len = rgba.len() as u64;
+            let request = Request::EncodeWebp {
+                id,
+                width,
+                height,
+                quality,
+                rgba,
+            };
+            (request, Expect::Webp { input_len })
+        }
     })
+}
+
+/// Whether `data` is a RIFF/WEBP container whose RIFF size matches its length.
+fn is_webp_file(data: &[u8]) -> bool {
+    data.len() >= 12
+        && data.starts_with(b"RIFF")
+        && &data[8..12] == b"WEBP"
+        && u64::from(u32::from_le_bytes([data[4], data[5], data[6], data[7]])) + 8
+            == data.len() as u64
 }
 
 impl WorkerPool {
@@ -172,6 +223,44 @@ impl WorkerPool {
         }
     }
 
+    /// Encodes straight RGBA8 pixels of `size` as a lossy WebP at `quality` (`0..=100`) in a
+    /// sandboxed worker of its own (as a rotation: its output is saved, so a worker that
+    /// decoded a hostile file must not make it, ruling R21), waiting at most `deadline`.
+    /// Wrap it into an [`lv_core::resize::Encoder`] for `fit`.
+    ///
+    /// An image the worker would refuse for its size (a side over 16383, over the pixel
+    /// limit, over its Job by [`webp_encode_fits`], or over the request cap) is `TooLarge`
+    /// without being sent; bad arguments are `Corrupt`, also unsent.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the resize session (M6 Task 5) encodes WebP")
+    )]
+    pub fn encode_webp(
+        &self,
+        rgba: &[u8],
+        size: (u32, u32),
+        quality: u8,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, PoolError> {
+        let (width, height) = size;
+        let fits = webp_encode_fits(width, height, self.max_pixels)
+            && u64::from(width) * u64::from(height) * 4 <= self.data_cap;
+        if !fits {
+            return Err(DecodeError::TooLarge { width, height }.into());
+        }
+        let request = PoolRequest::EncodeWebp {
+            width,
+            height,
+            quality,
+            rgba: rgba.to_vec(),
+        };
+        match self.request(request, deadline)? {
+            Reply::Bytes { data } => Ok(data),
+            // `check` only lets a `Bytes` answer through for an encode.
+            Reply::Image { .. } => Err(PoolError::WorkerUnavailable),
+        }
+    }
+
     /// Maps the answer to request `id`; `Err` means the worker broke the protocol: another
     /// request's id, an answer of the wrong kind, or one over its limits.
     pub(super) fn check(
@@ -216,6 +305,18 @@ impl WorkerPool {
                     Ok(Ok(Reply::Bytes { data }))
                 }
             }
+            (Expect::Webp { input_len }, Response::Bytes { data, .. }) => {
+                if data.len() as u64 > max_bytes_response(input_len) {
+                    Err(format!(
+                        "{} bytes for {input_len} bytes of pixels",
+                        data.len()
+                    ))
+                } else if !is_webp_file(&data) {
+                    Err("an encode answer that is not a WebP file".to_string())
+                } else {
+                    Ok(Ok(Reply::Bytes { data }))
+                }
+            }
             (
                 Expect::Bytes { .. },
                 Response::Failed {
@@ -235,12 +336,15 @@ impl WorkerPool {
                 FailKind::Corrupt(msg) => DecodeError::Corrupt(msg),
                 FailKind::Unsupported => DecodeError::Unsupported,
                 FailKind::NotPerfect | FailKind::HasTrailingData => {
-                    return Err(format!("{kind:?} answer to a decode"))
+                    return Err(format!("{kind:?} answer to a decode or an encode"))
                 }
             }))),
             (Expect::Image, Response::Bytes { .. }) => Err("a JPEG answer to a decode".to_string()),
             (Expect::Bytes { .. }, Response::Image { .. }) => {
                 Err("an image answer to a rotation".to_string())
+            }
+            (Expect::Webp { .. }, Response::Image { .. }) => {
+                Err("an image answer to an encode".to_string())
             }
         }
     }
