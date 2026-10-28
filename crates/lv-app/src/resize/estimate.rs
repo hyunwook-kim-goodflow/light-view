@@ -21,13 +21,24 @@ use super::thumb::{thumbnail, THUMB_EDGE};
 use crate::commands::HwndCell;
 use crate::worker::WorkerPool;
 
-/// How long the worker may take to fit one WebP photo (the worker tests use the same).
-const WEBP_DEADLINE: Duration = Duration::from_secs(60);
+/// How long the worker may take to fit any WebP photo, plus [`WEBP_NANOS_PER_PIXEL`].
+const WEBP_DEADLINE_BASE: Duration = Duration::from_secs(20);
+/// 4 s per megapixel of the source: a 12 MP photo gets about 68 s, a 48 MP one about
+/// 212 s (a size fit runs several libwebp trials at each of several sizes).
+const WEBP_NANOS_PER_PIXEL: u64 = 4_000;
 /// Quality for 원본 수준 when the source is not a JPEG (or its tables say nothing).
 const DEFAULT_QUALITY: u8 = 90;
 /// Photos estimated at once: each holds its decoded pixels while it is made (spec §9's
 /// memory limit).
 pub const ESTIMATE_THREADS: usize = 2;
+
+/// How long the worker may take to fit a WebP of a `size` source: like the rotation
+/// deadline (ruling R4) it grows with the pixel count, so a large photo on a slow PC is
+/// not reported as failed while it is still being fitted.
+pub(crate) fn webp_deadline(size: (u32, u32)) -> Duration {
+    let pixels = u64::from(size.0) * u64::from(size.1);
+    WEBP_DEADLINE_BASE + Duration::from_nanos(pixels.saturating_mul(WEBP_NANOS_PER_PIXEL))
+}
 
 /// A photo's result.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,7 +170,7 @@ fn make(
     let fitted = match spec.format {
         OutputFormat::WebP => match &maker.pool {
             Some(pool) => pool
-                .fit_webp(rgba, size, &target, start, WEBP_DEADLINE)
+                .fit_webp(rgba, size, &target, start, webp_deadline(size))
                 .map_err(|e| e.to_string()),
             None => Err("WebP needs lv-worker.exe".to_owned()),
         },
@@ -420,6 +431,17 @@ fn estimate_thread(shared: &Shared, maker: &Maker, tx: &Sender<Done>, hwnd: &Hwn
 mod tests {
     use super::*;
     use crate::worker::tests::worker_exe;
+
+    #[test]
+    fn webp_deadline_grows_with_the_photo() {
+        // At least the old flat 60 s for a 12 MP photo.
+        assert!(webp_deadline((4032, 3024)) >= Duration::from_secs(60));
+        assert!(webp_deadline((4000, 3000)) >= Duration::from_secs(60));
+        // 48 MP gets about four times the per-pixel part.
+        assert_eq!(webp_deadline((8000, 6000)), Duration::from_secs(212));
+        assert_eq!(webp_deadline((0, 0)), Duration::from_secs(20));
+        assert!(webp_deadline((u32::MAX, u32::MAX)) > Duration::from_secs(3600));
+    }
 
     fn folder() -> tempfile::TempDir {
         tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap()
