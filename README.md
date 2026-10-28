@@ -11,6 +11,7 @@
 [GitHub Releases](https://github.com/hyunwook-kim-goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
 
 - **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록, 작업자의 AppContainer 프로필은 지우고 설정과 크래시 기록(미니덤프 포함)은 남겨요. 필요 없으면 두 폴더를 직접 지워도 돼요.
+- **탐색기 우클릭 "light-view로 크기 조정"(설치판만):** 설치하면 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 파일의 우클릭 메뉴에 "light-view로 크기 조정"(영어 윈도우는 "Resize with light-view")이 생겨요. 윈도우 11은 "더 많은 옵션 표시" 안에 있어요. 여러 장을 고르고 누르면 한 크기 조정 화면에 모여요(파일마다 `light-view.exe --resize "<경로>"`를 실행해 이미 열린 창으로 보내요). 제거하면 이 메뉴도 지워져요. 포터블판은 레지스트리를 건드리지 않아서 메뉴가 없고, 사진을 `light-view.exe`로 끌어 놓거나 앱 안에서 크기 조정을 열어요.
 - **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 `%APPDATA%`는 건드리지 않아요. 레지스트리도 보통은 건드리지 않아요(예외는 아래 AppContainer 프로필). 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 보통 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(압축을 푼 폴더에는 AppContainer가 읽을 권한이 없어요). 다만 폴더에 `ALL APPLICATION PACKAGES` 읽기 권한이 있으면(예: `C:\Program Files` 아래에 풀었거나 아래처럼 `icacls`로 권한을 줬을 때) AppContainer를 쓰고, 그때 윈도우가 AppContainer 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`와 HKCU의 등록)을 만들어요. 포터블판에는 제거 프로그램이 없으니, 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`을 한 번 실행해 그 프로필을 지워 주세요(아무것도 띄우지 않고 끝나요. 설치판도 함께 쓰고 있으면 설치판이 다음에 다시 만들어요). 포터블판은 설치판이나 다른 폴더의 포터블판과 따로 한 창을 써요(한쪽이 열려 있어도 다른 쪽 사진이 그 창으로 넘어가지 않아요).
 
 **SmartScreen 경고:** 코드 서명이 없는 릴리스는 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있어요. 아래처럼 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 누르면 돼요. zip에서 푼 파일에 경고가 뜨면 zip 파일의 속성에서 **차단 해제**를 체크하고 다시 풀어도 돼요.
@@ -248,6 +249,7 @@ M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU
 - (M4) **창 두 개에서 설정:** "새 창"으로 창을 두 개 띄우고 각각 다른 설정(예: 한쪽은 언어, 다른 쪽은 메모리 한도)을 바꾼 뒤 둘 다 닫아도, `settings.toml`에 두 변경이 모두 남아 있나요
 - (M4) 실제 카메라·아이폰·갤럭시 사진(HEIC 포함)에서 EXIF 카드의 날짜, 카메라, 노출, 위치가 맞게 나오나요(HEIC의 EXIF는 EXIF가 든 샘플이 없어 자동 테스트로 확인하지 못했어요)
 - (M4) 다크 모드에서 메뉴, EXIF 카드, 정보 대화상자, 설정 창의 색과 테두리가 자연스럽나요
+- (M6) **탐색기 우클릭 메뉴:** 설치판으로 사진 여러 장을 고르고 우클릭 → (윈도우 11은 "더 많은 옵션 표시" →) "light-view로 크기 조정"을 누르면 장수만큼 창이 뜨지 않고 한 크기 조정 화면에 모이나요. 한 장만 골라도 되고, 메뉴에 light-view 아이콘이 나오나요. 제거하면 메뉴가 사라지나요(`.iss`는 로컬에서 컴파일·실행하지 않았어요)
 - (M5) **설치 파일 실제 설치·제거:** CI가 만든 `light-view-x.y.z-setup.exe`로 관리자 권한 없이 `%LOCALAPPDATA%\Programs\light-view`에 설치되고, 시작 메뉴 바로가기가 생기고, 제거하면 프로그램 파일과 등록이 지워지고 `%APPDATA%\light-view\settings.toml`은 남나요(`.iss`는 로컬에서 컴파일·실행하지 않았어요)
 - (M5) **연결 프로그램 등록:** 설치 뒤 탐색기의 "연결 프로그램"에 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 모두 light-view가 나오고, 설치 마지막 화면의 **기본 앱 설정 열기**가 윈도우 설정의 light-view 페이지를 여나요. 제거하면 목록에서 사라지나요
 - (M5) **설치판 AppContainer:** 설치판으로 HEIC를 열었을 때 작업자가 AppContainer(`goodflow.LightView.Worker`) 안에서 도나요(Process Explorer 등으로 확인). 설치 폴더에 `ALL APPLICATION PACKAGES` 권한이 들어갔나요
