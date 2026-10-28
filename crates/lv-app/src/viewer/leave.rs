@@ -151,6 +151,28 @@ impl Viewer {
         self.clear_shown()
     }
 
+    /// Back from the resize screen (M6 ruling): shows `path` with the view rotation
+    /// `quarters` it had pending when the screen opened, without asking. Opens it unless
+    /// it is already the current photo.
+    pub fn return_to(&mut self, path: &Path, quarters: u8) -> Redraw {
+        if self.list.current() != Some(path) {
+            self.open(path);
+        }
+        let q = quarters % 4;
+        if self.quarters != q {
+            self.quarters = q;
+            if self.showing_current() {
+                if let Some(s) = &mut self.shown {
+                    s.quarters = q;
+                }
+                self.touched = false;
+                let (size, dip) = (self.view_size, self.dip);
+                self.set_view(size, dip);
+            }
+        }
+        Redraw::Full
+    }
+
     /// Drops the kept decode of `path` (the file was rewritten), so it is decoded again.
     pub fn forget_decode(&mut self, path: &Path) {
         self.prefetcher.invalidate(path);

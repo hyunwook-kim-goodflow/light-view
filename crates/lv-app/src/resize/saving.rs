@@ -4,16 +4,16 @@
 //! Bin).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lv_core::identity::{self, FileIdentity, Verify};
-use lv_core::resize::ResizeSpec;
+use lv_core::identity::{self, to_extended_path, FileIdentity, Verify};
+use lv_core::resize::{ResizeSpec, Target};
 use windows::Win32::Foundation::HWND;
 
 use super::estimate::{produce, Maker, Outcome};
 use super::save::batch::{ReplaceBatch, Unrecycled, Unrestored};
-use super::save::{save_new, save_replace, FailReason, ItemResult};
+use super::save::{revert_replace, save_new, save_replace, FailReason, ItemResult, ReplaceRefusal};
 use super::{add, close_session, BatchReport, Estimate, SaveProgress, WM_APP_RESIZE_SAVED};
 use crate::delete::{ShellTrash, Trash};
 use crate::instance;
@@ -37,7 +37,7 @@ pub struct SaveItem {
     pub id: FileIdentity,
     pub quarters: u8,
     /// Known to be an animation or opened at reduced size: never replaced (R3).
-    pub keep_original: bool,
+    pub keep_original: Option<ReplaceRefusal>,
     pub known: Known,
 }
 
@@ -85,26 +85,76 @@ fn save_one(item: &SaveItem, spec: &ResizeSpec, replace: bool, maker: &Maker) ->
         Known::Bytes(bytes) => bytes.clone(),
         Known::Make => match produce(&item.path, item.quarters, spec, maker) {
             (source, Outcome::Ready { bytes, .. }) => {
-                keep_original |= source.is_some_and(|s| s.animated || s.scaled);
+                keep_original =
+                    keep_original.or(source.and_then(|s| refusal(s.animated, s.scaled)));
                 bytes
             }
             (_, Outcome::CantFit) => return ItemResult::CantFit,
             (_, Outcome::Failed(e)) => return ItemResult::Failed(FailReason::Io(e)),
         },
     };
-    if replace {
-        if keep_original {
-            return ItemResult::Failed(FailReason::Io(
-                "an animation or a photo opened at reduced size is never replaced".into(),
-            ));
+    let result = if replace {
+        if let Some(why) = keep_original {
+            return ItemResult::Failed(FailReason::ReplaceRefused(why));
         }
-        return save_replace(&item.path, &item.id, &bytes, spec.format);
+        save_replace(&item.path, &item.id, &bytes, spec.format)
+    } else {
+        // The bytes were made from the photo as it was when it joined the session.
+        if identity::verify(&item.path, &item.id) != Verify::Same {
+            return ItemResult::Failed(FailReason::Changed);
+        }
+        save_new(&item.path, &bytes, spec.format)
+    };
+    match spec.target {
+        Target::MaxBytes { bytes: limit, .. } => check_written(result, &item.path, limit),
+        _ => result,
     }
-    // The bytes were made from the photo as it was when it joined the session.
-    if identity::verify(&item.path, &item.id) != Verify::Same {
-        return ItemResult::Failed(FailReason::Changed);
+}
+
+/// Why a photo that is an animation or was opened at reduced size is never replaced.
+pub fn refusal(animated: bool, scaled: bool) -> Option<ReplaceRefusal> {
+    if animated {
+        Some(ReplaceRefusal::Animated)
+    } else if scaled {
+        Some(ReplaceRefusal::Scaled)
+    } else {
+        None
     }
-    save_new(&item.path, &bytes, spec.format)
+}
+
+/// Spec §5: the file as written is checked against the 용량 limit. One over it is taken
+/// back (a new file deleted, a replace reverted to the original) and fails the photo.
+fn check_written(result: ItemResult, original: &Path, limit: u64) -> ItemResult {
+    let written = match &result {
+        ItemResult::Saved(p) | ItemResult::Replaced { result: p, .. } => p,
+        _ => return result,
+    };
+    let len = match std::fs::metadata(to_extended_path(written)) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            eprintln!("light-view: cannot check {}: {e}", written.display());
+            return result;
+        }
+    };
+    if len <= limit {
+        return result;
+    }
+    eprintln!(
+        "light-view: {} is {len} bytes, over {limit}",
+        written.display()
+    );
+    match &result {
+        ItemResult::Saved(p) if std::fs::remove_file(to_extended_path(p)).is_err() => {
+            eprintln!("light-view: could not remove {}", p.display());
+        }
+        // The result could not be deleted: the replace stands (it joins the batch, so
+        // its undo and commit still apply).
+        ItemResult::Replaced { result: r, backup } if !revert_replace(r, backup, original) => {
+            return result;
+        }
+        _ => {}
+    }
+    ItemResult::Failed(FailReason::OverLimit)
 }
 
 /// How a save went, for its summary (spec §6: 성공 N, 맞추기 불가 N, 실패 N).
@@ -164,7 +214,7 @@ pub fn start_save(app: &RefCell<App>, hwnd: HWND) -> bool {
             path: i.path.clone(),
             id: i.id.clone(),
             quarters: i.quarters,
-            keep_original: i.animated || i.scaled,
+            keep_original: refusal(i.animated, i.scaled),
             known: match i.estimate {
                 Estimate::CantFit => Known::CantFit,
                 Estimate::Ready { .. } => state
@@ -401,7 +451,7 @@ mod tests {
             path: path.to_path_buf(),
             id: capture(path).unwrap(),
             quarters: 0,
-            keep_original: false,
+            keep_original: None,
             known,
         }
     }
@@ -464,14 +514,51 @@ mod tests {
         // An animation (or a photo opened at reduced size) is never replaced (R3).
         let b = png(dir.path(), "b.png");
         let mut anim = item(&b, Known::Bytes(vec![1, 2, 3]));
-        anim.keep_original = true;
+        anim.keep_original = Some(ReplaceRefusal::Animated);
         let (results, batch) = run(job(vec![anim], true));
-        assert!(matches!(
+        assert_eq!(
             results[0].1,
-            ItemResult::Failed(FailReason::Io(_))
-        ));
+            ItemResult::Failed(FailReason::ReplaceRefused(ReplaceRefusal::Animated))
+        );
         assert!(batch.is_empty());
         assert!(b.exists());
+    }
+
+    #[test]
+    fn a_written_file_over_the_limit_is_taken_back() {
+        let dir = tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap();
+        let limit = |job: &mut SaveJob| {
+            job.spec.target = Target::MaxBytes {
+                bytes: 10,
+                long_edge: None,
+            };
+        };
+        // A new file: deleted again.
+        let a = png(dir.path(), "a.png");
+        let mut new = job(vec![item(&a, Known::Bytes(vec![7; 11]))], false);
+        limit(&mut new);
+        let (results, _) = run(new);
+        assert_eq!(results[0].1, ItemResult::Failed(FailReason::OverLimit));
+        assert!(!dir.path().join("a_small.png").exists());
+        // A replace: the original is back under its name, with its own bytes.
+        let b = png(dir.path(), "b.png");
+        let before = std::fs::read(&b).unwrap();
+        let mut replace = job(vec![item(&b, Known::Bytes(vec![7; 11]))], true);
+        limit(&mut replace);
+        let (results, batch) = run(replace);
+        assert_eq!(results[0].1, ItemResult::Failed(FailReason::OverLimit));
+        assert!(batch.is_empty());
+        assert_eq!(std::fs::read(&b).unwrap(), before);
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.png", "b.png"], "no backup or result left");
+        // Within the limit: kept.
+        let mut fits = job(vec![item(&a, Known::Bytes(vec![7; 10]))], false);
+        limit(&mut fits);
+        assert!(matches!(run(fits).0[0].1, ItemResult::Saved(_)));
     }
 
     #[test]
