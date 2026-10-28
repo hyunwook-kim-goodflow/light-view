@@ -8,6 +8,17 @@ pub struct CaseResult {
     pub values: Vec<(String, f64)>,
 }
 
+/// The values a case can measure; a baseline line with any other key is refused, so a
+/// misspelt key never silently drops its check.
+pub const KNOWN_VALUES: [&str; 6] = [
+    "first_pixel_ms",
+    "decode_ms",
+    "private_mb",
+    "estimates_ms",
+    "first_estimate_ms",
+    "peak_private_mb",
+];
+
 /// A result fails the check when a value is over this many times its baseline.
 pub const CHECK_FACTOR: f64 = 1.5;
 
@@ -34,7 +45,8 @@ impl CaseResult {
     }
 
     /// Parses a line written by `to_json` (spacing and key order may differ). Only this
-    /// flat shape is read: string `case`, numeric values, no nesting or escapes.
+    /// flat shape is read: string `case`, numeric values, no nesting or escapes. `None`
+    /// for a key not in `KNOWN_VALUES`, a key given twice, or no value at all.
     pub fn from_json(line: &str) -> Option<CaseResult> {
         let body = line.trim().strip_prefix('{')?.strip_suffix('}')?;
         let mut case = None;
@@ -45,9 +57,17 @@ impl CaseResult {
             match key.trim().trim_matches('"') {
                 "case" => {
                     let s = value.strip_prefix('"')?.strip_suffix('"')?;
-                    case = Some(s.to_string());
+                    if case.replace(s.to_string()).is_some() {
+                        return None;
+                    }
                 }
-                name => values.push((name.to_string(), value.parse().ok()?)),
+                name => {
+                    let known = KNOWN_VALUES.contains(&name);
+                    if !known || values.iter().any(|(n, _): &(String, f64)| n == name) {
+                        return None;
+                    }
+                    values.push((name.to_string(), value.parse().ok()?));
+                }
             }
         }
         if values.is_empty() {
@@ -158,7 +178,24 @@ mod tests {
             [Some(1.0), Some(2.5), Some(3.0)]
         );
         assert_eq!(CaseResult::from_json(r#"{"case": "x"}"#), None);
-        assert_eq!(CaseResult::from_json(r#"{"case": "x", "a_ms": y}"#), None);
+        assert_eq!(
+            CaseResult::from_json(r#"{"case": "x", "decode_ms": y}"#),
+            None
+        );
+        // A misspelt or unknown key, or a key given twice, is refused.
+        assert_eq!(CaseResult::from_json(r#"{"case": "x", "foo": 1}"#), None);
+        assert_eq!(
+            CaseResult::from_json(r#"{"case": "x", "decode_ms": 1, "decod_ms": 2}"#),
+            None
+        );
+        assert_eq!(
+            CaseResult::from_json(r#"{"case": "x", "decode_ms": 1, "decode_ms": 2}"#),
+            None
+        );
+        assert_eq!(
+            CaseResult::from_json(r#"{"case": "x", "case": "y", "decode_ms": 1}"#),
+            None
+        );
         assert_eq!(CaseResult::from_json("not json"), None);
     }
 

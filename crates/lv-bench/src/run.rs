@@ -352,12 +352,13 @@ mod tests {
         );
         assert_eq!(parse_line("first-present-ms=x", "first-present-ms="), None);
         let done = parse_line(
-            "estimates-done-ms=2400 photos=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640",
+            "estimates-done-ms=2400 photos=10 ready=10 first-estimate-ms=520 private-mb=310 peak-private-mb=640",
             "estimates-done-ms=",
         )
         .unwrap();
         assert_eq!(done[0], ("estimates-done-ms".to_string(), 2400.0));
-        assert_eq!(done[4], ("peak-private-mb".to_string(), 640.0));
+        assert_eq!(done[2], ("ready".to_string(), 10.0));
+        assert_eq!(done[5], ("peak-private-mb".to_string(), 640.0));
         assert_eq!(parse_line("first-present-ms=1", "estimates-done-ms="), None);
     }
 }

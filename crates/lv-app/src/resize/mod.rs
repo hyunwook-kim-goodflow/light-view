@@ -531,12 +531,11 @@ pub fn on_estimate(app: &RefCell<App>, hwnd: HWND) {
     }
     if changed {
         if let Some(s) = &state.session {
-            let pending = s
-                .items
-                .iter()
-                .filter(|i| i.estimate == Estimate::Pending)
-                .count();
-            crate::timing::estimate_arrived(s.items.len(), pending);
+            let count =
+                |f: fn(&Estimate) -> bool| s.items.iter().filter(|i| f(&i.estimate)).count();
+            let pending = count(|e| *e == Estimate::Pending);
+            let ready = count(|e| matches!(e, Estimate::Ready { .. }));
+            crate::timing::estimate_arrived(s.items.len(), pending, ready);
         }
         state.refresh_block();
         drop(guard);
