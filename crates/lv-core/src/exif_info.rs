@@ -74,6 +74,12 @@ pub fn read_exif(bytes: &[u8]) -> Option<(ExifSummary, Vec<ExifEntry>)> {
     Some((summarize(&exif), entries(&exif)))
 }
 
+/// Parses a raw EXIF block (the `Exif\0\0` header is optional), capped like a file's.
+pub(crate) fn parse_block(block: &[u8]) -> Option<Exif> {
+    let tiff = strip_prefix(block);
+    parse(&tiff[..tiff.len().min(MAX_TIFF)])
+}
+
 /// Parses a TIFF block, keeping what was read before an error.
 fn parse(tiff: &[u8]) -> Option<Exif> {
     let mut reader = exif::Reader::new();
