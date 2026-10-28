@@ -763,7 +763,7 @@ fn jpeg_markers_seeds() -> Seeds {
 }
 
 fn ipc_frame_seeds() -> Seeds {
-    use lv_ipc::{write_request, write_response, FailKind, Request, Response};
+    use lv_ipc::{write_request, write_response, FailKind, FitTarget, Request, Response};
     let requests = [
         Request::DecodeHeif {
             id: 1,
@@ -776,11 +776,15 @@ fn ipc_frame_seeds() -> Seeds {
             max_pixels: 1 << 20,
             data: b"jpeg-bytes".to_vec(),
         },
-        Request::EncodeWebp {
+        Request::FitWebp {
             id: 3,
             width: 2,
             height: 1,
-            quality: 80,
+            start_quality: 80,
+            target: FitTarget::MaxBytes {
+                bytes: 5000,
+                long_edge: Some(1),
+            },
             rgba: vec![1, 2, 3, 255, 4, 5, 6, 128],
         },
         Request::Shutdown,
@@ -818,6 +822,17 @@ fn ipc_frame_seeds() -> Seeds {
         Response::Bytes {
             id: 7,
             data: b"rotated".to_vec(),
+        },
+        Response::Fitted {
+            id: 8,
+            width: 2,
+            height: 1,
+            quality: 75,
+            data: b"RIFF\x04\0\0\0WEBP".to_vec(),
+        },
+        Response::CantFit {
+            id: 9,
+            smallest: 6000,
         },
     ];
     let mut req_stream = Vec::new();

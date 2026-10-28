@@ -1,7 +1,7 @@
 //! Pool of sandboxed `lv-worker.exe` processes that decode HEIF files, rotate JPEGs
-//! losslessly and encode lossy WebP files for the viewer.
+//! losslessly and fit photos into lossy WebP files for the viewer.
 //!
-//! Decodes share the pool's long-lived workers. Each JPEG rotation and each WebP encode
+//! Decodes share the pool's long-lived workers. Each JPEG rotation and each WebP fit
 //! runs in a worker of its own, started for it and ended after it
 //! ([`WorkerPool::single_use`]), so a worker that a hostile file took over cannot answer a
 //! request whose output is saved (ruling R21).
@@ -230,14 +230,14 @@ impl WorkerPool {
             PoolRequest::DecodeHeif { data } | PoolRequest::RotateJpeg { data, .. } => {
                 data.len() as u64
             }
-            PoolRequest::EncodeWebp { rgba, .. } => rgba.len() as u64,
+            PoolRequest::FitWebp { rgba, .. } => rgba.len() as u64,
         };
         if bytes > self.data_cap {
             return Err(DecodeError::FileTooLarge { bytes }.into());
         }
         let single_use = matches!(
             req,
-            PoolRequest::RotateJpeg { .. } | PoolRequest::EncodeWebp { .. }
+            PoolRequest::RotateJpeg { .. } | PoolRequest::FitWebp { .. }
         );
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (request, expect) = to_request(req, id, self.max_pixels)?;
@@ -259,7 +259,7 @@ impl WorkerPool {
 
     /// Runs `request` in a sandboxed worker started for it alone (same sandbox as the
     /// pool's) and ended right after, so it never sees any other file (ruling R21). JPEG
-    /// rotations and WebP encodes go here: a pool worker taken over by a hostile HEIF it
+    /// rotations and WebP fits go here: a pool worker taken over by a hostile HEIF it
     /// decoded must not be the one that answers a later request whose output is saved. The
     /// rules of [`exchange`](Self::exchange) apply; a worker that was dead before it took
     /// its request makes later single-use workers start without the best-effort
@@ -460,7 +460,7 @@ impl WorkerPool {
             Request::DecodeHeif { data, .. } | Request::RotateJpeg { data, .. } => {
                 data.len() as u64
             }
-            Request::EncodeWebp { rgba, .. } => rgba.len() as u64,
+            Request::FitWebp { rgba, .. } => rgba.len() as u64,
             Request::Shutdown => 0,
         };
         let dead_before_send = worker.sandboxed.has_exited();
@@ -1157,6 +1157,7 @@ pub(crate) mod tests {
             Ok(Reply::Image { width, height, .. }) => {
                 panic!("expected Bytes, got a {width}x{height} image")
             }
+            Ok(Reply::Fit(outcome)) => panic!("expected Bytes, got {outcome:?}"),
             Err(e) => panic!("expected Bytes, got {e}"),
         }
     }

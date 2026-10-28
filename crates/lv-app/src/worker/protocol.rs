@@ -7,8 +7,9 @@ use std::time::Duration;
 use lv_core::decode::{max_file_bytes, DecodeError, DecodeLimits};
 use lv_core::jpeg_check;
 use lv_core::jpeg_extent::check_single_image;
+use lv_core::resize::{target_size, FitOutcome, Target};
 use lv_ipc::{
-    max_bytes_response, max_request_data, webp_encode_fits, FailKind, Request, Response,
+    max_bytes_response, max_request_data, webp_fit_fits, FailKind, FitTarget, Request, Response,
     BYTES_FIXED_LEN,
 };
 
@@ -27,12 +28,14 @@ pub enum PoolRequest {
     /// Rotate a JPEG losslessly by `quarters` (`1..=3`) clockwise quarter turns; answered
     /// by [`Reply::Bytes`].
     RotateJpeg { quarters: u8, data: Vec<u8> },
-    /// Encode straight RGBA8 pixels (`width * height * 4` bytes) as a lossy WebP at
-    /// `quality` (`0..=100`); answered by [`Reply::Bytes`].
-    EncodeWebp {
+    /// Resize a source of straight RGBA8 pixels (`width * height * 4` bytes) to `target`
+    /// and fit it into a lossy WebP from `start_quality` (`1..=100`) down, all in the
+    /// worker; answered by [`Reply::Fit`].
+    FitWebp {
         width: u32,
         height: u32,
-        quality: u8,
+        start_quality: u8,
+        target: FitTarget,
         rgba: Vec<u8>,
     },
 }
@@ -45,10 +48,13 @@ pub enum Reply {
         height: u32,
         bgra: Vec<u8>,
     },
-    /// The rotated JPEG or the WebP file, at most `lv_ipc::max_bytes_response(input)`
-    /// bytes. A rotated JPEG is not checked beyond that: the caller verifies it before using
-    /// it. A WebP file has been checked to be a RIFF/WEBP container of its stated length.
+    /// The rotated JPEG, at most `lv_ipc::max_bytes_response(input)` bytes. Not yet
+    /// checked beyond that: the caller verifies it before using it.
     Bytes { data: Vec<u8> },
+    /// The outcome of a WebP fit. A fitted WebP has been checked to be a RIFF/WEBP
+    /// container of its stated length, no larger than the source or the budget, at most
+    /// the start quality; a `CantFit` only answers a byte target, with `smallest` over it.
+    Fit(FitOutcome),
 }
 
 #[derive(Debug)]
@@ -93,16 +99,20 @@ pub(super) enum Expect {
     Bytes {
         input_len: u64,
     },
-    /// A WebP file for this many bytes of pixels.
-    Webp {
+    /// A WebP fit of a `src` source sent as `input_len` bytes of pixels, from
+    /// `start_quality` down, within `budget` bytes for a byte target.
+    Fit {
         input_len: u64,
+        src: (u32, u32),
+        start_quality: u8,
+        budget: Option<u64>,
     },
 }
 
 /// The wire request for `req` and the kind of answer it expects. A rotation by other
-/// than 1 to 3 quarter turns is `Corrupt`, and so is an encode of an empty image, of pixels
-/// that are not `width * height * 4` bytes or at a quality over 100 (the app's mistakes,
-/// which lv-ipc would refuse to write).
+/// than 1 to 3 quarter turns is `Corrupt`, and so is a fit of an empty source, of pixels
+/// that are not `width * height * 4` bytes, from a start quality outside 1 to 100 or to an
+/// invalid target (the app's mistakes, which lv-ipc would refuse to write).
 pub(super) fn to_request(
     req: PoolRequest,
     id: u64,
@@ -131,29 +141,46 @@ pub(super) fn to_request(
             };
             (request, Expect::Bytes { input_len })
         }
-        PoolRequest::EncodeWebp {
+        PoolRequest::FitWebp {
             width,
             height,
-            quality,
+            start_quality,
+            target,
             rgba,
         } => {
             let expected = (u64::from(width) * u64::from(height)).checked_mul(4);
-            if width == 0 || height == 0 || expected != Some(rgba.len() as u64) || quality > 100 {
+            if width == 0
+                || height == 0
+                || expected != Some(rgba.len() as u64)
+                || !(1..=100).contains(&start_quality)
+                || !target.is_valid()
+            {
                 let msg = format!(
-                    "{} bytes of pixels for a {width}x{height} WebP at quality {quality}",
+                    "{} bytes of pixels for a {width}x{height} WebP fit from quality \
+                     {start_quality} to {target:?}",
                     rgba.len()
                 );
                 return Err(DecodeError::Corrupt(msg).into());
             }
-            let input_len = rgba.len() as u64;
-            let request = Request::EncodeWebp {
+            let budget = match target {
+                FitTarget::MaxBytes { bytes, .. } => Some(bytes),
+                _ => None,
+            };
+            let expect = Expect::Fit {
+                input_len: rgba.len() as u64,
+                src: (width, height),
+                start_quality,
+                budget,
+            };
+            let request = Request::FitWebp {
                 id,
                 width,
                 height,
-                quality,
+                start_quality,
+                target,
                 rgba,
             };
-            (request, Expect::Webp { input_len })
+            (request, expect)
         }
     })
 }
@@ -179,7 +206,7 @@ impl WorkerPool {
             Err(PoolError::Failed(e)) => Err(e),
             // `check` only lets an `Image` answer or a decode failure through for a decode.
             Err(PoolError::WorkerUnavailable)
-            | Ok(Reply::Bytes { .. })
+            | Ok(Reply::Bytes { .. } | Reply::Fit(_))
             | Err(PoolError::NotPerfect)
             | Err(PoolError::HasTrailingData) => Err(DecodeError::Corrupt(NOT_RESPONDING.into())),
         }
@@ -223,41 +250,56 @@ impl WorkerPool {
         }
     }
 
-    /// Encodes straight RGBA8 pixels of `size` as a lossy WebP at `quality` (`0..=100`) in a
-    /// sandboxed worker of its own (as a rotation: its output is saved, so a worker that
-    /// decoded a hostile file must not make it, ruling R21), waiting at most `deadline`.
-    /// Wrap it into an [`lv_core::resize::Encoder`] for `fit`.
+    /// Resizes `rgba` (straight RGBA8 of `size`) to `target` and fits it into a lossy WebP
+    /// with `lv_core::resize::fit`, from `start_quality` down, in one sandboxed worker of
+    /// its own: the pixels are sent once and every trial runs there (spec §10). The worker
+    /// is started for this photo and ended after it (ruling R21: its output is saved, so a
+    /// worker that decoded a hostile file must not make it). Waits at most `deadline`.
     ///
-    /// An image the worker would refuse for its size (a side over 16383, over the pixel
-    /// limit, over its Job by [`webp_encode_fits`], or over the request cap) is `TooLarge`
-    /// without being sent; bad arguments are `Corrupt`, also unsent.
+    /// The app reduces a `MaxBytes` budget by the EXIF it will attach before calling this
+    /// (`lv_core::resize::exif_overhead`). A source the worker would refuse for its size (an
+    /// output side over 16383, over the pixel limit, over its Job by [`webp_fit_fits`], or
+    /// over the request cap) is `TooLarge` without being sent; bad arguments (wrong pixel
+    /// count, a start quality outside 1 to 100, a zero side or budget in `target`) are
+    /// `Corrupt`, also unsent.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the resize session (M6 Task 5) encodes WebP")
+        expect(dead_code, reason = "the resize session (M6 Task 5) fits WebP")
     )]
-    pub fn encode_webp(
+    pub fn fit_webp(
         &self,
         rgba: &[u8],
         size: (u32, u32),
-        quality: u8,
+        target: &Target,
+        start_quality: u8,
         deadline: Duration,
-    ) -> Result<Vec<u8>, PoolError> {
+    ) -> Result<FitOutcome, PoolError> {
         let (width, height) = size;
-        let fits = webp_encode_fits(width, height, self.max_pixels)
-            && u64::from(width) * u64::from(height) * 4 <= self.data_cap;
-        if !fits {
-            return Err(DecodeError::TooLarge { width, height }.into());
+        let wire = match *target {
+            Target::LongEdge(n) => FitTarget::LongEdge(n),
+            Target::Width(n) => FitTarget::Width(n),
+            Target::Height(n) => FitTarget::Height(n),
+            Target::MaxBytes { bytes, long_edge } => FitTarget::MaxBytes { bytes, long_edge },
+            Target::Percent(p) => FitTarget::Percent(p),
+        };
+        if width != 0 && height != 0 && wire.is_valid() {
+            let fits = webp_fit_fits(size, target_size(size, target), self.max_pixels)
+                && u64::from(width) * u64::from(height) * 4 <= self.data_cap;
+            if !fits {
+                return Err(DecodeError::TooLarge { width, height }.into());
+            }
         }
-        let request = PoolRequest::EncodeWebp {
+        let request = PoolRequest::FitWebp {
             width,
             height,
-            quality,
+            start_quality,
+            target: wire,
             rgba: rgba.to_vec(),
         };
         match self.request(request, deadline)? {
-            Reply::Bytes { data } => Ok(data),
-            // `check` only lets a `Bytes` answer through for an encode.
-            Reply::Image { .. } => Err(PoolError::WorkerUnavailable),
+            Reply::Fit(outcome) => Ok(outcome),
+            // `check` only lets a `Fit` answer through for a fit.
+            Reply::Image { .. } | Reply::Bytes { .. } => Err(PoolError::WorkerUnavailable),
         }
     }
 
@@ -272,7 +314,9 @@ impl WorkerPool {
         let got = match &response {
             Response::Image { id, .. }
             | Response::Failed { id, .. }
-            | Response::Bytes { id, .. } => *id,
+            | Response::Bytes { id, .. }
+            | Response::Fitted { id, .. }
+            | Response::CantFit { id, .. } => *id,
         };
         if got != id {
             return Err(format!("answer for request {got}, expected {id}"));
@@ -305,16 +349,53 @@ impl WorkerPool {
                     Ok(Ok(Reply::Bytes { data }))
                 }
             }
-            (Expect::Webp { input_len }, Response::Bytes { data, .. }) => {
-                if data.len() as u64 > max_bytes_response(input_len) {
+            (
+                Expect::Fit {
+                    input_len,
+                    src,
+                    start_quality,
+                    budget,
+                },
+                Response::Fitted {
+                    width,
+                    height,
+                    quality,
+                    data,
+                    ..
+                },
+            ) => {
+                let len = data.len() as u64;
+                if len > max_bytes_response(input_len) || budget.is_some_and(|b| len > b) {
+                    Err(format!("a {len}-byte WebP for {input_len} bytes of pixels"))
+                } else if width > src.0 || height > src.1 || quality > start_quality {
                     Err(format!(
-                        "{} bytes for {input_len} bytes of pixels",
-                        data.len()
+                        "a {width}x{height} WebP at quality {quality} for a {}x{} source from \
+                         quality {start_quality}",
+                        src.0, src.1
                     ))
                 } else if !is_webp_file(&data) {
-                    Err("an encode answer that is not a WebP file".to_string())
+                    Err("a fit answer that is not a WebP file".to_string())
                 } else {
-                    Ok(Ok(Reply::Bytes { data }))
+                    Ok(Ok(Reply::Fit(FitOutcome::Fitted {
+                        bytes: data,
+                        size: (width, height),
+                        quality,
+                    })))
+                }
+            }
+            (
+                Expect::Fit {
+                    budget: Some(budget),
+                    ..
+                },
+                Response::CantFit { smallest, .. },
+            ) => {
+                if smallest <= budget {
+                    Err(format!(
+                        "can't fit {budget} bytes, yet {smallest} bytes seen"
+                    ))
+                } else {
+                    Ok(Ok(Reply::Fit(FitOutcome::CantFit { smallest })))
                 }
             }
             (
@@ -336,15 +417,18 @@ impl WorkerPool {
                 FailKind::Corrupt(msg) => DecodeError::Corrupt(msg),
                 FailKind::Unsupported => DecodeError::Unsupported,
                 FailKind::NotPerfect | FailKind::HasTrailingData => {
-                    return Err(format!("{kind:?} answer to a decode or an encode"))
+                    return Err(format!("{kind:?} answer to a decode or a fit"))
                 }
             }))),
             (Expect::Image, Response::Bytes { .. }) => Err("a JPEG answer to a decode".to_string()),
             (Expect::Bytes { .. }, Response::Image { .. }) => {
                 Err("an image answer to a rotation".to_string())
             }
-            (Expect::Webp { .. }, Response::Image { .. }) => {
-                Err("an image answer to an encode".to_string())
+            (Expect::Fit { .. }, Response::Image { .. } | Response::Bytes { .. }) => {
+                Err("an image or JPEG answer to a fit".to_string())
+            }
+            (_, Response::Fitted { .. } | Response::CantFit { .. }) => {
+                Err("a fit answer to another request".to_string())
             }
         }
     }
