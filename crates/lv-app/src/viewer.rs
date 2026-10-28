@@ -16,9 +16,11 @@ use lv_core::viewport::{Viewport, ZOOM_STEP};
 use crate::strings::{self, t, text, Lang, S};
 
 mod leave;
+mod open;
 mod rescan;
 
 pub use leave::{LeaveDecision, LeaveReason};
+pub use open::SortSource;
 pub use rescan::RescanFound;
 
 /// Frame delays below this are played at `DEFAULT_DELAY_MS`, as browsers do.
@@ -106,6 +108,8 @@ pub struct Viewer {
     /// A save of the shown photo failed: leaving it asks again even with `auto_save`, so
     /// a file that cannot be saved never traps the user.
     save_failed: bool,
+    /// Asks which order a newly opened folder is shown in (ruling R5); `None` in tests.
+    sort_source: Option<Box<dyn SortSource>>,
     /// What waits for the save prompt or a running save.
     pending_leave: Option<LeaveReason>,
 }
@@ -193,29 +197,8 @@ impl Viewer {
             auto_save: false,
             save_failed: false,
             pending_leave: None,
+            sort_source: None,
         }
-    }
-
-    /// Opens `path` within its folder. Never decodes on this thread.
-    pub fn open(&mut self, path: &Path) {
-        let mut list = FolderList::scan(path)
-            .unwrap_or_else(|_| FolderList::from_paths(vec![path.to_path_buf()], path));
-        // A pending delete stays hidden in the new listing.
-        for hidden in self.list.hidden() {
-            list.hide(hidden);
-        }
-        self.open_list(list);
-    }
-
-    fn open_list(&mut self, list: FolderList) {
-        self.list = list;
-        self.backward = false;
-        self.quarters = 0;
-        if self.showing_current() {
-            // Reopening the shown photo: rebuild it unrotated and unzoomed.
-            self.shown = None;
-        }
-        self.after_move();
     }
 
     /// The image area size in DIPs and the DIPs per device pixel. An untouched
@@ -636,7 +619,7 @@ mod tests {
     }
 
     /// A viewer on a.jpg … e.jpg, opened at `name`, and its ready notifications.
-    fn viewer_at(name: &str) -> (Viewer, Receiver<PathBuf>) {
+    pub(super) fn viewer_at(name: &str) -> (Viewer, Receiver<PathBuf>) {
         viewer_with(name, None)
     }
 

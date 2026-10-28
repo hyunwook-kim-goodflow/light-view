@@ -156,7 +156,11 @@ pub fn run(
         // The first photo (opened above) is shown if it is ready, and the title, toolbar
         // and folder watch follow it, as after any open.
         if first.is_some() {
-            app.borrow_mut().viewer.check_current();
+            let mut a = app.borrow_mut();
+            // Explorer may have told the folder's order before the window was there.
+            a.viewer.take_sort_answers();
+            a.viewer.check_current();
+            drop(a);
             commands::after(&app, hwnd, Redraw::Full);
         }
 
