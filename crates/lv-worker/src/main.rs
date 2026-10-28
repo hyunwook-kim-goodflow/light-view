@@ -1,4 +1,5 @@
-//! light-view's sandboxed worker: decodes HEIF files and rotates JPEGs losslessly.
+//! light-view's sandboxed worker: decodes HEIF files, rotates JPEGs losslessly and encodes
+//! lossy WebP files from the app's pixels.
 //!
 //! Reads [`Request`]s from stdin and writes [`Response`]s to stdout (see `lv-ipc`). stdout
 //! carries framed responses only; diagnostics go to stderr. Exit codes: 0 after `Shutdown` or
@@ -16,8 +17,8 @@ use lv_core::color::{premultiply_to_bgra, to_srgb_in_place, ColorSource};
 use lv_core::decode::{max_file_bytes, DecodeLimits};
 use lv_heif::{decode_heif, ColorInfo, HeifError};
 use lv_ipc::{
-    max_bytes_response, max_request_data, max_response_pixels, read_request, write_response,
-    FailKind, Request, Response, REQUEST_FIXED_LEN,
+    max_bytes_response, max_request_data, max_response_pixels, read_request, webp_encode_fits,
+    write_response, FailKind, Request, Response, REQUEST_FIXED_LEN,
 };
 use lv_jpegtran::{rotate_lossless, Quarter, TransformError};
 
@@ -34,7 +35,7 @@ enum TestMode {
     /// Exit with code 3 before reading anything (a worker that cannot start).
     DieAtStart,
     /// Answer every request with the other kind of answer (`Bytes` for a decode, `Image`
-    /// for a rotation).
+    /// for a rotation or an encode).
     WrongKind,
     /// Answer every request with `Corrupt("probe-read: opened")` if the file at this path
     /// can be opened for reading, else `Corrupt("probe-read: <error>")`: shows what the
@@ -115,9 +116,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, String> 
     })
 }
 
-/// Largest request payload the worker accepts, for a decode and a rotation alike: the file
-/// bytes the app may send (ruling R10; the pool uses the same `max_request_data` rule) plus
-/// the largest fixed part of a request.
+/// Largest request payload the worker accepts, for a decode, a rotation and an encode alike:
+/// the file bytes the app may send (ruling R10; the pool uses the same `max_request_data`
+/// rule) plus the largest fixed part of a request. An encode's pixels count as file bytes:
+/// the pool sends no more than this either.
 fn request_cap(max_pixels: u64) -> u64 {
     max_request_data(max_file_bytes(&DecodeLimits { max_pixels })) + REQUEST_FIXED_LEN
 }
@@ -151,7 +153,7 @@ fn serve(config: &Config) -> ExitCode {
             Some(TestMode::WrongKind) => {
                 let id = request.id();
                 let response = match request {
-                    Request::RotateJpeg { .. } => Response::Image {
+                    Request::RotateJpeg { .. } | Request::EncodeWebp { .. } => Response::Image {
                         id,
                         width: 1,
                         height: 1,
@@ -199,6 +201,13 @@ fn serve(config: &Config) -> ExitCode {
                 max_pixels,
                 data,
             } => rotate(id, quarters, &data, max_pixels.min(config.max_pixels)),
+            Request::EncodeWebp {
+                id,
+                width,
+                height,
+                quality,
+                rgba,
+            } => encode_webp(id, width, height, quality, &rgba, config.max_pixels),
             Request::Shutdown => return ExitCode::SUCCESS,
         };
         if let Err(e) = write_response(&mut output, &response).and_then(|()| output.flush()) {
@@ -288,6 +297,37 @@ fn rotate(id: u64, quarters: u8, data: &[u8], max_pixels: u64) -> Response {
     Response::Failed { id, kind }
 }
 
+/// Encodes the app's straight RGBA pixels as a lossy WebP (lv-ipc has checked that `rgba`
+/// is `width * height * 4` bytes). An image with a side over WebP's 16383, over the worker's
+/// pixel limit or over what its Job leaves for libwebp ([`webp_encode_fits`]) is `TooLarge`
+/// with its size, before libwebp sees it; a failure inside libwebp (out of memory included)
+/// is `Corrupt`. Crashes in libwebp end the process.
+fn encode_webp(
+    id: u64,
+    width: u32,
+    height: u32,
+    quality: u8,
+    rgba: &[u8],
+    max_pixels: u64,
+) -> Response {
+    let kind = if !webp_encode_fits(width, height, max_pixels) {
+        FailKind::TooLarge { width, height }
+    } else {
+        match lv_webp::encode_rgba(rgba, width, height, quality) {
+            Ok(data) if data.len() as u64 <= max_bytes_response(rgba.len() as u64) => {
+                return Response::Bytes { id, data }
+            }
+            Ok(data) => FailKind::Corrupt(format!(
+                "{}-byte WebP for {} bytes of pixels",
+                data.len(),
+                rgba.len()
+            )),
+            Err(msg) => FailKind::Corrupt(msg),
+        }
+    };
+    Response::Failed { id, kind }
+}
+
 #[cfg(windows)]
 mod hardening {
     //! Process-wide restrictions the worker puts on itself before reading any input.
@@ -317,9 +357,9 @@ mod hardening {
     /// Restricts later DLL loads to the exe folder and System32, then applies the
     /// self-imposed mitigation policies. Failures are reported on stderr and ignored.
     ///
-    /// `heif.dll`, `libde265.dll`, `turbojpeg.dll` and the DLLs they import are static
-    /// imports, already loaded by the time this runs, so the image load policy cannot block
-    /// them.
+    /// `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `libwebp.dll` and the DLLs they import
+    /// are static imports, already loaded by the time this runs, so the image load policy
+    /// cannot block them.
     pub fn apply() {
         quiet_system_errors();
         // SAFETY: plain flags argument; no pointers involved.
@@ -415,6 +455,11 @@ mod tests {
         let mode = unsafe { GetErrorMode() };
         unsafe { SetErrorMode(previous) };
         assert_eq!(mode & 0b11, 0b11, "error mode {mode:#x}");
+    }
+
+    #[test]
+    fn webp_side_limit_is_libwebps() {
+        assert_eq!(lv_ipc::WEBP_MAX_DIMENSION, lv_webp::MAX_DIMENSION);
     }
 
     #[test]

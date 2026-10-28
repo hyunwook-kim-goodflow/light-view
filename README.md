@@ -79,9 +79,9 @@ cargo build --release
 스크립트가 하는 일:
 
 - vcpkg를 고정 커밋으로 저장소 안 `.vcpkg\`에 받고 준비해요. 다운로드·바이너리 캐시도 `.vcpkg\` 안에만 두고, 전역 설치는 하지 않아요.
-- `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이), libde265, libjpeg-turbo(와 그것이 쓰는 libspng·zlib)를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
+- `vcpkg.json`대로 libheif(기본 기능 `hevc` 끔, 즉 x265 없이), libde265, libjpeg-turbo(와 그것이 쓰는 libspng·zlib), libwebp(와 그것이 쓰는 libsharpyuv)를 `vcpkg_installed\`에 `x64-windows`(DLL)로 빌드해요. 처음에는 몇 분 걸려요.
 - x265, x264, aom, dav1d, kvazaar, openjpeg가 설치돼 있거나 libheif가 `jpeg` 기능으로 빌드됐으면 실패해요. 이 검사만 따로 돌릴 때는 `-CheckOnly`를 써요.
-- `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`(과 쓰지 않는 `jpeg62.dll`)을 `target\debug`, `target\release`에 복사해요.
+- `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`, `libwebp.dll`, `libsharpyuv.dll`(과 쓰지 않는 `jpeg62.dll`, `libwebpdecoder.dll`, `libwebpdemux.dll`)을 `target\debug`, `target\release`에 복사해요.
 
 `cargo clean` 뒤처럼 DLL만 다시 복사하면 될 때는 vcpkg 단계를 건너뛰는 `-CopyOnly`를 써요.
 
@@ -91,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-deps.ps1 -CopyOnly
 
 빌드 환경 변수(`VCPKG_ROOT`, `VCPKGRS_TRIPLET`, `VCPKGRS_DYNAMIC`)는 `.cargo\config.toml`에 고정돼 있어서 따로 설정할 필요가 없어요.
 
-`cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC·JPEG 회전 작업자), `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`이 함께 있어야 해요. 이 파일들을 한 폴더에 두면 그대로 실행돼요. 작업자는 이 DLL을 모두 정적으로 가져오므로 하나라도 없으면 HEIC도 열리지 않아요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
+`cargo build --release` 뒤 `target\release`에는 `lv-app.exe`(뷰어), `lv-worker.exe`(HEIC·JPEG 회전·WebP 인코딩 작업자), `heif.dll`, `libde265.dll`, `turbojpeg.dll`, `spng.dll`, `z.dll`, `libwebp.dll`, `libsharpyuv.dll`이 함께 있어야 해요. 이 파일들을 한 폴더에 두면 그대로 실행돼요. 작업자는 이 DLL을 모두 정적으로 가져오므로 하나라도 없으면 HEIC도 열리지 않아요. 앱은 작업자를 자기 폴더에서만 찾아요. 사진 경로를 인자로 넘기거나 탐색기에서 끌어다 놓아 열 수 있어요.
 
 `cargo build`로 만든 실행 파일과 DLL은 Microsoft Visual C++ 2015–2022 재배포 가능 패키지(x64)의 런타임(`VCRUNTIME140.dll`, `heif.dll`과 `libde265.dll`은 `MSVCP140.dll`, `VCRUNTIME140_1.dll`도)이 필요해요. Visual Studio가 설치된 컴퓨터에는 이미 있어요. 아래처럼 만든 배포 파일은 이 패키지 없이 실행돼요.
 

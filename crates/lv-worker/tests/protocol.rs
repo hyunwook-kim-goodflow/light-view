@@ -1,6 +1,6 @@
 //! Drives the real `lv-worker` executable over piped stdio.
 //!
-//! The worker resolves `heif.dll`/`libde265.dll`/`turbojpeg.dll` (and their DLLs) from its own folder only, so they must sit
+//! The worker resolves `heif.dll`/`libde265.dll`/`turbojpeg.dll`/`libwebp.dll` (and their DLLs) from its own folder only, so they must sit
 //! next to `target\debug\lv-worker.exe` (`scripts/setup-deps.ps1` copies them there).
 
 use std::io::{BufReader, Read, Write};
@@ -29,6 +29,8 @@ fn require_dlls() {
         "turbojpeg.dll",
         "spng.dll",
         "z.dll",
+        "libwebp.dll",
+        "libsharpyuv.dll",
     ] {
         assert!(
             dir.join(dll).exists(),
@@ -356,6 +358,86 @@ fn rotate_over_pipes() {
     ));
 }
 
+impl Worker {
+    fn encode_webp(
+        &mut self,
+        id: u64,
+        width: u32,
+        height: u32,
+        quality: u8,
+        rgba: Vec<u8>,
+    ) -> Response {
+        self.send(&Request::EncodeWebp {
+            id,
+            width,
+            height,
+            quality,
+            rgba,
+        });
+        read_response(&mut self.stdout, RESPONSE_CAP)
+            .expect("valid response")
+            .expect("a response, not EOF")
+    }
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12
+        && &bytes[..4] == b"RIFF"
+        && &bytes[8..12] == b"WEBP"
+        && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize + 8 == bytes.len()
+}
+
+#[test]
+fn encode_webp_answers_bytes() {
+    let mut w = Worker::start();
+    let rgba = vec![
+        255, 0, 0, 255, 0, 255, 0, 255, //
+        0, 0, 255, 255, 255, 255, 255, 255,
+    ];
+    let first = match w.encode_webp(1, 2, 2, 80, rgba.clone()) {
+        Response::Bytes { id: 1, data } => data,
+        other => panic!("expected Bytes, got {other:?}"),
+    };
+    assert!(is_webp(&first), "{first:?}");
+    // Deterministic (ruling R1): the same pixels and quality give the same bytes.
+    assert_eq!(
+        w.encode_webp(2, 2, 2, 80, rgba.clone()),
+        Response::Bytes { id: 2, data: first }
+    );
+    // Over the worker's pixel limit: TooLarge with the size, nothing encoded.
+    let mut small = Worker::spawn(&["--max-pixels", "3"]);
+    assert_eq!(
+        small.encode_webp(3, 2, 2, 80, rgba.clone()),
+        Response::Failed {
+            id: 3,
+            kind: FailKind::TooLarge {
+                width: 2,
+                height: 2
+            }
+        }
+    );
+    // A side over WebP's 16383-pixel limit is TooLarge as well.
+    assert_eq!(
+        w.encode_webp(4, 16384, 1, 80, vec![0; 16384 * 4]),
+        Response::Failed {
+            id: 4,
+            kind: FailKind::TooLarge {
+                width: 16384,
+                height: 1
+            }
+        }
+    );
+    // Still serving, and the other requests are unaffected.
+    assert!(matches!(
+        w.encode_webp(5, 2, 2, 60, rgba),
+        Response::Bytes { id: 5, .. }
+    ));
+    assert!(matches!(
+        w.decode(6, MAX_PIXELS, sample("rainbow-451x461.heic")),
+        Response::Image { id: 6, .. }
+    ));
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn test_mode_wrong_kind_answers_with_the_other_kind() {
@@ -367,6 +449,10 @@ fn test_mode_wrong_kind_answers_with_the_other_kind() {
     assert!(matches!(
         w.rotate(2, 1, 1000, jpeg_sample("gradient-64x32.jpg")),
         Response::Image { id: 2, .. }
+    ));
+    assert!(matches!(
+        w.encode_webp(3, 1, 1, 80, vec![0; 4]),
+        Response::Image { id: 3, .. }
     ));
 }
 

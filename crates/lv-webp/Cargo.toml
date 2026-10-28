@@ -1,0 +1,10 @@
+[package]
+name = "lv-webp"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Lossy WebP encoding for light-view's worker through libwebp (links libwebp.dll)."
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["webp"] }
