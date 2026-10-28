@@ -172,11 +172,57 @@ pub enum S {
     // the drop question. Noun forms, short.
     Resize,
     PromptDropMany,
+    // The resize screen (M6): tabs, fields, output choices, the estimate list, save
+    // results and the sidebar setting. Noun forms, short. `ResizeAbout` prefixes an
+    // estimate ("약 1.1 MB"); `ResizeKeptAs` has a `{}` for a file name.
+    ResizeResolution,
+    ResizeFileSize,
+    ResizeScale,
+    ResizeLongEdge,
+    ResizeWidth,
+    ResizeHeight,
+    ResizeBasis,
+    ResizeMaxSize,
+    ResizeLimit,
+    ResizeOptional,
+    ResizeOutput,
+    ResizeFormat,
+    ResizeQuality,
+    ResizeMatchOriginal,
+    ResizeSaveMode,
+    ResizeNewFile,
+    ResizeReplace,
+    ResizeMetadata,
+    ResizeStripGps,
+    ResizeEstimate,
+    ResizeTotal,
+    ResizeAbout,
+    ResizeCantFit,
+    ResizeNoEstimate,
+    ResizeAnimated,
+    ResizeNoRecycleBin,
+    ResizeNameTaken,
+    ResizeReadOnly,
+    ResizeChanged,
+    ResizeOverLimit,
+    ResizeSaveFailed,
+    ResizeSaved,
+    ResizeReplaced,
+    ResizeFailed,
+    ResizeUndoIncomplete,
+    ResizeResultNotRecycled,
+    ResizeResultChanged,
+    ResizeNotRecycled,
+    ResizeKeptAs,
+    ResizePhotoList,
+    ResizeSidebar,
+    SettingsLeft,
+    SettingsRight,
 }
 
 /// Every key, for tests.
 #[cfg(test)]
-const ALL: [S; 96] = [
+const ALL: [S; 139] = [
     S::CheckboxAutoSave,
     S::PromptSaveRotation,
     S::PromptPermanentDelete,
@@ -273,6 +319,49 @@ const ALL: [S; 96] = [
     S::SettingsUpdateCheck,
     S::Resize,
     S::PromptDropMany,
+    S::ResizeResolution,
+    S::ResizeFileSize,
+    S::ResizeScale,
+    S::ResizeLongEdge,
+    S::ResizeWidth,
+    S::ResizeHeight,
+    S::ResizeBasis,
+    S::ResizeMaxSize,
+    S::ResizeLimit,
+    S::ResizeOptional,
+    S::ResizeOutput,
+    S::ResizeFormat,
+    S::ResizeQuality,
+    S::ResizeMatchOriginal,
+    S::ResizeSaveMode,
+    S::ResizeNewFile,
+    S::ResizeReplace,
+    S::ResizeMetadata,
+    S::ResizeStripGps,
+    S::ResizeEstimate,
+    S::ResizeTotal,
+    S::ResizeAbout,
+    S::ResizeCantFit,
+    S::ResizeNoEstimate,
+    S::ResizeAnimated,
+    S::ResizeNoRecycleBin,
+    S::ResizeNameTaken,
+    S::ResizeReadOnly,
+    S::ResizeChanged,
+    S::ResizeOverLimit,
+    S::ResizeSaveFailed,
+    S::ResizeSaved,
+    S::ResizeReplaced,
+    S::ResizeFailed,
+    S::ResizeUndoIncomplete,
+    S::ResizeResultNotRecycled,
+    S::ResizeResultChanged,
+    S::ResizeNotRecycled,
+    S::ResizeKeptAs,
+    S::ResizePhotoList,
+    S::ResizeSidebar,
+    S::SettingsLeft,
+    S::SettingsRight,
 ];
 
 /// The text for `key` in `lang`.
@@ -422,6 +511,49 @@ pub fn text(lang: Lang, key: S) -> &'static str {
         S::SettingsUpdateCheck => ("업데이트 확인", "Check for updates"),
         S::Resize => ("크기 조정", "Resize"),
         S::PromptDropMany => ("사진 여러 장", "Several photos"),
+        S::ResizeResolution => ("해상도", "Resolution"),
+        S::ResizeFileSize => ("용량", "File size"),
+        S::ResizeScale => ("비율", "Scale"),
+        S::ResizeLongEdge => ("긴 변", "Long edge"),
+        S::ResizeWidth => ("가로", "Width"),
+        S::ResizeHeight => ("세로", "Height"),
+        S::ResizeBasis => ("기준", "Based on"),
+        S::ResizeMaxSize => ("최대 용량", "Max size"),
+        S::ResizeLimit => ("긴 변 상한", "Long edge limit"),
+        S::ResizeOptional => ("(선택)", "(optional)"),
+        S::ResizeOutput => ("출력", "Output"),
+        S::ResizeFormat => ("형식", "Format"),
+        S::ResizeQuality => ("품질", "Quality"),
+        S::ResizeMatchOriginal => ("원본 수준", "Match original"),
+        S::ResizeSaveMode => ("저장", "Save"),
+        S::ResizeNewFile => ("새 파일", "New file"),
+        S::ResizeReplace => ("원본 대체", "Replace original"),
+        S::ResizeMetadata => ("메타데이터", "Metadata"),
+        S::ResizeStripGps => ("위치 정보 제거", "Remove location"),
+        S::ResizeEstimate => ("예상 결과", "Estimate"),
+        S::ResizeTotal => ("합계", "Total"),
+        S::ResizeAbout => ("약 ", "≈ "),
+        S::ResizeCantFit => ("맞추기 불가", "Can't fit"),
+        S::ResizeNoEstimate => ("예상 불가", "No estimate"),
+        S::ResizeAnimated => ("애니메이션 → 첫 장면", "Animation → first frame"),
+        S::ResizeNoRecycleBin => ("휴지통 없는 위치", "No Recycle Bin here"),
+        S::ResizeNameTaken => ("같은 이름의 파일 있음", "Name already taken"),
+        S::ResizeReadOnly => ("쓰기 불가 위치", "Can't write here"),
+        S::ResizeChanged => ("원본 변경됨", "Original changed"),
+        S::ResizeOverLimit => ("최대 용량 초과", "Over max size"),
+        S::ResizeSaveFailed => ("저장 실패", "Save failed"),
+        S::ResizeSaved => ("저장", "saved"),
+        S::ResizeReplaced => ("대체", "replaced"),
+        S::ResizeFailed => ("실패", "Failed"),
+        S::ResizeUndoIncomplete => ("실행 취소 불가", "Undo incomplete"),
+        S::ResizeResultNotRecycled => ("결과 파일 휴지통 이동 실패", "Result not recycled"),
+        S::ResizeResultChanged => ("결과 파일 변경됨", "Result changed"),
+        S::ResizeNotRecycled => ("원본 휴지통 이동 실패", "Original not recycled"),
+        S::ResizeKeptAs => ("원본은 {}로 보관", "Original kept as {}"),
+        S::ResizePhotoList => ("필름 띠", "Filmstrip"),
+        S::ResizeSidebar => ("사이드바 위치", "Sidebar position"),
+        S::SettingsLeft => ("왼쪽", "Left"),
+        S::SettingsRight => ("오른쪽", "Right"),
     };
     match lang {
         Lang::Ko => ko,
@@ -508,7 +640,7 @@ mod tests {
     fn all_lists_every_key_once() {
         // The last variant is the sentinel: a key added to `S` after it must be
         // added to `ALL` too, or the tests above would skip it.
-        assert_eq!(ALL.last(), Some(&S::PromptDropMany));
+        assert_eq!(ALL.last(), Some(&S::SettingsRight));
         for (i, a) in ALL.iter().enumerate() {
             assert!(!ALL[i + 1..].contains(a), "{a:?} listed twice");
         }
@@ -564,6 +696,50 @@ mod tests {
         assert_eq!(text(Lang::Ko, S::ScaledOpen), "축소해서 열었어요");
         assert_eq!(text(Lang::En, S::ScaledOpen), "Opened at reduced size");
         assert_eq!(text(Lang::Ko, S::ToastCopied), "복사했어요");
+    }
+
+    /// The resize screen's fixed wording (M6 global constraints): noun forms, short.
+    #[test]
+    fn resize_screen_texts() {
+        let expected = [
+            (S::ResizeResolution, "해상도", "Resolution"),
+            (S::ResizeFileSize, "용량", "File size"),
+            (S::ResizeScale, "비율", "Scale"),
+            (S::ResizeLongEdge, "긴 변", "Long edge"),
+            (S::ResizeWidth, "가로", "Width"),
+            (S::ResizeHeight, "세로", "Height"),
+            (S::ResizeMaxSize, "최대 용량", "Max size"),
+            (S::ResizeLimit, "긴 변 상한", "Long edge limit"),
+            (S::ResizeOptional, "(선택)", "(optional)"),
+            (S::ResizeFormat, "형식", "Format"),
+            (S::ResizeQuality, "품질", "Quality"),
+            (S::ResizeMatchOriginal, "원본 수준", "Match original"),
+            (S::ResizeSaveMode, "저장", "Save"),
+            (S::ResizeNewFile, "새 파일", "New file"),
+            (S::ResizeReplace, "원본 대체", "Replace original"),
+            (S::ResizeStripGps, "위치 정보 제거", "Remove location"),
+            (S::ResizeEstimate, "예상 결과", "Estimate"),
+            (S::ResizeTotal, "합계", "Total"),
+            (S::BtnCancel, "취소", "Cancel"),
+            (S::ResizeCantFit, "맞추기 불가", "Can't fit"),
+            (
+                S::ResizeAnimated,
+                "애니메이션 → 첫 장면",
+                "Animation → first frame",
+            ),
+            (
+                S::ResizeNameTaken,
+                "같은 이름의 파일 있음",
+                "Name already taken",
+            ),
+            (S::ResizeSidebar, "사이드바 위치", "Sidebar position"),
+            (S::SettingsLeft, "왼쪽", "Left"),
+            (S::SettingsRight, "오른쪽", "Right"),
+        ];
+        for (key, ko, en) in expected {
+            assert_eq!(text(Lang::Ko, key), ko, "{key:?}");
+            assert_eq!(text(Lang::En, key), en, "{key:?}");
+        }
     }
 
     #[test]

@@ -149,9 +149,12 @@ impl App {
         let on_card = self
             .card_layout()
             .is_some_and(|m| self.exif_card.contains(x, y, &m));
+        // On the resize screen, only over its photo.
+        let off_photo = crate::resize::screen::photo_rect(self).is_some_and(|r| !r.contains(x, y));
         !self.overlay.dialog_open()
             && !self.menu.is_open()
             && !on_card
+            && (self.pointer.drag.is_some() || !off_photo)
             && (self.pointer.drag.is_some() || (self.viewer.pannable() && !self.on_toolbar(px)))
     }
 

@@ -2,7 +2,7 @@
 //! the settings change each one makes.
 
 use lv_core::command::{Mods, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT};
-use lv_core::settings::{LangSetting, Settings};
+use lv_core::settings::{LangSetting, Settings, SidebarSide};
 
 use crate::strings::{text, Lang, S};
 
@@ -14,11 +14,14 @@ pub(super) const VK_SPACE: u16 = 0x20;
 /// The memory limit's options; `None` is automatic.
 const MEMORY_MB: [Option<u32>; 5] = [None, Some(256), Some(512), Some(1024), Some(2048)];
 const LANGUAGES: [LangSetting; 3] = [LangSetting::Auto, LangSetting::Ko, LangSetting::En];
+const SIDES: [SidebarSide; 2] = [SidebarSide::Left, SidebarSide::Right];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Language,
     PinMenu,
+    /// "사이드바 위치" (M6): the resize screen's sidebar on the left or the right.
+    Sidebar,
     OpenIn,
     Rotation,
     Memory,
@@ -28,9 +31,10 @@ pub enum Control {
 }
 
 /// Top to bottom; also the Tab order.
-pub const CONTROLS: [Control; 7] = [
+pub const CONTROLS: [Control; 8] = [
     Control::Language,
     Control::PinMenu,
+    Control::Sidebar,
     Control::OpenIn,
     Control::Rotation,
     Control::Memory,
@@ -51,6 +55,7 @@ impl Control {
         match self {
             Control::Language => S::SettingsLanguage,
             Control::PinMenu => S::SettingsPinMenu,
+            Control::Sidebar => S::ResizeSidebar,
             Control::OpenIn => S::SettingsOpenOther,
             Control::Rotation => S::SettingsRotated,
             Control::Memory => S::SettingsMemory,
@@ -72,6 +77,7 @@ impl Control {
         let keys = |keys: &[S]| keys.iter().map(|k| text(lang, *k).to_owned()).collect();
         match self {
             Control::Language => keys(&[S::SettingsAuto, S::SettingsKorean, S::SettingsEnglish]),
+            Control::Sidebar => keys(&[S::SettingsLeft, S::SettingsRight]),
             Control::OpenIn => keys(&[S::SettingsSameWindow, S::SettingsNewWindow]),
             Control::Rotation => keys(&[S::SettingsAskToSave, S::SettingsSaveRightAway]),
             Control::Memory => MEMORY_MB
@@ -88,7 +94,7 @@ impl Control {
     pub(super) fn option_count(self) -> usize {
         match self {
             Control::Language => LANGUAGES.len(),
-            Control::OpenIn | Control::Rotation => 2,
+            Control::Sidebar | Control::OpenIn | Control::Rotation => 2,
             Control::Memory => MEMORY_MB.len(),
             Control::PinMenu | Control::UpdateCheck | Control::DefaultApps => 0,
         }
@@ -98,6 +104,7 @@ impl Control {
     pub fn selected(self, s: &Settings) -> Option<usize> {
         match self {
             Control::Language => LANGUAGES.iter().position(|l| *l == s.language),
+            Control::Sidebar => SIDES.iter().position(|side| *side == s.sidebar_side),
             Control::OpenIn => Some(usize::from(s.open_in_new_window)),
             Control::Rotation => Some(usize::from(s.auto_save_rotation)),
             Control::Memory => {
@@ -130,6 +137,7 @@ impl Control {
     fn change_for(self, i: usize) -> Option<Change> {
         Some(match self {
             Control::Language => Change::Language(*LANGUAGES.get(i)?),
+            Control::Sidebar => Change::Sidebar(*SIDES.get(i)?),
             Control::OpenIn => Change::NewWindow(i == 1),
             Control::Rotation => Change::AutoSave(i == 1),
             Control::Memory => Change::Memory(*MEMORY_MB.get(i)?),
@@ -143,6 +151,7 @@ impl Control {
 pub enum Change {
     Language(LangSetting),
     PinMenu(bool),
+    Sidebar(SidebarSide),
     NewWindow(bool),
     AutoSave(bool),
     Memory(Option<u32>),
@@ -154,7 +163,7 @@ pub enum Change {
 pub struct MainUpdate {
     /// The language changed: title, cached texts and a redraw.
     pub retranslate: bool,
-    /// The toolbar was pinned or unpinned: the image area changes size.
+    /// The toolbar was pinned or unpinned, or the sidebar moved: the image area changes.
     pub relayout: bool,
     pub auto_save: Option<bool>,
     /// Update checks were turned on: check now if one is due.
@@ -175,6 +184,11 @@ pub fn apply_change(s: &mut Settings, c: Change) -> Option<MainUpdate> {
         Change::PinMenu(on) => {
             (s.toolbar_pinned != on).then_some(())?;
             s.toolbar_pinned = on;
+            update.relayout = true;
+        }
+        Change::Sidebar(side) => {
+            (s.sidebar_side != side).then_some(())?;
+            s.sidebar_side = side;
             update.relayout = true;
         }
         Change::NewWindow(on) => {

@@ -26,19 +26,25 @@ use crate::commands::{self, HwndCell};
 use crate::delete::{self, ShellTrash, Trash};
 use crate::input;
 use crate::overlay::{DialogTarget, Prompt, Toast};
-use crate::strings::{t, S};
+use crate::strings::S;
 use crate::viewer::Redraw;
 use crate::window::{invalidate, App};
 
+pub mod draw;
 pub mod estimate;
+mod fields;
+pub mod layout;
 pub mod save;
 pub mod saving;
+pub mod screen;
 pub mod session;
+pub mod sidebar;
+pub mod text;
 
 use estimate::{ByteCache, Estimator, Job, Maker, ESTIMATE_THREADS};
 use save::batch::{ReplaceBatch, Unrecycled, Unrestored};
 use save::{longest_replace_path, ItemResult};
-pub use saving::{defer_close, flush_at_exit, on_saved, start_save};
+pub use saving::{defer_close, flush_at_exit, on_saved};
 use saving::{Event, SaveSummary};
 pub use session::{
     drop_action, estimate_order, return_target, DropAction, Estimate, ReplaceBlock, ResizeItem,
@@ -104,6 +110,8 @@ pub struct ResizeState {
     /// The highest estimate generation handed out, across sessions: a job still running
     /// from an earlier session can never match a later one.
     last_generation: u64,
+    /// The screen's sidebar focus and number fields.
+    pub ui: screen::Ui,
 }
 
 impl Default for ResizeState {
@@ -126,6 +134,7 @@ impl Default for ResizeState {
             batch_threads: Vec::new(),
             bins: HashMap::new(),
             last_generation: 0,
+            ui: screen::Ui::default(),
         }
     }
 }
@@ -157,16 +166,6 @@ impl ResizeState {
         self.cache.clear();
         self.replace_block = None;
         Some(s)
-    }
-
-    /// A one-line state of the screen, drawn until it has its own drawing (M6 Task 6):
-    /// "크기 조정 · 2/5", or "저장하는 중… 3/5" while a save runs. `None` when closed.
-    pub fn status_line(&self) -> Option<String> {
-        let s = self.session.as_ref()?;
-        Some(match &self.saving {
-            Some(p) => format!("{} {}/{}", t(S::Saving), p.results.len(), p.total),
-            None => format!("{} · {}/{}", t(S::Resize), s.current + 1, s.items.len()),
-        })
     }
 
     fn trash(&mut self) -> Arc<ShellTrash> {
@@ -388,9 +387,7 @@ pub fn command(app: &RefCell<App>, hwnd: HWND, cmd: Command) -> bool {
         Command::Prev => step(app, hwnd, -1),
         Command::Escape if !full => leave(app, hwnd),
         // Ctrl+S saves the resized photos, as [저장 (N장)] does.
-        Command::Save => {
-            start_save(app, hwnd);
-        }
+        Command::Save => screen::save(app, hwnd),
         Command::RotateLeft
         | Command::RotateRight
         | Command::Delete
@@ -467,7 +464,6 @@ pub fn show_current(app: &RefCell<App>, hwnd: HWND) {
 
 /// New sidebar values: saved to the settings; when the result changes, the estimates
 /// start over (the old ones and their kept bytes are dropped).
-#[expect(dead_code, reason = "the resize screen's sidebar (M6 Task 6) calls it")]
 pub fn set_memory(app: &RefCell<App>, hwnd: HWND, memory: ResizeMemory) {
     {
         let Ok(mut guard) = app.try_borrow_mut() else {
@@ -489,7 +485,6 @@ pub fn set_memory(app: &RefCell<App>, hwnd: HWND, memory: ResizeMemory) {
 }
 
 /// 원본 대체 on or off. Refused (false) while it is blocked (R3) or a save runs.
-#[expect(dead_code, reason = "the resize screen's sidebar (M6 Task 6) calls it")]
 pub fn set_replace(app: &RefCell<App>, hwnd: HWND, on: bool) -> bool {
     let done = app.try_borrow_mut().is_ok_and(|mut a| {
         let state = &mut a.resize;

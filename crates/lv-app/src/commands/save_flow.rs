@@ -41,6 +41,11 @@ pub fn request_close(app: &RefCell<App>, hwnd: HWND) {
     if crate::resize::defer_close(app) {
         return;
     }
+    // The resize screen closes first, back to the photo it was opened from with its
+    // pending rotation: closing then asks about it as the viewer always does.
+    if crate::resize::is_open(app) {
+        crate::resize::leave(app, hwnd);
+    }
     leave(app, hwnd, LeaveReason::Close);
 }
 

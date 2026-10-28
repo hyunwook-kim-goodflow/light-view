@@ -8,13 +8,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 
 use crate::input;
 use crate::menu::{self, ITEMS};
+use crate::resize::screen as resize_screen;
 use crate::start;
 use crate::window::{invalidate, App};
 
-use super::{main_tree, Act, CardInput, MainInput, MenuInput, PhotoInput, ToastInput, Tree};
+use super::{
+    main_tree, Act, CardInput, MainInput, MenuInput, PhotoInput, ResizeInput, ToastInput, Tree,
+};
 
-/// The main window's tree from its state.
-pub fn main_tree_of(app: &App) -> Tree {
+/// The main window's tree from its state; `hwnd` tells whether it has the focus.
+pub fn main_tree_of(app: &App, hwnd: HWND) -> Tree {
     let name = app
         .viewer
         .current_path()
@@ -46,6 +49,17 @@ pub fn main_tree_of(app: &App) -> Tree {
             toast,
             parts: toast.parts(),
         });
+    let resize = resize_screen::geometry_of(app).and_then(|geometry| {
+        let st = &app.resize;
+        Some(ResizeInput {
+            session: st.session.as_ref()?,
+            geometry,
+            focus: resize_screen::uia_focus(app, hwnd),
+            block: st.replace_block,
+            progress: st.saving.as_ref().map(|p| (p.results.len(), p.total)),
+            lang: crate::strings::current(),
+        })
+    });
     main_tree(&MainInput {
         dip: app.dip,
         client,
@@ -56,6 +70,7 @@ pub fn main_tree_of(app: &App) -> Tree {
         menu,
         dialog: app.overlay.dialog.as_ref(),
         toast,
+        resize,
     })
 }
 
@@ -113,6 +128,7 @@ pub fn run_main(app: &RefCell<App>, hwnd: HWND, act: Act) {
                 .and_then(|mut a| a.overlay.activate(k));
             input::overlay_changed(app, hwnd, event);
         }
+        Act::Resize(hit) if !dialog && !menu => resize_screen::uia_act(app, hwnd, hit),
         Act::Undo if !dialog => {
             let event = app
                 .try_borrow_mut()
