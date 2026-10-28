@@ -33,6 +33,25 @@ pub fn png_pixel(rgba: [u8; 4]) -> Vec<u8> {
     encode_png(&img)
 }
 
+/// `w`x`h` PNG of one straight-alpha RGBA color.
+pub fn png_solid(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+    encode_png(&RgbaImage::from_pixel(w, h, Rgba(rgba)))
+}
+
+/// `w`x`h` opaque straight RGBA8 of deterministic per-channel noise (xorshift from `seed`).
+pub fn rgba_noise(w: u32, h: u32, seed: u32) -> Vec<u8> {
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for _ in 0..u64::from(w) * u64::from(h) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let [r, g, b, _] = state.to_le_bytes();
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+    out
+}
+
 /// 16x8 JPEG, left 8 columns red, right 8 columns blue, with an EXIF Orientation APP1
 /// segment inserted right after SOI.
 pub fn jpeg_16x8_with_orientation(orientation: u16) -> Vec<u8> {
