@@ -24,11 +24,13 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
 };
 
-use crate::delete::{check_file, PendingDelete, Refusal, Trash};
+use crate::delete::{check_file, Refusal};
 use crate::save::atomic::{
     find_files, move_no_replace, notify_shell, process_running, restore_times, sweep_stale_temps,
     temp_name, TempFile, MAX_NAME,
 };
+
+pub mod batch;
 
 /// Why one photo was not saved. Nothing of it changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,7 +49,7 @@ pub enum FailReason {
 pub enum ItemResult {
     Saved(PathBuf),
     /// The result is at `result`; the original waits, hidden, at `backup` until the save
-    /// is committed or undone ([`ReplaceBatch`]).
+    /// is committed or undone ([`batch::ReplaceBatch`]).
     Replaced {
         result: PathBuf,
         backup: PathBuf,
@@ -312,11 +314,6 @@ fn set_hidden(path: &Path, hidden: bool) {
     }
 }
 
-fn is_hidden(path: &Path) -> bool {
-    fs::metadata(to_extended_path(path))
-        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0)
-}
-
 /// The `n` of this process's next backup name.
 fn next_backup() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -344,150 +341,57 @@ fn parse_backup_name(file: &OsStr) -> Option<(OsString, u32)> {
     (!name.is_empty() && backup_name(&name, pid, n) == file).then_some((name, pid))
 }
 
-/// The photos one save replaced. Either committed when its toast goes or the app ends
-/// (the backups go to the Recycle Bin) or undone; a batch only dropped leaves its
-/// backups to [`recover_backups`] on a later start.
-#[derive(Default)]
-pub struct ReplaceBatch {
-    items: Vec<Replaced>,
-}
+/// Most `(원본 N)` names tried.
+const MAX_KEEP_NAMES: u32 = 100;
 
-/// One replaced photo, with the identities its files had right after the save.
-struct Replaced {
-    result: PathBuf,
-    result_id: Option<FileIdentity>,
-    backup: PathBuf,
-    backup_id: Option<FileIdentity>,
-    original: PathBuf,
-}
-
-impl ReplaceBatch {
-    pub fn new() -> ReplaceBatch {
-        ReplaceBatch::default()
-    }
-
-    /// Adds a photo [`save_replace`] just replaced: its result and backup (from
-    /// [`ItemResult::Replaced`]) and the original's path. Their identities are read now;
-    /// commit and undo act only on files that still have them.
-    pub fn push(&mut self, result: &Path, backup: &Path, original: &Path) {
-        self.items.push(Replaced {
-            result: result.to_path_buf(),
-            result_id: identity::capture(result).ok(),
-            backup: backup.to_path_buf(),
-            backup_id: identity::capture(backup).ok(),
-            original: original.to_path_buf(),
-        });
-    }
-
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    /// Sends the backups to the Recycle Bin through `trash` (which re-checks each). The
-    /// caller flushes `trash` before the app ends.
-    pub fn commit(self, trash: &dyn Trash) {
-        for item in &self.items {
-            recycle_backup(item, trash);
+/// Makes the backup at `backup` of the photo `original` a visible file beside it, never
+/// replacing anything: renamed to `<stem> (원본).<ext>`, else `<stem> (원본 2).<ext>`,
+/// `(원본 3)`… and unhidden. If no name works it is unhidden where it is. Returns where
+/// it is.
+fn keep_visible(backup: &Path, original: &Path) -> PathBuf {
+    let stem = original.file_stem().unwrap_or_default();
+    let ext = original.extension();
+    let name = |n: u32| {
+        let mut name = stem.to_os_string();
+        name.push(" (원본");
+        if n > 1 {
+            name.push(format!(" {n}"));
         }
-    }
-
-    /// Undoes the save (spec §10): every result unchanged since the save goes to the
-    /// Recycle Bin, then every backup goes back under its original name if that name is
-    /// free. Returns the originals not fully restored, with the reason: one whose name is
-    /// still taken (its result changed, or the Recycle Bin did not take it) — its backup
-    /// then goes to the Recycle Bin as on commit — and one that came back beside a result
-    /// that stays.
-    pub fn undo(self, trash: &dyn Trash) -> Vec<(PathBuf, String)> {
-        let mut sent = Vec::with_capacity(self.items.len());
-        for item in &self.items {
-            let id = item
-                .result_id
-                .as_ref()
-                .filter(|id| check_file(&item.result, id).is_ok());
-            // The result has the original's hidden attribute (`replace` copied it).
-            let hidden = id.is_some() && is_hidden(&item.result);
-            if let Some(id) = id {
-                trash.recycle(PendingDelete {
-                    path: item.result.clone(),
-                    id: id.clone(),
-                });
-            }
-            sent.push((id.is_some(), hidden));
+        name.push(")");
+        if let Some(ext) = ext {
+            name.push(".");
+            name.push(ext);
         }
-        trash.flush(UNDO_WAIT);
-
-        let mut failed = Vec::new();
-        for (item, (sent, hidden)) in self.items.iter().zip(sent) {
-            let result_stays = !sent
-                || item
-                    .result_id
-                    .as_ref()
-                    .is_some_and(|id| identity::verify(&item.result, id) != Verify::Missing);
-            match restore_backup(item, hidden) {
-                Ok(()) if !result_stays => {}
-                Ok(()) => failed.push((
-                    item.original.clone(),
-                    if sent {
-                        "the resized file could not go to the Recycle Bin"
-                    } else {
-                        "the resized file changed after the save and stays"
-                    }
-                    .to_owned(),
-                )),
-                Err(why) => {
-                    recycle_backup(item, trash);
-                    failed.push((item.original.clone(), why));
-                }
-            }
-        }
-        failed
-    }
+        original.with_file_name(name)
+    };
+    let from = to_extended_path(backup);
+    let at = (1..=MAX_KEEP_NAMES)
+        .map(name)
+        .find(|to| move_no_replace(&from, &to_extended_path(to)).is_ok())
+        .unwrap_or_else(|| backup.to_path_buf());
+    set_hidden(&to_extended_path(&at), false);
+    eprintln!(
+        "light-view: the original of {} is kept at {}",
+        original.display(),
+        at.display()
+    );
+    at
 }
 
-/// Puts `item`'s backup back under the original's name, hidden if `hidden`.
-fn restore_backup(item: &Replaced, hidden: bool) -> Result<(), String> {
-    if taken(&item.original) {
-        return Err("another file has the original's name".to_owned());
-    }
-    let unchanged = item
-        .backup_id
-        .as_ref()
-        .is_some_and(|id| identity::verify(&item.backup, id) == Verify::Same);
-    if !unchanged {
-        return Err("the original changed or is gone".to_owned());
-    }
-    let original = to_extended_path(&item.original);
-    move_no_replace(&to_extended_path(&item.backup), &original)
-        .map_err(|e| format!("the original could not get its name back: {e}"))?;
-    set_hidden(&original, hidden);
-    Ok(())
+fn is_hidden(path: &Path) -> bool {
+    fs::metadata(to_extended_path(path))
+        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0)
 }
 
-fn recycle_backup(item: &Replaced, trash: &dyn Trash) {
-    match &item.backup_id {
-        Some(id) => trash.recycle(PendingDelete {
-            path: item.backup.clone(),
-            id: id.clone(),
-        }),
-        None => eprintln!(
-            "light-view: the backup {} could not be read and stays",
-            item.backup.display()
-        ),
-    }
-}
-
-/// Crash recovery (ruling R2): puts every backup in `dir` left by a process that is no
-/// longer running back under its original name, unhidden, when that name is free. A
-/// backup whose name is taken stays; nothing is deleted. Only regular files named
-/// exactly as [`backup_name`] makes count. Returns how many came back.
+/// Crash recovery (ruling R2): every backup in `dir` left by a process that is no longer
+/// running goes back under its original name, unhidden, when that name is free; when the
+/// name is taken it becomes a visible `<stem> (원본).<ext>` beside it ([`keep_visible`]).
+/// Nothing is deleted. Only regular files named exactly as [`backup_name`] makes count.
+/// Returns how many backups were handled either way.
 pub fn recover_backups(dir: &Path) -> usize {
     let dir = to_extended_path(dir);
     let own = std::process::id();
-    let mut restored = 0;
+    let mut handled = 0;
     for (file, attrs) in find_files(&dir.join(".*.lvbak-*")) {
         let Some((name, pid)) = parse_backup_name(&file) else {
             continue;
@@ -501,26 +405,29 @@ pub fn recover_backups(dir: &Path) -> usize {
             continue;
         }
         let (backup, original) = (dir.join(&file), dir.join(&name));
-        if taken(&original) {
-            continue;
-        }
-        match move_no_replace(&backup, &original) {
-            Ok(()) => {
-                set_hidden(&original, false);
-                eprintln!(
-                    "light-view: put back {} after an unfinished save",
-                    original.display()
-                );
-                restored += 1;
+        if !taken(&original) {
+            match move_no_replace(&backup, &original) {
+                Ok(()) => {
+                    set_hidden(&original, false);
+                    eprintln!(
+                        "light-view: put back {} after an unfinished save",
+                        original.display()
+                    );
+                    handled += 1;
+                    continue;
+                }
+                Err(e) => eprintln!("light-view: {} stays: {e}", backup.display()),
             }
-            Err(e) => eprintln!("light-view: {} stays: {e}", backup.display()),
         }
+        keep_visible(&backup, &original);
+        handled += 1;
     }
-    restored
+    handled
 }
 
 #[cfg(test)]
 mod tests {
+    use super::batch::{ReplaceBatch, UndoReason, Unrecycled, Unrestored};
     use super::*;
     use std::fs::{self, FileTimes, OpenOptions};
     use std::os::windows::ffi::OsStrExt;
@@ -744,7 +651,7 @@ mod tests {
             batch.push(&result, &backup, &src);
             backups.push(file_name(&backup));
         }
-        batch.commit(&trash);
+        assert!(batch.commit(&trash).is_empty());
         backups.sort();
         assert_eq!(trash.binned(), backups);
         assert_eq!(names(f.path()), ["a.jpg", "b.jpg"]);
@@ -821,7 +728,7 @@ mod tests {
         fs::create_dir(f.path().join(&blocker)).unwrap();
         let id = capture(&src).unwrap();
         let r = save_replace(&src, &id, b"resized", OutputFormat::Jpeg);
-        assert!(matches!(r, ItemResult::Failed(_)), "{r:?}");
+        assert_eq!(r, ItemResult::Failed(FailReason::ReadOnly));
         assert_eq!(read(&src), b"original");
         assert!(!hidden(&src));
         assert_eq!(capture(&src).unwrap(), id);
@@ -833,7 +740,7 @@ mod tests {
         let f = folder();
         let trash = FakeTrash::new(f.path(), true);
         let mut batch = ReplaceBatch::new();
-        // Same name: the edited result keeps the name, so the original cannot come back.
+        // Same name: the edited result keeps the name, so the original goes beside it.
         let a = put(f.path(), "a.jpg", b"a");
         let (ra, ba) = replaced(save_replace(
             &a,
@@ -853,16 +760,116 @@ mod tests {
         batch.push(&rb, &bb, &b);
         fs::write(&ra, b"edited after").unwrap();
         fs::write(&rb, b"edited after").unwrap();
-        let failed = batch.undo(&trash);
-        let failed: Vec<PathBuf> = failed.into_iter().map(|(p, _)| p).collect();
-        assert_eq!(failed, [a.clone(), b.clone()]);
-        // Edited results are never thrown away.
+        let kept = f.path().join("a (원본).jpg");
+        assert_eq!(
+            batch.undo(&trash),
+            [
+                Unrestored {
+                    original: a.clone(),
+                    reason: UndoReason::ResultChanged,
+                    kept_at: Some(kept.clone()),
+                },
+                Unrestored {
+                    original: b.clone(),
+                    reason: UndoReason::ResultChanged,
+                    kept_at: None,
+                },
+            ]
+        );
+        // Edited results are never thrown away, nor is any original.
         assert_eq!(read(&ra), b"edited after");
         assert_eq!(read(&rb), b"edited after");
         assert_eq!(read(&b), b"b");
-        // The original that could not come back went to the Recycle Bin, as on commit.
-        assert_eq!(trash.binned(), [file_name(&ba)]);
-        assert_eq!(names(f.path()), ["a.jpg", "b.HEIC", "b.jpg"]);
+        assert_eq!(read(&kept), b"a");
+        assert!(!hidden(&kept));
+        assert!(trash.binned().is_empty());
+        assert_eq!(
+            names(f.path()),
+            ["a (원본).jpg", "a.jpg", "b.HEIC", "b.jpg"]
+        );
+    }
+
+    #[test]
+    fn undo_keeps_the_original_visible_when_the_bin_refuses() {
+        let f = folder();
+        let trash = FakeTrash::refusing(f.path());
+        // The first keep name is taken: the next one is used.
+        put(f.path(), "a (원본).jpg", b"someone else's");
+        let mut batch = ReplaceBatch::new();
+        let a = put(f.path(), "a.jpg", b"a");
+        let (ra, ba) = replaced(save_replace(
+            &a,
+            &capture(&a).unwrap(),
+            b"resized",
+            OutputFormat::Jpeg,
+        ));
+        batch.push(&ra, &ba, &a);
+        let b = put(f.path(), "b.HEIC", b"b");
+        let (rb, bb) = replaced(save_replace(
+            &b,
+            &capture(&b).unwrap(),
+            b"resized",
+            OutputFormat::Jpeg,
+        ));
+        batch.push(&rb, &bb, &b);
+        let failed = batch.undo(&trash);
+        let kept = f.path().join("a (원본 2).jpg");
+        assert_eq!(
+            failed,
+            [
+                Unrestored {
+                    original: a.clone(),
+                    reason: UndoReason::ResultNotRecycled,
+                    kept_at: Some(kept.clone()),
+                },
+                Unrestored {
+                    original: b.clone(),
+                    reason: UndoReason::ResultNotRecycled,
+                    kept_at: None,
+                },
+            ]
+        );
+        assert_eq!(read(&kept), b"a");
+        assert!(!hidden(&kept));
+        assert_eq!(read(&b), b"b");
+        assert!(!hidden(&b));
+        assert_eq!(read(&f.path().join("a (원본).jpg")), b"someone else's");
+        // Nothing was recycled; both results stay.
+        assert!(trash.binned().is_empty());
+        assert!(trash.results.borrow().iter().all(|(_, r)| r.is_err()));
+        assert_eq!(read(&ra), b"resized");
+        assert_eq!(read(&rb), b"resized");
+        assert_eq!(
+            names(f.path()),
+            ["a (원본 2).jpg", "a (원본).jpg", "a.jpg", "b.HEIC", "b.jpg"]
+        );
+    }
+
+    #[test]
+    fn commit_keeps_unrecycled_originals_visible() {
+        let f = folder();
+        let trash = FakeTrash::refusing(f.path());
+        let mut batch = ReplaceBatch::new();
+        let a = put(f.path(), "a.jpg", b"a");
+        let (ra, ba) = replaced(save_replace(
+            &a,
+            &capture(&a).unwrap(),
+            b"resized",
+            OutputFormat::Jpeg,
+        ));
+        batch.push(&ra, &ba, &a);
+        let kept = f.path().join("a (원본).jpg");
+        assert_eq!(
+            batch.commit(&trash),
+            [Unrecycled {
+                original: a.clone(),
+                kept_at: kept.clone(),
+            }]
+        );
+        assert_eq!(read(&kept), b"a");
+        assert!(!hidden(&kept));
+        assert_eq!(read(&a), b"resized");
+        assert_eq!(names(f.path()), ["a (원본).jpg", "a.jpg"]);
     }
 
     #[test]
@@ -877,9 +884,16 @@ mod tests {
             .status()
             .unwrap();
         assert!(hide.success());
-        // Crashed after the result took the name: the backup stays.
+        // Crashed after the result took the name (or its commit failed): the original
+        // becomes visible beside it.
         put(f.path(), "a.jpg", b"result");
-        put(f.path(), &format!(".a.jpg.lvbak-{dead}-1"), b"a");
+        let stranded = put(f.path(), &format!(".a.jpg.lvbak-{dead}-1"), b"a");
+        assert!(Command::new("attrib")
+            .arg("+h")
+            .arg(&stranded)
+            .status()
+            .unwrap()
+            .success());
         // A running process's backup (this one's) is not touched.
         put(
             f.path(),
@@ -888,12 +902,16 @@ mod tests {
         );
         // Not a backup name.
         put(f.path(), &format!(".c.jpg.lvbak-{dead}-x"), b"c");
-        assert_eq!(recover_backups(f.path()), 1);
+        assert_eq!(recover_backups(f.path()), 2);
         let back = f.path().join("IMG.HEIC");
         assert_eq!(read(&back), b"heic");
         assert!(!hidden(&back));
+        let kept = f.path().join("a (원본).jpg");
+        assert_eq!(read(&kept), b"a");
+        assert!(!hidden(&kept));
+        assert_eq!(read(&f.path().join("a.jpg")), b"result");
         let mut want = vec![
-            format!(".a.jpg.lvbak-{dead}-1"),
+            "a (원본).jpg".to_owned(),
             format!(".b.jpg.lvbak-{}-2", std::process::id()),
             format!(".c.jpg.lvbak-{dead}-x"),
             "IMG.HEIC".to_owned(),
