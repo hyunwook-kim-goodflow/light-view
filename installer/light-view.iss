@@ -287,6 +287,9 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,light-view}"; Flags
 
 [UninstallRun]
 ; Before the files go: delete the worker's AppContainer profile (exits 0, shows nothing).
+; It runs after CurUninstallStepChanged(usUninstall) has removed our handler classes
+; (RemoveHandlerClasses), so no thumbnail call can start a worker and make the profile
+; again (review M6).
 ; An all-users uninstall runs this as the user who uninstalls; other users' profiles stay
 ; (README).
 Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteAppContainerProfile"
@@ -540,10 +543,28 @@ begin
     UndoTakeOvers();
 end;
 
+// Our handler classes (the keys [Registry] makes and deletes with uninsdeletekey, and the
+// PreviewHandlers value), removed at usUninstall: before [UninstallRun] deletes the worker's
+// AppContainer profile, so Explorer cannot create a handler that starts a worker (and so
+// makes the profile again) in between (review M6). They are ours alone (fixed CLSIDs).
+procedure RemoveHandlerClasses();
+begin
+  RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#ThumbnailClsid}'));
+  if IsAdminInstallMode then begin
+    RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#PreviewClsid}'));
+    RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#DetailsClsid}'));
+    RegDeleteValue(HKA, 'Software\Microsoft\Windows\CurrentVersion\PreviewHandlers', ExpandConstant('{#PreviewClsid}'));
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usUninstall then
+  // usUninstall comes before the uninstall log runs ([UninstallRun] first, then the files
+  // and keys).
+  if CurUninstallStep = usUninstall then begin
     AllShared(GiveBack);
+    RemoveHandlerClasses();
+  end;
   if CurUninstallStep = usPostUninstall then
     DeleteShellDlls(True);
 end;
