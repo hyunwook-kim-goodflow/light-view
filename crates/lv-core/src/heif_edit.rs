@@ -52,9 +52,11 @@ use crate::exif_edit::set_tiff_orientation_in_place;
 
 mod edit;
 mod parse;
+mod size;
 
 use edit::{add_irot, verify};
 use parse::{children, full_box, item_ids_of_type, parse, BoxRef, Extent, Heif, IlocItem, Reader};
+pub use size::display_size;
 
 /// Most boxes accepted in one container.
 const MAX_BOXES: usize = 4096;
