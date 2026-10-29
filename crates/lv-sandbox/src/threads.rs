@@ -81,8 +81,9 @@ pub fn live_threads() -> usize {
 }
 
 /// Starts a thread named `name` running `f`, counted in [`live_threads`] until its OS thread
-/// has exited.
-pub(crate) fn spawn<F>(name: String, f: F) -> io::Result<()>
+/// has exited. Exported as `spawn_counted` for the Explorer extension's own threads, which
+/// must hold its DLL in the same way.
+pub fn spawn<F>(name: String, f: F) -> io::Result<()>
 where
     F: FnOnce() + Send + 'static,
 {
