@@ -318,6 +318,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lv-shell"
+version = "0.1.1"
+dependencies = [
+ "lv-ipc",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "lv-webp"
 version = "0.1.1"
 dependencies = [
