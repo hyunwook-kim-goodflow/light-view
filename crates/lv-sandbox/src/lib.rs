@@ -11,9 +11,11 @@ pub mod appcontainer;
 mod once;
 pub mod process;
 pub mod sandbox;
+mod threads;
 
 pub use appcontainer::delete_profile;
 pub use once::{run_once, RunError};
+pub use threads::live_threads;
 
 #[cfg(test)]
 pub(crate) mod test_support;

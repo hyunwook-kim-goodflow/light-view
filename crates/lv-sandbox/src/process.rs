@@ -5,13 +5,13 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use lv_ipc::{read_response, write_request, IpcError, Request, Response};
 
 use crate::appcontainer::Container;
 use crate::sandbox::{self, log, Sandboxed, StdinMonitor};
+use crate::threads;
 
 /// How long a failed first request waits for the writer thread to report its write.
 pub const WRITE_SETTLE: Duration = Duration::from_secs(1);
@@ -81,47 +81,44 @@ impl Worker {
     ) -> Result<Worker, String> {
         let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args, mitigations, container)?;
         let pid = sandboxed.pid;
-        let named = |what: &str| thread::Builder::new().name(format!("lv-worker {pid} {what}"));
+        let named = |what: &str| format!("lv-worker {pid} {what}");
 
         let stderr = pipes.stderr;
-        named("stderr")
-            .spawn(move || drain_stderr(pid, stderr))
+        threads::spawn(named("stderr"), move || drain_stderr(pid, stderr))
             .map_err(|e| format!("stderr thread: {e}"))?;
 
         let (events_tx, events) = mpsc::channel();
         let mut stdout = BufReader::with_capacity(64 * 1024, pipes.stdout);
         let response_tx = events_tx.clone();
-        named("reader")
-            .spawn(move || loop {
-                let message = read_response(&mut stdout, response_cap);
-                let last = !matches!(message, Ok(Some(_)));
-                if response_tx.send(Event::Response(message)).is_err() || last {
-                    break;
-                }
-            })
-            .map_err(|e| format!("reader thread: {e}"))?;
+        threads::spawn(named("reader"), move || loop {
+            let message = read_response(&mut stdout, response_cap);
+            let last = !matches!(message, Ok(Some(_)));
+            if response_tx.send(Event::Response(message)).is_err() || last {
+                break;
+            }
+        })
+        .map_err(|e| format!("reader thread: {e}"))?;
 
         let (requests, request_rx) = mpsc::channel::<Request>();
         let mut stdin = BufWriter::new(pipes.stdin);
-        named("writer")
-            .spawn(move || {
-                for request in request_rx {
-                    let id = request.id();
-                    // lv-ipc validates a message before writing any of it, so InvalidInput
-                    // leaves the pipe untouched and the writer can go on.
-                    let outcome = match write_request(&mut stdin, &request) {
-                        Err(e) if e.kind() == ErrorKind::InvalidInput => WriteOutcome::Rejected,
-                        Err(_) => WriteOutcome::Failed,
-                        Ok(()) if stdin.flush().is_ok() => WriteOutcome::Sent,
-                        Ok(()) => WriteOutcome::Failed,
-                    };
-                    let _ = events_tx.send(Event::Written { id, outcome });
-                    if outcome == WriteOutcome::Failed {
-                        break;
-                    }
+        threads::spawn(named("writer"), move || {
+            for request in request_rx {
+                let id = request.id();
+                // lv-ipc validates a message before writing any of it, so InvalidInput
+                // leaves the pipe untouched and the writer can go on.
+                let outcome = match write_request(&mut stdin, &request) {
+                    Err(e) if e.kind() == ErrorKind::InvalidInput => WriteOutcome::Rejected,
+                    Err(_) => WriteOutcome::Failed,
+                    Ok(()) if stdin.flush().is_ok() => WriteOutcome::Sent,
+                    Ok(()) => WriteOutcome::Failed,
+                };
+                let _ = events_tx.send(Event::Written { id, outcome });
+                if outcome == WriteOutcome::Failed {
+                    break;
                 }
-            })
-            .map_err(|e| format!("writer thread: {e}"))?;
+            }
+        })
+        .map_err(|e| format!("writer thread: {e}"))?;
 
         Ok(Worker {
             sandboxed,

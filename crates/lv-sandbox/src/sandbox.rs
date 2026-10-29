@@ -118,8 +118,11 @@ impl StdinMonitor {
     }
 }
 
+/// Writes `msg` to stderr. Never panics: a failed write is ignored (in Explorer, where the
+/// shell extension runs, there may be no stderr or a broken one).
 pub fn log(msg: &str) {
-    eprintln!("light-view: worker: {msg}");
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "light-view: worker: {msg}");
 }
 
 /// Whether CreateProcessAsUserW refused PROC_THREAD_ATTRIBUTE_JOB_LIST once (before
