@@ -164,7 +164,9 @@ fn short_form(path: &Path) -> Option<PathBuf> {
 #[test]
 fn short_form_of_a_long_path_opens_by_its_long_name() {
     let root = tempfile::Builder::new().prefix("lv-m6-").tempdir().unwrap();
-    let mut dir = root.path().to_path_buf();
+    // %TEMP% itself can be in 8.3 form (as on CI runners: `C:\Users\RUNNER~1\...`), and
+    // the app expands every component, so the expected paths use the real names too.
+    let mut dir = crate::shell::long_form(root.path());
     while units(&dir) < 300 {
         dir.push(format!("{} folder", "long".repeat(9)));
     }
