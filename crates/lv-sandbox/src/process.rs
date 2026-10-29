@@ -6,29 +6,30 @@ use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lv_ipc::{read_response, write_request, IpcError, Request, Response};
 
-use super::appcontainer::Container;
-use super::protocol::response_cap;
-use super::sandbox::{self, log, Sandboxed, StdinMonitor};
-use super::WRITE_SETTLE;
+use crate::appcontainer::Container;
+use crate::sandbox::{self, log, Sandboxed, StdinMonitor};
+
+/// How long a failed first request waits for the writer thread to report its write.
+pub const WRITE_SETTLE: Duration = Duration::from_secs(1);
 
 /// Longest worker stderr line copied into the log, in bytes.
 const MAX_LOG_LINE: usize = 4096;
 
-pub(super) struct Worker {
-    pub(super) sandboxed: Sandboxed,
+pub struct Worker {
+    pub sandboxed: Sandboxed,
     /// Has given at least one valid answer, so it counts as started.
-    pub(super) answered: bool,
-    pub(super) requests: Sender<Request>,
+    pub answered: bool,
+    pub requests: Sender<Request>,
     /// What the writer and reader threads report, in one channel so a call waits on both.
-    pub(super) events: Receiver<Event>,
-    pub(super) stdin_monitor: StdinMonitor,
+    pub events: Receiver<Event>,
+    pub stdin_monitor: StdinMonitor,
 }
 
-pub(super) enum Event {
+pub enum Event {
     /// The writer's outcome for request `id`.
     Written { id: u64, outcome: WriteOutcome },
     /// The next message from the worker, or the end of its output.
@@ -36,7 +37,7 @@ pub(super) enum Event {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WriteOutcome {
+pub enum WriteOutcome {
     /// Written and flushed.
     Sent,
     /// The request could not be encoded. Nothing was written and the worker saw nothing:
@@ -51,7 +52,7 @@ pub(super) enum WriteOutcome {
 /// stdin pipe, or the writer could not put them there (failed, or is still blocked on a full
 /// pipe). If the pipe cannot be inspected, assume the worker read it: wrongly keeping the
 /// mitigations only costs a start failure, wrongly dropping them weakens the sandbox.
-pub(super) fn took_request(worker: &Worker, id: u64, mut wrote: Option<bool>) -> bool {
+pub fn took_request(worker: &Worker, id: u64, mut wrote: Option<bool>) -> bool {
     let deadline = Instant::now() + WRITE_SETTLE;
     while wrote.is_none() {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -68,13 +69,15 @@ pub(super) fn took_request(worker: &Worker, id: u64, mut wrote: Option<bool>) ->
 
 impl Worker {
     /// Spawns a sandboxed worker with its stderr, reader and writer threads. The threads end
-    /// when the process does (its pipes close) or the `Worker` is dropped.
-    pub(super) fn start(
+    /// when the process does (its pipes close) or the `Worker` is dropped. The reader
+    /// refuses any message whose payload is over `response_cap` bytes.
+    pub fn start(
         exe: &Path,
         max_pixels: u64,
         args: &[&str],
         mitigations: bool,
         container: Option<&Container>,
+        response_cap: u64,
     ) -> Result<Worker, String> {
         let (sandboxed, pipes) = sandbox::spawn(exe, max_pixels, args, mitigations, container)?;
         let pid = sandboxed.pid;
@@ -86,12 +89,11 @@ impl Worker {
             .map_err(|e| format!("stderr thread: {e}"))?;
 
         let (events_tx, events) = mpsc::channel();
-        let cap = response_cap(max_pixels);
         let mut stdout = BufReader::with_capacity(64 * 1024, pipes.stdout);
         let response_tx = events_tx.clone();
         named("reader")
             .spawn(move || loop {
-                let message = read_response(&mut stdout, cap);
+                let message = read_response(&mut stdout, response_cap);
                 let last = !matches!(message, Ok(Some(_)));
                 if response_tx.send(Event::Response(message)).is_err() || last {
                     break;

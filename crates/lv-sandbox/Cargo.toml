@@ -1,0 +1,29 @@
+[package]
+name = "lv-sandbox"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Starts light-view's decode worker in its sandbox (low integrity token, kill-on-close Job, AppContainer when the folder allows it, creation mitigations)."
+
+[features]
+# Hooks other crates' tests use (a container whose start always fails). Never enabled in
+# a release build: only dev-dependencies turn it on.
+test-support = []
+
+[dependencies]
+lv-ipc = { path = "../lv-ipc" }
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+]
