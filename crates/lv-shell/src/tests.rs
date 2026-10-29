@@ -14,7 +14,7 @@ use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_UNEXPECTED, S_FALSE, S_OK,
 };
 use windows::Win32::Graphics::Gdi::HBITMAP;
-use windows::Win32::System::Com::{IClassFactory, IStream, STREAM_SEEK_CUR};
+use windows::Win32::System::Com::{IClassFactory, IStream, STREAM_SEEK_CUR, STREAM_SEEK_SET};
 use windows::Win32::UI::Shell::PropertiesSystem::IInitializeWithStream;
 use windows::Win32::UI::Shell::{IThumbnailProvider, SHCreateMemStream, WTSAT_ARGB, WTS_ALPHATYPE};
 
@@ -133,6 +133,22 @@ fn corrupt_heic_fails_without_panic() {
         assert!(result.is_err(), "{} bytes", bytes.len());
         assert!(bitmap.is_invalid(), "no bitmap on failure");
     }
+}
+
+/// A stream left in the middle (say, by an earlier reader) is still read from its start.
+#[test]
+fn thumbnail_reads_the_stream_from_its_start() {
+    let _serial = serial();
+    let stream = mem_stream(&sample());
+    // SAFETY: a valid stream.
+    unsafe { stream.Seek(100, STREAM_SEEK_SET, None) }.unwrap();
+    let provider: IThumbnailProvider = Provider::new(built_worker()).into();
+    let init: IInitializeWithStream = provider.cast().unwrap();
+    // SAFETY: a valid stream.
+    unsafe { init.Initialize(&stream, 0) }.expect("Initialize");
+    let (bitmap, _) = thumbnail(&provider, 64).expect("GetThumbnail");
+    let (dib, _) = take(bitmap);
+    assert_eq!(dib.dsBm.bmHeight, 64);
 }
 
 #[test]
