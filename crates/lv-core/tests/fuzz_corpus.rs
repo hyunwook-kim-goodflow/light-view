@@ -26,11 +26,12 @@ type Entry = fn(&[u8]);
 type Seeds = Vec<(&'static str, Vec<u8>)>;
 
 /// Every fuzz target and its entry function, as `fuzz/fuzz_targets/<name>.rs` calls it.
-const TARGETS: [(&str, Entry); 6] = [
+const TARGETS: [(&str, Entry); 7] = [
     ("format_decode", fuzzing::format_decode),
     ("exif_info", fuzzing::exif_info),
     ("exif_edit", fuzzing::exif_edit),
     ("heif_edit", fuzzing::heif_edit),
+    ("heif_details", fuzzing::heif_details),
     ("jpeg_markers", fuzzing::jpeg_markers),
     ("ipc_frame", lv_ipc::fuzzing::ipc_frame),
 ];
@@ -127,6 +128,21 @@ fn seeds_reach_the_parsers() {
         lv_core::heif_edit::read_rotation(&seed("heif_edit", "irot-q3.bin")[1..]),
         Ok(1)
     );
+    for file in seeds("heif_details") {
+        let data = fs::read(&file).unwrap();
+        let (item, heif) = (u32::from(data[0]), &data[1..]);
+        let name = file.display();
+        assert!(lv_core::heif_edit::display_size(heif).is_ok(), "{name}");
+        assert!(lv_core::heif_edit::turn_steps(heif, item).is_ok(), "{name}");
+    }
+    assert_eq!(
+        lv_core::heif_edit::display_size(&seed("heif_details", "irot-imir-item1.bin")[1..]),
+        Ok((48, 64))
+    );
+    assert!(
+        lv_core::exif_info::camera_facts(&seed("heif_details", "exif-item2.bin")[1..])
+            .is_some_and(|f| f != Default::default())
+    );
     for file in seeds("jpeg_markers") {
         assert!(lv_core::jpeg_check::inspect(&fs::read(&file).unwrap()).is_ok());
     }
@@ -158,11 +174,12 @@ fn seeds_reach_the_parsers() {
 #[test]
 #[ignore = "rewrites testdata/fuzz; run by hand"]
 fn write_fuzz_seeds() {
-    let sets: [(&str, Seeds); 6] = [
+    let sets: [(&str, Seeds); 7] = [
         ("format_decode", format_decode_seeds()),
         ("exif_info", exif_info_seeds()),
         ("exif_edit", exif_edit_seeds()),
         ("heif_edit", heif_edit_seeds()),
+        ("heif_details", heif_details_seeds()),
         ("jpeg_markers", jpeg_markers_seeds()),
         ("ipc_frame", ipc_frame_seeds()),
     ];
@@ -741,6 +758,25 @@ fn heif_edit_seeds() -> Seeds {
         ("plain-q1.bin", with_quarters(1, heif_plain())),
         ("irot-q3.bin", with_quarters(3, heif_irot())),
         ("exif-thumb-q2.bin", with_quarters(2, heif_exif_thumb())),
+    ]
+}
+
+/// The first byte is the item `turn_steps` reads.
+fn heif_details_seeds() -> Seeds {
+    let for_item = |item: u8, heif: Vec<u8>| {
+        let mut v = vec![item];
+        v.extend(heif);
+        v
+    };
+    let turned = heif(
+        &[coded(1, vec![1, 2, 3])],
+        &[ispe(64, 48), bx(b"irot", &[3]), bx(b"imir", &[1])],
+        &[],
+    );
+    vec![
+        ("plain-item1.bin", for_item(1, heif_plain())),
+        ("irot-imir-item1.bin", for_item(1, turned)),
+        ("exif-item2.bin", for_item(2, heif_exif_thumb())),
     ]
 }
 

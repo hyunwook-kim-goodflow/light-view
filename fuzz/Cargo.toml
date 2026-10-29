@@ -57,6 +57,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "heif_details"
+path = "fuzz_targets/heif_details.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "jpeg_markers"
 path = "fuzz_targets/jpeg_markers.rs"
 test = false
