@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lv-core", "crates/lv-app", "crates/lv-bench", "crates/lv-heif", "crates/lv-ipc", "crates/lv-jpegtran", "crates/lv-webp", "crates/lv-worker"]
+members = ["crates/lv-core", "crates/lv-app", "crates/lv-bench", "crates/lv-heif", "crates/lv-ipc", "crates/lv-jpegtran", "crates/lv-shell", "crates/lv-webp", "crates/lv-worker"]
 # Fuzz targets: their own workspace, built with cargo-fuzz on nightly.
 exclude = ["fuzz"]
 
