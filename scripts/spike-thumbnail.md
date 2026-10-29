@@ -54,3 +54,60 @@ Removed `HKCU\Software\Classes\.lvthumbtest` and
 `DisableProcessIsolation` and `AppID` values) and the whole `%TEMP%\lv-m7-spike` folder.
 The AppContainer profile pre-existed and was left as is. Explorer's thumbnail cache may hold
 entries for the deleted test files; harmless.
+
+# Spike 1b: per-user (HKCU) preview handler (M7 Task 1b)
+
+Same machine and day. Code: `crates/lv-shell/src/preview.rs` (an `IPreviewHandler` +
+`IInitializeWithStream` + `IObjectWithSite` + `IOleWindow` that opens a magenta child window
+and, in `DoPreview`, logs its host and runs one sandboxed worker decode) and the harness
+`crates/lv-shell/examples/spike_preview_host.rs`. The harness does what the preview pane
+does, from its own process, so Explorer and the user's preview-pane setting (off on this PC)
+stay untouched: it resolves the handler through the association
+(`AssocQueryStringW(ASSOCSTR_SHELLEXTENSION, "{8895b1c6-...}")`), reads the
+`PreviewHandlers` value, `CoCreateInstance(CLSCTX_LOCAL_SERVER)` (COM starts the surrogate
+named by the class's `AppID`, prevhost.exe), `Initialize` with a read-only stream,
+`SetWindow`/`SetRect` on a window of its own, `DoPreview`, `PrintWindow` of that window.
+
+## Setup
+
+- `%TEMP%\lv-m7-spike1b\bin\` with `lv_shell.dll`, `lv-worker.exe` and the codec DLLs,
+  `ALL APPLICATION PACKAGES:(OI)(CI)(RX)` on `bin`, a low integrity label on the root (so a
+  low-integrity prevhost could still write the log).
+- HKCU only:
+  - `Software\Classes\CLSID\{663472B2-A0DD-43AA-B3F1-97CEB0598154}`: `AppID` =
+    `{6d2b5079-2f0b-48dd-ab7f-97cec514d30b}`, `InprocServer32` = the DLL,
+    `ThreadingModel=Apartment`
+  - `Software\Classes\.lvthumbtest\ShellEx\{8895b1c6-b41f-4c1c-a562-0d564250836f}` = that CLSID
+  - `Software\Microsoft\Windows\CurrentVersion\PreviewHandlers` value `{663472B2-...}` =
+    "light-view HEIC preview"
+- The AppID itself exists only in HKLM (`DllSurrogate=%SystemRoot%\system32\prevhost.exe`)
+  and was not touched.
+
+## Results
+
+| Question | Answer |
+|---|---|
+| Harness control (HKLM handler) | `.txt` → Windows TXT Previewer `{1531d583-...}` (HKLM, same AppID): `CoCreateInstance(CLSCTX_LOCAL_SERVER)` S_OK in 66 ms, a new `prevhost.exe {1531D583-...} -Embedding` started (parent: the DCOM launch service), `DoPreview` S_OK, the text drawn in our window (`spike1b-control-txt.png`). That prevhost ran at **medium (0x2000)**, not AppContainer, even though the TXT class has no `DisableLowILProcessIsolation`. |
+| Association + list | The shell resolves `.lvthumbtest` to our CLSID from HKCU, and the HKCU `PreviewHandlers` value is read. |
+| (a) prevhost activates the HKCU-only class? | **No.** `CoCreateInstance(CLSCTX_LOCAL_SERVER)` fails with **`0x80040154` REGDB_E_CLASSNOTREG** in 8-12 ms, three times (two files, before and after a 10 min wait). No prevhost starts for it and the DLL never loads (no `DllGetClassObject` in the log). |
+| Is it the surrogate only? | No: with `AppID` removed and an HKCU `LocalServer32` (whoami.exe) on the same CLSID, the same call also answered `0x80040154` at once, i.e. the COM activation service did not see the HKCU class for out-of-process activation at all (from this medium, non-elevated caller). |
+| Registration visible in-process? | Yes: `CLSCTX_INPROC_SERVER` (PowerShell and the harness with `inproc`) loads the DLL and creates the handler. |
+| Handler + worker (in-process check, not Explorer's path) | `DoPreview` draws magenta (centre pixel 255,0,255, `spike1b-inproc.png`); the worker started **inside the AppContainer** (token low 0x1000, AppContainer true, born in the Job), decoded 451x461. First run 5.85 s (request+decode 5.7 s: fresh copies of the codec DLLs, likely scanned on first load); second run 79 ms (spawn 20 ms, request+decode 36 ms). |
+| Worker from prevhost / prevhost integrity for our class | Not measurable: prevhost never hosted the class. |
+
+## Conclusion
+
+A preview handler registered only under HKCU is not activated out of process on this build
+(REGDB_E_CLASSNOTREG from `CoCreateInstance(CLSCTX_LOCAL_SERVER)`), so prevhost never loads
+it. Per Task 1b the per-user install drops the preview handler; the all-users install
+(HKLM) keeps it. Not verified: Explorer's own preview-pane call (pane off, not changed) and
+whether Explorer has any non-COM-surrogate path; whether an HKCU copy of the AppID key
+would change the answer (outside the allowed registry keys, not tried).
+
+## Cleanup
+
+Removed `HKCU\Software\Classes\CLSID\{663472B2-...}` (incl. the temporary `LocalServer32`),
+`HKCU\Software\Classes\.lvthumbtest`, the `{663472B2-...}` value under HKCU
+`PreviewHandlers` (the pre-existing HwpPreviewHandler value is untouched) and
+`%TEMP%\lv-m7-spike1b`. The prevhost.exe started by the TXT control (PID 4328) was left to
+exit on its own.
