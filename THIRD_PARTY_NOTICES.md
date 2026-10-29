@@ -63,7 +63,7 @@ JPEG 사진의 무손실 회전은 `lv-worker.exe`가 libjpeg-turbo의 TurboJPEG
 
 | 라이선스 (License) | 크레이트 수 (Crates) |
 |---|---|
-| MIT License | 57 |
+| MIT License | 63 |
 | BSD 2-Clause "Simplified" License | 5 |
 | Apache License 2.0 | 2 |
 | Unicode License v3 | 1 |
@@ -630,6 +630,39 @@ DEALINGS IN THE SOFTWARE.
 
 ### MIT License
 
+- [tempfile 3.27.0](https://github.com/Stebalien/tempfile)
+
+```text
+Copyright (c) 2015 Steven Allen
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
 - [quick-error 2.0.1](http://github.com/tailhook/quick-error)
 
 ```text
@@ -661,6 +694,40 @@ SOFTWARE.
 
 ```text
 Copyright (c) 2015 nwin
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+- [getrandom 0.4.3](https://github.com/rust-random/getrandom)
+
+```text
+Copyright (c) 2018-2026 The rust-random Project Developers
+Copyright (c) 2014 The Rust Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -896,8 +963,10 @@ SOFTWARE.
 - [windows-core 0.58.0](https://github.com/microsoft/windows-rs)
 - [windows-implement 0.58.0](https://github.com/microsoft/windows-rs)
 - [windows-interface 0.58.0](https://github.com/microsoft/windows-rs)
+- [windows-link 0.2.1](https://github.com/microsoft/windows-rs)
 - [windows-result 0.2.0](https://github.com/microsoft/windows-rs)
 - [windows-strings 0.1.0](https://github.com/microsoft/windows-rs)
+- [windows-sys 0.61.2](https://github.com/microsoft/windows-rs)
 - [windows-targets 0.52.6](https://github.com/microsoft/windows-rs)
 - [windows 0.58.0](https://github.com/microsoft/windows-rs)
 - [windows_x86_64_msvc 0.52.6](https://github.com/microsoft/windows-rs)
@@ -1090,7 +1159,9 @@ DEALINGS IN THE SOFTWARE.
 - [adler2 2.0.1](https://github.com/oyvindln/adler2)
 - [anyhow 1.0.104](https://github.com/dtolnay/anyhow)
 - [enumn 0.1.14](https://github.com/dtolnay/enumn)
+- [fastrand 2.5.0](https://github.com/smol-rs/fastrand)
 - [itoa 1.0.18](https://github.com/dtolnay/itoa)
+- [once_cell 1.21.4](https://github.com/matklad/once_cell)
 - [proc-macro2 1.0.107](https://github.com/dtolnay/proc-macro2)
 - [quote 1.0.47](https://github.com/dtolnay/quote)
 - [serde 1.0.229](https://github.com/serde-rs/serde)
