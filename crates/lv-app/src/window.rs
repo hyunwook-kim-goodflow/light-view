@@ -47,7 +47,7 @@ use crate::watch::{self, Watching};
 use crate::worker::WorkerPool;
 
 mod paint;
-mod run;
+pub(crate) mod run;
 
 pub use run::run;
 

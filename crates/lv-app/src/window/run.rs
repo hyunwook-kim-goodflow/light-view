@@ -8,14 +8,17 @@ use std::time::Duration;
 
 use anyhow::Context;
 use lv_core::settings::Settings;
-use windows::core::w;
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::DragAcceptFiles;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, LoadCursorW, RegisterClassExW,
-    SetWindowPlacement, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    IDC_ARROW, MSG, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadCursorW,
+    LoadImageW, RegisterClassExW, SetWindowPlacement, TranslateMessage, CS_DBLCLKS, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, HICON, IDC_ARROW, IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, MSG,
+    SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW,
 };
 
 use crate::commands::{self, HwndCell};
@@ -107,6 +110,8 @@ pub fn run(
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).context("LoadCursorW")?,
+            hIcon: app_icon(instance.into(), false),
+            hIconSm: app_icon(instance.into(), true),
             lpszClassName: CLASS_NAME,
             ..Default::default()
         };
@@ -206,3 +211,30 @@ pub fn run(
     crate::resize::flush_at_exit(&app);
     Ok(())
 }
+
+/// The app icon (resource 1, `res/light-view.ico`) at the system's large or small icon
+/// size, so the title bar and taskbar get a drawn size instead of a scaled one. A null
+/// icon (no resource, as in some test builds) leaves the default.
+pub(crate) fn app_icon(instance: HINSTANCE, small: bool) -> HICON {
+    let (cx, cy) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    // SAFETY: plain calls; resource 1 is a MAKEINTRESOURCE id, not a pointer.
+    unsafe {
+        LoadImageW(
+            instance,
+            PCWSTR(APP_ICON_ID as usize as *const u16),
+            IMAGE_ICON,
+            GetSystemMetrics(cx),
+            GetSystemMetrics(cy),
+            LR_DEFAULTCOLOR | LR_SHARED,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default()
+    }
+}
+
+/// The icon resource id `build.rs` gives `res/light-view.ico`.
+const APP_ICON_ID: u16 = 1;

@@ -286,3 +286,22 @@ fn installer_registers_resize_verb_for_all_extensions() {
         &["english.ResizeVerb=Resize with light-view"]
     ));
 }
+
+/// Photos show light-view's file icon (the exe's second icon group, `build.rs` id 2)
+/// when Explorer has no thumbnail, and the installer carries the app icon.
+#[test]
+fn installer_uses_light_view_icons() {
+    let s = script();
+    let setup = section(&s, "Setup");
+    assert!(setup.contains(&r"SetupIconFile=..\crates\lv-app\res\light-view.ico".to_owned()));
+    let icon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("res/light-view.ico");
+    assert!(icon.is_file(), "{} exists", icon.display());
+    let registry = section(&s, "Registry");
+    for ext in EXTENSIONS {
+        let key = format!(r"goodflow.lightview.{ext}\DefaultIcon");
+        assert!(
+            has_line(&registry, &[&key, r#"ValueData: "{app}\{#AppExe},1""#]),
+            "{ext} uses the file icon"
+        );
+    }
+}

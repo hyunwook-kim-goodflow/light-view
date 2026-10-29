@@ -47,6 +47,8 @@ MinVersion=10.0.19045
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
+; The installer and its entry in Apps use light-view's own icon (scripts/make-icons.py).
+SetupIconFile=..\crates\lv-app\res\light-view.ico
 OutputBaseFilename=light-view-{#AppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
@@ -60,9 +62,13 @@ SetupLogging=yes
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+korean.FinishedLabel=light-view 설치가 끝났어요. 아래 첫 항목을 켜 두면 Windows 설정의 light-view 페이지가 열려요. 맨 위의 [기본값 설정]을 한 번 누르면 지원하는 사진 형식이 모두 light-view로 열려요. (Windows는 프로그램이 스스로 기본 앱이 되는 것을 막아서 이 한 번은 직접 눌러야 해요.)
+english.FinishedLabel=light-view is installed. With the first option below on, Windows Settings opens at light-view's page. Click [Set default] at the top once and every supported photo type opens in light-view. (Windows does not let programs make themselves the default, so this one click is yours.)
+
 [CustomMessages]
-korean.OpenDefaultApps=기본 앱 설정 열기
-english.OpenDefaultApps=Open default apps settings
+korean.OpenDefaultApps=light-view를 기본 사진 앱으로 지정 (열리는 창에서 [기본값 설정] 한 번)
+english.OpenDefaultApps=Make light-view the default photo app (click [Set default] in the window that opens)
 korean.AppDescription=가볍고 빠른 사진 뷰어
 english.AppDescription=A light, fast photo viewer
 korean.GrantingAccess=사진 해석 프로세스의 격리를 준비하고 있어요...
@@ -95,7 +101,7 @@ Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueN
 ; .jpg
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.jpg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpg"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpg"; ValueData: ""
@@ -103,7 +109,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .jpeg
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.jpeg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpeg"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpeg"; ValueData: ""
@@ -111,7 +117,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .png
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: ""; ValueData: "PNG image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.png\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.png"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".png"; ValueData: ""
@@ -119,7 +125,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .gif
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: ""; ValueData: "GIF image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.gif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.gif"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".gif"; ValueData: ""
@@ -127,7 +133,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .webp
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: ""; ValueData: "WebP image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.webp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.webp"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".webp"; ValueData: ""
@@ -135,7 +141,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .bmp
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: ""; ValueData: "BMP image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.bmp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.bmp"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".bmp"; ValueData: ""
@@ -143,7 +149,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .heic
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: ""; ValueData: "HEIC image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.heic\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heic"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heic"; ValueData: ""
@@ -151,7 +157,7 @@ Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; Value
 ; .heif
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: ""; ValueData: "HEIF image (light-view)"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
 Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.heif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heif"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heif"; ValueData: ""
