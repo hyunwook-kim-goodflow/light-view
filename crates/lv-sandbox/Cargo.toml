@@ -27,3 +27,7 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ]
+
+[dev-dependencies]
+# The low integrity host test stages the worker in a temporary folder.
+tempfile = "3"

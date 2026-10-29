@@ -134,7 +134,7 @@ impl Worker {
 }
 
 /// Copies the worker's diagnostics into the app's log so the pipe never fills up.
-fn drain_stderr(pid: u32, stderr: File) {
+pub(crate) fn drain_stderr(pid: u32, stderr: File) {
     for_each_log_line(stderr, |line| log(&format!("lv-worker {pid}: {line}")));
 }
 
