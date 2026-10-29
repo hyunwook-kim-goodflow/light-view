@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lv_core::decode::DecodeLimits;
 use windows::core::{implement, IUnknown, Interface, Result, GUID};
 use windows::Win32::Foundation::{
     BOOL, COLORREF, ERROR_ALREADY_INITIALIZED, E_ABORT, E_FAIL, E_INVALIDARG, E_NOTIMPL, E_POINTER,
@@ -45,7 +46,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{SetParent, MSG};
 
 use crate::stream::READ_CAP;
-use crate::thumbnail::ask_worker;
+use crate::thumbnail::{ask_worker, DEADLINE};
 use crate::{guarded, stream, ObjectCount};
 use draw::Image;
 use window::Shared;
@@ -105,7 +106,8 @@ impl Handler {
     /// A handler whose previews `exe` (`lv-worker.exe`) makes.
     pub(crate) fn new(exe: PathBuf) -> Handler {
         Handler::with_render(Arc::new(move |data, max_side| {
-            let (width, height, bgra) = ask_worker(&exe, max_side, data)?;
+            let max_pixels = DecodeLimits::default().max_pixels;
+            let (width, height, bgra) = ask_worker(&exe, max_side, max_pixels, data, DEADLINE)?;
             Some(Image {
                 width,
                 height,

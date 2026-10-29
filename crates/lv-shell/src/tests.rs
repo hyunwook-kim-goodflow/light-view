@@ -6,7 +6,7 @@
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, Result, GUID, HRESULT};
@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{IThumbnailProvider, SHCreateMemStream, WTSAT_ARG
 use crate::bitmap::tests::take;
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
 use crate::stream::READ_CAP;
-use crate::thumbnail::Provider;
+use crate::thumbnail::{Provider, REQUEST_ID, THUMBNAIL_MAX_PIXELS, WORKER_HOOK};
 use crate::{guarded, worker_exe, CLSID_DETAILS, CLSID_PREVIEW, CLSID_THUMBNAIL};
 
 thread_local! {
@@ -214,6 +214,108 @@ fn initialize_twice_is_refused() {
     // The first stream is kept.
     let (bitmap, _) = thumbnail(&provider, 64).expect("thumbnail of the first stream");
     take(bitmap);
+}
+
+/// What the gated stand-in workers of [`a_third_thumbnail_waits_for_one_of_two_workers`]
+/// saw: how many came in, how many run now and at most, the `max_pixels` each was given,
+/// and how many may still finish.
+#[derive(Default)]
+struct Gated {
+    entered: usize,
+    running: usize,
+    peak: usize,
+    max_pixels: Vec<u64>,
+    may_finish: usize,
+}
+
+struct Gate {
+    state: Mutex<Gated>,
+    changed: Condvar,
+}
+
+impl Gate {
+    /// Waits (at most 10 s) until `done` holds.
+    fn wait_for(&self, what: &str, done: impl Fn(&Gated) -> bool) {
+        let state = self.state.lock().unwrap();
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(10), |s| !done(s))
+            .unwrap();
+        assert!(!timeout.timed_out(), "{what}: entered {}", state.entered);
+    }
+
+    fn let_finish(&self, n: usize) {
+        self.state.lock().unwrap().may_finish += n;
+        self.changed.notify_all();
+    }
+}
+
+/// Ends the stand-in workers and takes the hook out, whatever the test did.
+struct Unhook(Arc<Gate>);
+
+impl Drop for Unhook {
+    fn drop(&mut self) {
+        self.0.let_finish(usize::MAX / 2);
+        *WORKER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Ruling I2: at most two thumbnail workers at once in a process; a third `GetThumbnail`
+/// waits until one of them is done, and every worker is asked for 64 MP at most.
+#[test]
+fn a_third_thumbnail_waits_for_one_of_two_workers() {
+    let _serial = serial();
+    let gate = Arc::new(Gate {
+        state: Mutex::new(Gated::default()),
+        changed: Condvar::new(),
+    });
+    let unhook = Unhook(gate.clone());
+    let worker_gate = gate.clone();
+    *WORKER_HOOK.lock().unwrap() = Some(Arc::new(move |max_pixels, _request| {
+        let mut state = worker_gate.state.lock().unwrap();
+        state.entered += 1;
+        state.running += 1;
+        state.peak = state.peak.max(state.running);
+        state.max_pixels.push(max_pixels);
+        worker_gate.changed.notify_all();
+        let mut state = worker_gate
+            .changed
+            .wait_while(state, |s| s.may_finish == 0)
+            .unwrap();
+        state.may_finish -= 1;
+        state.running -= 1;
+        worker_gate.changed.notify_all();
+        Some(lv_ipc::Response::Image {
+            id: REQUEST_ID,
+            width: 1,
+            height: 1,
+            bgra: vec![255; 4],
+        })
+    }));
+    let calls: Vec<_> = (0..3)
+        .map(|_| {
+            std::thread::spawn(|| {
+                let (bitmap, _) = thumbnail(&provider_with(&sample()), 64)?;
+                take(bitmap);
+                Ok::<_, windows::core::Error>(())
+            })
+        })
+        .collect();
+    gate.wait_for("two workers", |s| s.entered == 2);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(gate.state.lock().unwrap().entered, 2, "a third worker ran");
+    gate.let_finish(1);
+    gate.wait_for("the third worker", |s| s.entered == 3);
+    gate.let_finish(2);
+    for call in calls {
+        call.join().expect("no panic").expect("a thumbnail");
+    }
+    let state = gate.state.lock().unwrap();
+    assert_eq!(state.peak, 2, "workers at once");
+    assert_eq!(state.max_pixels, vec![THUMBNAIL_MAX_PIXELS; 3]);
+    assert_eq!(THUMBNAIL_MAX_PIXELS, 1 << 26);
+    drop(state);
+    drop(unhook);
 }
 
 #[test]
