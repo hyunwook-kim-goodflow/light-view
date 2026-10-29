@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow = "1"
 lv-core = { path = "../lv-core" }
 lv-ipc = { path = "../lv-ipc" }
+lv-sandbox = { path = "../lv-sandbox" }
 # The update check reads GitHub's Releases API answer.
 serde_json = "1"
 # `#[implement]` (COM callbacks) names this crate directly.
@@ -65,6 +66,8 @@ features = [
 ]
 
 [dev-dependencies]
+# A container whose start always fails, for the fallback tests.
+lv-sandbox = { path = "../lv-sandbox", features = ["test-support"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"
 

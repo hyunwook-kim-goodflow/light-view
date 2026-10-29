@@ -266,6 +266,7 @@ dependencies = [
  "image",
  "lv-core",
  "lv-ipc",
+ "lv-sandbox",
  "serde_json",
  "tempfile",
  "windows",
@@ -315,6 +316,14 @@ version = "0.1.1"
 dependencies = [
  "lv-core",
  "lv-ipc",
+]
+
+[[package]]
+name = "lv-sandbox"
+version = "0.1.1"
+dependencies = [
+ "lv-ipc",
+ "windows",
 ]
 
 [[package]]

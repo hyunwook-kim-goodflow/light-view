@@ -5,7 +5,7 @@
 //! is created in (PROC_THREAD_ATTRIBUTE_JOB_LIST; where Windows refuses that, it joins
 //! while still suspended), so it never runs outside the Job. Best-effort layers (logged
 //! when they fail): the worker's AppContainer with no capabilities (ruling R2, see
-//! [`appcontainer`](super::appcontainer)), win32k system call lockdown and the
+//! [`appcontainer`](crate::appcontainer)), win32k system call lockdown and the
 //! no-child-process policy at creation, and the Job's UI restrictions. Only the three pipe
 //! ends are inherited, the working directory is the worker's folder and the environment
 //! holds `SystemRoot` alone (plus `LOCALAPPDATA` in an AppContainer, which Windows points at
@@ -44,7 +44,7 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject,
 };
 
-use super::appcontainer::Container;
+use crate::appcontainer::Container;
 use launch::Launch;
 
 mod launch;
@@ -415,7 +415,7 @@ mod tests {
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::System::JobObjects::IsProcessInJob;
 
-    use crate::worker::tests::{worker_exe, Process};
+    use crate::test_support::{worker_exe, Process};
 
     fn in_job(sandboxed: &Sandboxed) -> bool {
         let mut in_job = BOOL::default();
