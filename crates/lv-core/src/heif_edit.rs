@@ -60,8 +60,17 @@ pub use size::display_size;
 
 /// Most boxes accepted in one container.
 const MAX_BOXES: usize = 4096;
-/// Most `iloc` extents accepted in one file (an extent can take zero bytes of `iloc`).
-const MAX_EXTENTS: usize = 1 << 20;
+/// Most `iloc` extents accepted in one file (an extent can take zero bytes of `iloc`, so
+/// this bounds what parsing keeps: a few MiB). A 48 MP grid photo has under a hundred.
+const MAX_EXTENTS: usize = 1 << 16;
+/// Most `iloc` items accepted in one file (version 2 counts them in 32 bits).
+const MAX_ITEMS: usize = 1 << 16;
+/// Most `ipma` entries accepted in one file (one per item, and `iinf` holds at most
+/// [`MAX_BOXES`] items).
+const MAX_IPMA_ENTRIES: usize = MAX_BOXES;
+/// Most property associations accepted in one `ipma`, all entries together. With the entry
+/// and item caps this bounds what parsing keeps to a few MiB whatever the input size.
+const MAX_ASSOCIATIONS: usize = 1 << 16;
 /// Top-level boxes that hold no absolute file offsets of their own.
 const SHIFTABLE_TOP_LEVEL: [&[u8; 4]; 5] = [b"ftyp", b"meta", b"mdat", b"free", b"skip"];
 

@@ -2,22 +2,27 @@
 
 use super::parse::{full_box, parse, BoxRef, Reader};
 
-/// The size of the primary image as shown: its `ispe`, then each `clap` (cropped as libheif
-/// does) and `irot` (an odd number of quarter turns swaps the sides) associated with it, in
-/// `ipma` order. `imir` keeps the size. EXIF Orientation is not applied (HEIF transforms are
-/// what the app and the thumbnails apply). Read-only; the input is untrusted.
+/// The size of the primary image as shown: its `ispe` (the last one, as libheif reads it),
+/// then each `clap` (cropped as libheif's decoder crops) and `irot` (an odd number of quarter
+/// turns swaps the sides) associated with it, in `ipma` order. `imir` keeps the size. EXIF
+/// Orientation is not applied (HEIF transforms are what the app and the thumbnails apply).
+/// Read-only; the input is untrusted. The primary item's associations are walked one at a
+/// time, nothing is collected per association.
 pub fn display_size(heif: &[u8]) -> Result<(u32, u32), String> {
     let file = parse(heif)?;
-    let props = file.primary_props()?;
-    // libheif takes the first `ispe`; it is descriptive, so its place in the list is free.
-    let ispe = props
-        .iter()
-        .find(|p| &p.typ == b"ispe")
-        .ok_or("HEIF primary item has no ispe")?;
-    let mut size = ispe_size(heif, ispe)?;
-    for prop in &props {
+    // `ispe` is descriptive, so its place among the associations is free.
+    let mut ispe = None;
+    for prop in file.walk_props(file.primary) {
+        let prop = prop?;
+        if &prop.typ == b"ispe" {
+            ispe = Some(prop);
+        }
+    }
+    let mut size = ispe_size(heif, &ispe.ok_or("HEIF primary item has no ispe")?)?;
+    for prop in file.walk_props(file.primary) {
+        let prop = prop?;
         match &prop.typ {
-            b"clap" => size = clap_size(heif, prop, size)?,
+            b"clap" => size = clap_size(heif, &prop, size)?,
             b"irot" => match heif.get(prop.body) {
                 Some(&angle) if prop.body < prop.end => {
                     if angle & 1 == 1 {
@@ -42,9 +47,9 @@ fn ispe_size(data: &[u8], ispe: &BoxRef) -> Result<(u32, u32), String> {
     Ok(size)
 }
 
-/// The size `clap` crops a `width` x `height` image to, as libheif crops: the aperture of
-/// width `w` centred at `(width - 1) / 2 + offset` spans `floor(centre ± (w - 1) / 2)`,
-/// clamped to the image; an aperture outside the image or a zero denominator is an error.
+/// The size `clap` crops a `width` x `height` image to, as libheif 1.23's decoder does
+/// (`Box_clap::get_crop`, then clamped to the image). An aperture outside the image or a
+/// zero denominator is an error.
 fn clap_size(
     data: &[u8],
     clap: &BoxRef,
@@ -56,14 +61,32 @@ fn clap_size(
         *f = r.u32()?;
     }
     let [w_n, w_d, h_n, h_d, x_n, x_d, y_n, y_d] = fields;
-    // The offsets' numerators are signed.
-    let width = crop_span(width, w_n, w_d, x_n as i32, x_d)?;
-    let height = crop_span(height, h_n, h_d, y_n as i32, y_d)?;
+    // The offsets' numerators are signed. libheif rounds the left edge down but the top
+    // edge to nearest.
+    let width = crop_span(width, (w_n, w_d), (x_n as i32, x_d), Edge::Down)?;
+    let height = crop_span(height, (h_n, h_d), (y_n as i32, y_d), Edge::Nearest)?;
     Ok((width, height))
 }
 
-/// The length of the clean aperture `n / d` (offset `o_n / o_d`) on a side of `len` pixels.
-fn crop_span(len: u32, n: u32, d: u32, o_n: i32, o_d: u32) -> Result<u32, String> {
+/// How libheif rounds the first edge of a crop.
+#[derive(Clone, Copy)]
+enum Edge {
+    /// `Fraction::round_down`: towards zero.
+    Down,
+    /// `Fraction::round`: half up, then towards zero.
+    Nearest,
+}
+
+/// The pixels a clean aperture `n / d` with offset `o_n / o_d` keeps on a side of `len`:
+/// `first = edge(o + (len - 1)/2 - (n/d - 1)/2)`, `last = round(n/d - 1 + first)`, clamped
+/// to `0..len`. Exact (i128, no overflow); libheif's int32 fractions only lose precision on
+/// values far beyond real files.
+fn crop_span(
+    len: u32,
+    (n, d): (u32, u32),
+    (o_n, o_d): (i32, u32),
+    edge: Edge,
+) -> Result<u32, String> {
     if d == 0 || o_d == 0 {
         return Err("HEIF clap has a zero denominator".into());
     }
@@ -74,12 +97,17 @@ fn crop_span(len: u32, n: u32, d: u32, o_n: i32, o_d: u32) -> Result<u32, String
         i128::from(o_n),
         i128::from(o_d),
     );
-    // Over the common denominator 2·d·o_d: centre = o_n/o_d + (len-1)/2, half = (n/d - 1)/2.
-    let denominator = 2 * d * o_d;
-    let centre = 2 * o_n * d + (len - 1) * d * o_d;
-    let half = (n - d) * o_d;
-    let first = (centre - half).div_euclid(denominator).max(0);
-    let last = (centre + half).div_euclid(denominator).min(len - 1);
+    // first = num / den over the common denominator 2·d·o_d.
+    let den = 2 * d * o_d;
+    let num = 2 * o_n * d + (len - 1) * d * o_d - (n - d) * o_d;
+    // Rust's `/` truncates towards zero, as C++'s does.
+    let first = match edge {
+        Edge::Down => num / den,
+        Edge::Nearest => (2 * num + den) / (2 * den),
+    };
+    // round(n/d - 1 + first) = round((n - d + first·d) / d).
+    let last = (2 * (n - d + first * d) + d) / (2 * d);
+    let (first, last) = (first.max(0), last.min(len - 1));
     if last < first {
         return Err("HEIF clap lies outside the image".into());
     }
@@ -200,6 +228,16 @@ mod tests {
             display_size(&heif(&[ispe(40, 30), clap(20, 10, 40, 30)])),
             Ok((10, 5))
         );
+        // A fractional aperture: libheif keeps round(5.6 - 1 + floor(47.2)) - 47 + 1 = 6
+        // pixels of 5.6 (49.5 - 2.3 = 47.2; 47 + 4.6 = 51.6 rounds to 52).
+        let mut fractional = Vec::new();
+        for v in [28u32, 5, 28, 5, 0, 1, 0, 1] {
+            fractional.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(
+            display_size(&heif(&[ispe(100, 100), bx(b"clap", &fractional)])),
+            Ok((6, 6))
+        );
         // Off the image entirely, or a zero denominator: an error.
         assert!(display_size(&heif(&[ispe(40, 30), clap(4, 4, 200, 0)])).is_err());
         let mut zero = clap(20, 10, 0, 0);
@@ -217,9 +255,9 @@ mod tests {
         );
         assert!(display_size(b"not a heif").is_err());
         assert!(display_size(&[]).is_err());
-        // A second ispe (on the same item) is ignored, as libheif uses the first.
+        // With two ispe (on the same item), the last counts, as libheif reads them.
         assert_eq!(
-            display_size(&heif(&[ispe(40, 30), ispe(1, 1)])),
+            display_size(&heif(&[ispe(1, 1), ispe(40, 30)])),
             Ok((40, 30))
         );
         // A clap before the ispe still crops the ispe size.
