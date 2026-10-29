@@ -1,7 +1,7 @@
 {
   "$comment": "libheif's default feature 'hevc' pulls x265 (GPL encoder) and is disabled. libde265 (HEVC decoder) is an unconditional dependency of the libheif port at this baseline, so it has no feature to enable. libjpeg-turbo is used by lv-worker alone (TurboJPEG lossless transforms); libheif's own 'jpeg' feature must stay off (setup-deps.ps1 checks). libwebp is used by lv-worker alone (lossy WebP encoding); its default features (libwebpmux, nearlossless) are off and only 'simd' is kept.",
   "name": "light-view",
-  "version-string": "0.1.0",
+  "version-string": "0.1.1",
   "dependencies": [
     {
       "name": "libheif",
