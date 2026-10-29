@@ -1,0 +1,41 @@
+[package]
+name = "lv-shell"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "light-view's Explorer extension: the HEIC thumbnail, preview and details handlers, a COM in-process server that has the sandboxed worker decode."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The app's HEIC file size cap and `max_pixels` (pure Rust; no C code may enter this DLL).
+lv-core = { path = "../lv-core" }
+lv-ipc = { path = "../lv-ipc" }
+lv-sandbox = { path = "../lv-sandbox" }
+# `#[implement]` (COM objects) names this crate directly.
+windows-core = "0.58"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Time",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[dev-dependencies]
+# The low integrity host of the preview test (`lv_sandbox::low_host`).
+lv-sandbox = { path = "../lv-sandbox", features = ["test-support"] }

@@ -83,6 +83,32 @@ pub fn raw_exif_block(bytes: &[u8]) -> Option<&[u8]> {
     Some(strip_prefix(tiff))
 }
 
+/// The EXIF facts Explorer's details show for a photo, each as stored and made safe like the
+/// card's values (trimmed, control characters escaped, at most 512 characters). GPS is not
+/// among them on purpose.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CameraFacts {
+    /// `DateTimeOriginal` (`YYYY:MM:DD HH:MM:SS`, local time where it was taken).
+    pub date_time_original: Option<String>,
+    /// `OffsetTimeOriginal` (`+HH:MM` or `-HH:MM`), the UTC offset of that local time.
+    pub offset_time_original: Option<String>,
+    pub make: Option<String>,
+    pub model: Option<String>,
+}
+
+/// The [`CameraFacts`] of an image file, or `None` without readable EXIF. Read-only and
+/// bounded like [`read_exif`].
+pub fn camera_facts(bytes: &[u8]) -> Option<CameraFacts> {
+    let tiff = raw_exif_block(bytes)?;
+    let exif = parse(&tiff[..tiff.len().min(MAX_TIFF)])?;
+    Some(CameraFacts {
+        date_time_original: text(&exif, Tag::DateTimeOriginal),
+        offset_time_original: text(&exif, Tag::OffsetTimeOriginal),
+        make: text(&exif, Tag::Make),
+        model: text(&exif, Tag::Model),
+    })
+}
+
 /// Parses a raw EXIF block (the `Exif\0\0` header is optional), capped like a file's.
 pub(crate) fn parse_block(block: &[u8]) -> Option<Exif> {
     let tiff = strip_prefix(block);
@@ -584,6 +610,42 @@ mod tests {
         assert_eq!(summary.exposure.as_deref(), Some("2.5s"));
         let (summary, _) = read_exif(&app1_jpeg(&tiff(&[short(Tag::Orientation, 6)]))).unwrap();
         assert_eq!(summary, ExifSummary::default());
+    }
+
+    #[test]
+    fn camera_facts_of_heif_and_jpeg() {
+        let mut fields = rich_fields();
+        fields.push(ascii(Tag::OffsetTimeOriginal, "+09:00"));
+        fields.push(ascii(Tag::GPSLatitudeRef, "N"));
+        let t = tiff(&fields);
+        let want = CameraFacts {
+            date_time_original: Some("2023:12:25 10:20:30".into()),
+            offset_time_original: Some("+09:00".into()),
+            make: Some("Canon".into()),
+            model: Some("Canon EOS R5".into()),
+        };
+        assert_eq!(camera_facts(&heif_with(&t, b"")), Some(want.clone()));
+        assert_eq!(camera_facts(&app1_jpeg(&t)), Some(want));
+        // DateTime is not DateTimeOriginal: no fallback for the date taken.
+        let only = tiff(&[
+            ascii(Tag::DateTime, "2024:01:02 03:04:05"),
+            ascii(Tag::Model, " \0iPhone 15 Pro\0 "),
+        ]);
+        let facts = camera_facts(&heif_with(&only, b"")).unwrap();
+        assert_eq!(facts.date_time_original, None);
+        assert_eq!(facts.model.as_deref(), Some("iPhone 15 Pro"));
+        assert_eq!(facts.make, None);
+        // Layout breakers are escaped and long values cut, as on the card.
+        let odd = tiff(&[
+            ascii(Tag::Make, "A\u{202E}B"),
+            ascii(Tag::Model, &"m".repeat(600)),
+        ]);
+        let facts = camera_facts(&heif_with(&odd, b"")).unwrap();
+        assert_eq!(facts.make.as_deref(), Some("A\\u{202E}B"));
+        assert_eq!(facts.model.unwrap().chars().count(), MAX_VALUE_CHARS);
+        // Nothing to read.
+        assert_eq!(camera_facts(b"not an image"), None);
+        assert_eq!(camera_facts(&test_fixtures::png_2x1()), None);
     }
 
     #[test]

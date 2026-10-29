@@ -96,6 +96,26 @@ pub fn heif_edit(data: &[u8]) {
     let _ = heif_edit::exif_item_tiff(heif);
 }
 
+/// The parsers the Explorer extension runs in-process on untrusted HEIC files (in
+/// `explorer.exe` and, for the details, the SYSTEM search indexer): the displayed size, the
+/// camera facts, and the `irot`/`imir` steps of an item. The first byte chooses the item for
+/// [`heif_edit::turn_steps`]; the rest is the file. Every step read is in range.
+pub fn heif_details(data: &[u8]) {
+    let [item, heif @ ..] = data else {
+        return;
+    };
+    let _ = heif_edit::display_size(heif);
+    let _ = exif_info::camera_facts(heif);
+    if let Ok(steps) = heif_edit::turn_steps(heif, u32::from(*item)) {
+        for step in steps {
+            match step {
+                heif_edit::TurnStep::Irot(q) => assert!(q < 4),
+                heif_edit::TurnStep::Imir(axis) => assert!(axis < 2),
+            }
+        }
+    }
+}
+
 /// The JPEG marker walker and the checks built on it: every marker lies inside the input
 /// and the walk moves forward.
 pub fn jpeg_markers(data: &[u8]) {

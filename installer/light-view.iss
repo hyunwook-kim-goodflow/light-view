@@ -1,12 +1,19 @@
-﻿; light-view installer: Inno Setup 6, per-user (no administrator rights, ruling R4).
+﻿; light-view installer: Inno Setup 6, two install modes (M7 spec §2):
+;   per user (the default): no administrator rights, %LOCALAPPDATA%\Programs\light-view,
+;     HKCU; HEIC thumbnails only, run inside Explorer (DisableProcessIsolation);
+;   all users (administrator, UAC): C:\Program Files\light-view, HKLM; HEIC thumbnails,
+;     preview pane and details (property handler), in Windows' own isolated hosts.
+; Every registry entry uses HKA, which is HKCU or HKLM by the mode; entries for one mode
+; only carry "Check: IsAdminInstallMode" or "Check: not IsAdminInstallMode".
 ;
 ; Compiled by .github/workflows/release.yml after scripts/package.ps1 has filled dist\stage:
 ;   ISCC.exe /DAppVersion=x.y.z installer\light-view.iss
 ; Output: dist\light-view-x.y.z-setup.exe. Nothing here runs on a developer's PC.
 ;
 ; Names fixed by spec §9 (never change them after the first release): install folder
-; %LOCALAPPDATA%\Programs\light-view, ProgIDs goodflow.lightview.<ext>, AppUserModelID
-; goodflow.LightView, and the AppId below.
+; %LOCALAPPDATA%\Programs\light-view (per user), ProgIDs goodflow.lightview.<ext>,
+; AppUserModelID goodflow.LightView, the AppId below, and the class IDs of the shell
+; handlers (crates/lv-shell/src/lib.rs).
 
 #ifndef AppVersion
   #error Pass the version: ISCC.exe /DAppVersion=x.y.z installer\light-view.iss
@@ -22,6 +29,17 @@
 #define AppUserModelID "goodflow.LightView"
 ; Where Windows' default apps page finds what light-view can open (RegisteredApplications).
 #define Capabilities "Software\goodflow\light-view\Capabilities"
+; The Explorer extension (crates/lv-shell): one DLL, three classes. `{{` is an escaped `{`.
+; The DLL is installed as lv-shell-{#AppVersion}.dll: an update registers a new file and
+; never has to replace one Explorer holds (spec §6).
+#define ThumbnailClsid "{{6A77F04F-33D3-40F0-885E-AA8CC5CC403C}"
+#define PreviewClsid "{{663472B2-A0DD-43AA-B3F1-97CEB0598154}"
+#define DetailsClsid "{{0EA2AA38-AE7B-4906-9BD9-605EA0348914}"
+; Windows' ShellEx keys: IThumbnailProvider and IPreviewHandler.
+#define ThumbnailShellEx "{{e357fccd-a995-4576-b01f-234630154e96}"
+#define PreviewShellEx "{{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+; The 64-bit preview host (prevhost.exe) that runs preview handlers.
+#define PrevhostAppId "{{6d2b5079-2f0b-48dd-ab7f-97cec514d30b}"
 
 [Setup]
 AppId={{7FCE06F6-E068-426B-A625-25814604682E}
@@ -33,14 +51,27 @@ AppPublisherURL=https://github.com/hyunwook-kim-goodflow/light-view
 AppSupportURL=https://github.com/hyunwook-kim-goodflow/light-view/issues
 AppUpdatesURL=https://github.com/hyunwook-kim-goodflow/light-view/releases
 VersionInfoVersion={#AppVersion}
-; Per-user install: no UAC prompt, HKCU only, and no dialog offering an all-users install.
+; The first page asks "for me only" (the default, no UAC prompt) or "for all users"
+; (administrator). /CURRENTUSER and /ALLUSERS choose on the command line. An update keeps
+; the mode of the install it finds (UsePreviousPrivileges, default yes) without asking.
 PrivilegesRequired=lowest
-DefaultDirName={localappdata}\Programs\light-view
-; The folder is fixed (spec §9): icacls grants ALL APPLICATION PACKAGES read access to it,
-; which must never land on a folder the user picked (an existing folder, a drive root).
-; Hiding the page is not enough (/DIR= and a previous install's folder still choose it),
-; so the grant also checks the folder itself (IsDefaultAppDir in [Code]).
+PrivilegesRequiredOverridesAllowed=dialog
+; {autopf} is {localappdata}\Programs per user and {commonpf64} (C:\Program Files) for all
+; users (64-bit install mode).
+DefaultDirName={autopf}\light-view
+; The folder is fixed (spec §9): per user, icacls grants ALL APPLICATION PACKAGES read
+; access to it, which must never land on a folder the user picked (an existing folder, a
+; drive root). Hiding the page is not enough (/DIR= and a previous install's folder still
+; choose it), so the grant also checks the folder itself (IsDefaultAppDir in [Code]).
 DisableDirPage=yes
+; Never close or restart Explorer (spec §6). The Restart Manager looks only for programs
+; using the files this filter names: our two exes. A running viewer or worker is offered
+; for closing (and not restarted); the shell DLL is not in the filter, so Explorer,
+; prevhost or the search indexer holding lv-shell-*.dll are never checked nor offered.
+; (The default filter, *.exe,*.dll,*.chm, would offer to close Explorer.)
+CloseApplications=yes
+CloseApplicationsFilter=light-view.exe,lv-worker.exe
+RestartApplications=no
 DisableProgramGroupPage=yes
 ; Windows 10 22H2 or later, x64 (spec §9).
 MinVersion=10.0.19045
@@ -75,6 +106,11 @@ korean.GrantingAccess=사진 해석 프로세스의 격리를 준비하고 있�
 english.GrantingAccess=Preparing the isolated image decoder...
 korean.ResizeVerb=light-view로 크기 조정
 english.ResizeVerb=Resize with light-view
+; Shown once when the other install mode is already there (spec §6); nothing is removed.
+korean.PerUserAlsoInstalled=이 사용자 계정에는 light-view가 이 계정 전용으로 이미 설치돼 있어요. 이 계정에서는 그 설치가 계속 우선해요. 필요 없으면 Windows 설정 > 앱에서 제거해 주세요.
+english.PerUserAlsoInstalled=light-view is already installed for this user only. For this account that install keeps taking precedence; remove it in Windows Settings > Apps if you no longer need it.
+korean.AllUsersAlsoInstalled=이 PC에는 light-view가 모든 사용자용으로 이미 설치돼 있어요. 이 계정에서는 지금 하는 이 계정 전용 설치가 우선해요(미리 보기 창과 자세히 탭은 모든 사용자용 설치가 계속 맡아요).
+english.AllUsersAlsoInstalled=light-view is already installed for all users of this PC. For this account the install you are making now (for you only) takes precedence; the preview pane and the details tab stay with the all-users install.
 
 [InstallDelete]
 ; A portable.txt left in the install folder would move settings beside the exe.
@@ -83,148 +119,452 @@ Type: files; Name: "{app}\portable.txt"
 [Files]
 ; dist\stage: light-view.exe, lv-worker.exe, the DLLs, THIRD_PARTY_NOTICES.md, the licenses
 ; and README.txt. Never portable.txt (scripts/package.ps1 adds it to the zip only).
-Source: "{#StageDir}\*"; Excludes: "portable.txt"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StageDir}\*"; Excludes: "portable.txt,lv-shell-*.dll"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The shell DLL, named per version. Explorer, prevhost or the search indexer may hold it,
+; and a loaded DLL cannot be replaced: an existing file of this version (a reinstall) is
+; the same build and stays. Other versions' DLLs are deleted in [Code] (DeleteShellDlls).
+Source: "{#StageDir}\lv-shell-{#AppVersion}.dll"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 
 [Icons]
 Name: "{autoprograms}\light-view"; Filename: "{app}\{#AppExe}"; AppUserModelID: "{#AppUserModelID}"; Comment: "{cm:AppDescription}"
 
 [Registry]
-; "Open with" registration under HKCU\Software\Classes (spec §9). Windows 10/11 do not let
-; a program make itself the default; the last page offers the default apps settings.
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "light-view"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\goodflow"; Flags: uninsdeletekeyifempty
-Root: HKCU; Subkey: "Software\goodflow\light-view"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "{#Capabilities}"; ValueType: string; ValueName: "ApplicationName"; ValueData: "light-view"
-Root: HKCU; Subkey: "{#Capabilities}"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "{cm:AppDescription}"
-Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "light-view"; ValueData: "{#Capabilities}"; Flags: uninsdeletevalue
+; "Open with" registration under HKA\Software\Classes (spec §9; HKCU per user, HKLM for all
+; users). Windows 10/11 do not let a program make itself the default; the last page offers
+; the default apps settings.
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "light-view"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\goodflow"; Flags: uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\goodflow\light-view"; Flags: uninsdeletekey
+Root: HKA; Subkey: "{#Capabilities}"; ValueType: string; ValueName: "ApplicationName"; ValueData: "light-view"
+Root: HKA; Subkey: "{#Capabilities}"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "{cm:AppDescription}"
+Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "light-view"; ValueData: "{#Capabilities}"; Flags: uninsdeletevalue
 ; .jpg
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.jpg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpg"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpg"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".jpg"; ValueData: "goodflow.lightview.jpg"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.jpg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpg"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpg"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".jpg"; ValueData: "goodflow.lightview.jpg"
 ; .jpeg
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.jpeg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.jpeg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpeg"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpeg"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".jpeg"; ValueData: "goodflow.lightview.jpeg"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: ""; ValueData: "JPEG image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpeg"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpeg\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.jpeg\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.jpeg\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.jpeg"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".jpeg"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".jpeg"; ValueData: "goodflow.lightview.jpeg"
 ; .png
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: ""; ValueData: "PNG image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.png\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.png\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.png"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".png"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".png"; ValueData: "goodflow.lightview.png"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: ""; ValueData: "PNG image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.png"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.png\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.png\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.png\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.png"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".png"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".png"; ValueData: "goodflow.lightview.png"
 ; .gif
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: ""; ValueData: "GIF image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.gif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.gif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.gif"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".gif"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".gif"; ValueData: "goodflow.lightview.gif"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: ""; ValueData: "GIF image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.gif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.gif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.gif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.gif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.gif"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".gif"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".gif"; ValueData: "goodflow.lightview.gif"
 ; .webp
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: ""; ValueData: "WebP image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.webp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.webp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.webp"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".webp"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".webp"; ValueData: "goodflow.lightview.webp"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: ""; ValueData: "WebP image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.webp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.webp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.webp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.webp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.webp"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".webp"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".webp"; ValueData: "goodflow.lightview.webp"
 ; .bmp
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: ""; ValueData: "BMP image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.bmp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.bmp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.bmp"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".bmp"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".bmp"; ValueData: "goodflow.lightview.bmp"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: ""; ValueData: "BMP image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.bmp"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.bmp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.bmp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.bmp\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.bmp"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".bmp"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".bmp"; ValueData: "goodflow.lightview.bmp"
 ; .heic
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: ""; ValueData: "HEIC image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heic\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.heic\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heic"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heic"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heic"; ValueData: "goodflow.lightview.heic"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: ""; ValueData: "HEIC image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heic"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heic\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heic\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.heic\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heic"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heic"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heic"; ValueData: "goodflow.lightview.heic"
 ; .heif
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: ""; ValueData: "HEIF image (light-view)"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
-Root: HKCU; Subkey: "Software\Classes\goodflow.lightview.heif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.heif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heif"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heif"; ValueData: ""
-Root: HKCU; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heif"; ValueData: "goodflow.lightview.heif"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: ""; ValueData: "HEIF image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heif"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heif\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heif\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.heif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heif"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heif"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heif"; ValueData: "goodflow.lightview.heif"
 ; Explorer right-click verb (M6): one process per selected file (MultiSelectModel=Player),
 ; which forwards its path to the running instance (--resize, ruling R4). Windows 11 shows it
 ; under "Show more options". Only our own verb key is deleted on uninstall.
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
-Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.jpeg\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.png\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.gif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.webp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.bmp\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heic\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+; --- HEIC/HEIF in Explorer (M7). The DLL never decodes: the sandboxed lv-worker.exe next to
+; it does. Only our own class keys are deleted on uninstall. The handler values under
+; .heic/.heif\ShellEx\{guid} and PropertyHandlers\.heic/.heif are shared with other
+; programs (another HEIC tool may own them): they carry no uninsdelete flag. [Code]
+; (Shared, AllShared) saves the value it finds before [Registry] writes ours, and on
+; uninstall puts it back, or deletes ours (and the key only if then empty) when there was
+; none; a value someone else wrote after us is left alone.
+; Thumbnails, both modes. Per user the thumbnail host (dllhost) ignores HKCU-only classes
+; (Task 1 spike, 0x80040154), so the class runs inside Explorer: DisableProcessIsolation.
+; All users: Windows' isolated thumbnail host, no DisableProcessIsolation.
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}"; ValueType: string; ValueName: ""; ValueData: "light-view HEIC thumbnail"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}"; ValueType: dword; ValueName: "DisableProcessIsolation"; ValueData: "1"; Check: not IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"
+Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"
+Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"
+; Preview pane, all users only: prevhost ignores HKCU-only classes (Task 1b spike).
+Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}"; ValueType: string; ValueName: ""; ValueData: "light-view HEIC preview"; Flags: uninsdeletekey; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}"; ValueType: string; ValueName: "AppID"; ValueData: "{#PrevhostAppId}"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\PreviewHandlers"; ValueType: string; ValueName: "{#PreviewClsid}"; ValueData: "light-view HEIC preview"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
+; Details (size, date taken, camera), all users only: Windows reads PropertyHandlers from
+; HKLM only, and the search indexer (SYSTEM) loads the class too. The value replaces
+; Windows' own handler; its previous value is kept under
+; HKLM\Software\goodflow\light-view\PreviousPropertyHandler (see Shared in [Code]).
+Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}"; ValueType: string; ValueName: ""; ValueData: "light-view HEIC details"; Flags: uninsdeletekey; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heic"; ValueType: string; ValueName: ""; ValueData: "{#DetailsClsid}"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heif"; ValueType: string; ValueName: ""; ValueData: "{#DetailsClsid}"; Check: IsAdminInstallMode
 
 [Run]
 ; The decoder worker runs in an AppContainer only where ALL APPLICATION PACKAGES
 ; (S-1-15-2-1) may read and run its files (ruling R2); without this it falls back to the
-; low integrity sandbox. Runs right after the files are in place, and only in the spec
-; folder: a folder chosen with /DIR= keeps its permissions and the worker falls back.
-Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /grant *S-1-15-2-1:(OI)(CI)(RX)"; StatusMsg: "{cm:GrantingAccess}"; Flags: runhidden waituntilterminated; Check: IsDefaultAppDir
-; Last page: the default apps page of the Settings app, opened at light-view's entry.
-Filename: "ms-settings:defaultapps?registeredAppUser=light-view"; Description: "{cm:OpenDefaultApps}"; Flags: postinstall shellexec nowait skipifsilent
+; low integrity sandbox. Runs right after the files are in place, per user only (C:\Program
+; Files can already be read by AppContainers), and only in the spec folder: a folder chosen
+; with /DIR= keeps its permissions and the worker falls back.
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /grant *S-1-15-2-1:(OI)(CI)(RX)"; StatusMsg: "{cm:GrantingAccess}"; Flags: runhidden waituntilterminated; Check: IsDefaultAppDir and not IsAdminInstallMode
+; Last page: the default apps page of the Settings app, opened at light-view's entry, which
+; is per user (HKCU) or per machine (HKLM) by the install mode.
+Filename: "ms-settings:defaultapps?registeredAppUser=light-view"; Description: "{cm:OpenDefaultApps}"; Flags: postinstall shellexec nowait skipifsilent; Check: not IsAdminInstallMode
+Filename: "ms-settings:defaultapps?registeredAppMachine=light-view"; Description: "{cm:OpenDefaultApps}"; Flags: postinstall shellexec nowait skipifsilent; Check: IsAdminInstallMode
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,light-view}"; Flags: postinstall nowait skipifsilent unchecked
 
 [UninstallRun]
 ; Before the files go: delete the worker's AppContainer profile (exits 0, shows nothing).
+; It runs after CurUninstallStepChanged(usUninstall) has removed our handler classes
+; (RemoveHandlerClasses), so no thumbnail call can start a worker and make the profile
+; again (review M6).
+; An all-users uninstall runs this as the user who uninstalls; other users' profiles stay
+; (README).
 Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteAppContainerProfile"
 ; Take back the grant made at install (only the granted entry, /remove:g), in case the
 ; folder stays because it holds files the uninstaller did not put there.
-Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /remove:g *S-1-15-2-1"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAppContainerGrant"; Check: IsDefaultAppDir
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /remove:g *S-1-15-2-1"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAppContainerGrant"; Check: IsDefaultAppDir and not IsAdminInstallMode
 
 [Code]
-// True when {app} is the spec folder %LOCALAPPDATA%\Programs\light-view (case-insensitive,
-// a trailing backslash ignored). Only there may icacls grant ALL APPLICATION PACKAGES
-// read access: a folder given with /DIR= (or kept from a previous install) could be the
-// user's profile or a drive root.
+// Registry paths. HKA is HKCU per user and HKLM for all users; in 64-bit install mode the
+// Reg* functions use the 64-bit view.
+const
+  // Inno Setup's uninstall entry for the AppId above, in either hive.
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7FCE06F6-E068-426B-A625-25814604682E}_is1';
+  // Where a shared value we replace is kept: SavedRoot\<Group>\<.ext>, default value
+  // (deleted with the rest of SavedRoot on uninstall, after it was put back).
+  SavedRoot = 'Software\goodflow\light-view';
+  RunOnceKey = 'Software\Microsoft\Windows\CurrentVersion\RunOnce';
+  // What Shared does.
+  TakeOver = 0;
+  GiveBack = 1;
+
+var
+  // The shared values this setup run replaced (TakeOver), so that DeinitializeSetup can
+  // put them back when the install does not finish (a rollback deletes SavedRoot, so the
+  // previous values are kept here in memory too).
+  TakenKeys, TakenSaved, TakenOurs, TakenPrevious: TArrayOfString;
+  TakenHadPrevious, TakenSavedNow: array of Boolean;
+  // The values an earlier install saved (SavedRoot\Group\Ext) that this run found and
+  // kept (an upgrade or reinstall, where the shared value is already ours). A rollback of
+  // this run may delete SavedRoot; UndoTakeOvers then writes them back, so a later
+  // uninstall can still put Windows' own handlers back (review I3).
+  KeptSaved, KeptValues: TArrayOfString;
+  InstallFinished: Boolean;
+
+// True when {app} is the spec folder of the install mode, %LOCALAPPDATA%\Programs\light-view
+// per user or {autopf}\light-view (C:\Program Files\light-view) for all users
+// (case-insensitive, a trailing backslash ignored). Only there may icacls grant ALL
+// APPLICATION PACKAGES read access: a folder given with /DIR= (or kept from a previous
+// install) could be the user's profile or a drive root.
 function IsDefaultAppDir(): Boolean;
 var
   Installed, Expected: String;
 begin
   Installed := RemoveBackslashUnlessRoot(ExpandConstant('{app}'));
-  Expected := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Programs\light-view'));
-  Result := CompareText(Installed, Expected) = 0;
+  if IsAdminInstallMode then
+    Expected := ExpandConstant('{autopf}\light-view')
+  else
+    Expected := ExpandConstant('{localappdata}\Programs\light-view');
+  Result := CompareText(Installed, RemoveBackslashUnlessRoot(Expected)) = 0;
+end;
+
+// Spec §6: when the other install mode is already there, say so once and go on. Per-user
+// registrations (HKCU) take precedence for that user. Nothing is removed.
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  InstallFinished := False;
+  if IsAdminInstallMode then begin
+    if RegKeyExists(HKCU, UninstallKey) then
+      SuppressibleMsgBox(CustomMessage('PerUserAlsoInstalled'), mbInformation, MB_OK, IDOK);
+  end else begin
+    if RegKeyExists(HKLM, UninstallKey) then
+      SuppressibleMsgBox(CustomMessage('AllUsersAlsoInstalled'), mbInformation, MB_OK, IDOK);
+  end;
+end;
+
+// Deletes our default value of Key, then Key itself only if nothing else is left in it
+// (another program's values and subkeys stay).
+procedure DeleteOurValue(Key: String);
+begin
+  RegDeleteValue(HKA, Key, '');
+  RegDeleteKeyIfEmpty(HKA, Key);
+end;
+
+// One shared handler value, the default value of Key (HKA), which [Registry] sets to our
+// class Ours. Key and Ours may hold Inno constants ({{ escapes). The value found before
+// ours is kept under SavedRoot\Group\Ext.
+//   TakeOver, at ssInstall (before [Registry] runs): save the value found, once. A
+//     reinstall finds ours there and keeps what the first install saved (remembering it
+//     in KeptSaved/KeptValues too); no value now means there is nothing to put back (and
+//     a stale saved value goes).
+//   GiveBack, at usUninstall (before the uninstaller deletes SavedRoot): only while the
+//     value is still ours, put the saved value back, or delete ours (and the key if then
+//     empty) when nothing was saved. A value someone else wrote after us is left alone.
+procedure Shared(Action: Integer; Key, Group, Ext, Ours: String);
+var
+  Saved, Current, Previous: String;
+  HadPrevious: Boolean;
+  N: Integer;
+begin
+  Key := ExpandConstant(Key);
+  Ours := ExpandConstant(Ours);
+  Saved := SavedRoot + '\' + Group + '\' + Ext;
+  if Action = TakeOver then begin
+    HadPrevious := RegQueryStringValue(HKA, Key, '', Current);
+    if HadPrevious and (CompareText(Current, Ours) = 0) then begin
+      if RegQueryStringValue(HKA, Saved, '', Previous) then begin
+        N := GetArrayLength(KeptSaved);
+        SetArrayLength(KeptSaved, N + 1);
+        SetArrayLength(KeptValues, N + 1);
+        KeptSaved[N] := Saved;
+        KeptValues[N] := Previous;
+      end;
+      exit;
+    end;
+    N := GetArrayLength(TakenKeys);
+    SetArrayLength(TakenKeys, N + 1);
+    SetArrayLength(TakenSaved, N + 1);
+    SetArrayLength(TakenOurs, N + 1);
+    SetArrayLength(TakenPrevious, N + 1);
+    SetArrayLength(TakenHadPrevious, N + 1);
+    SetArrayLength(TakenSavedNow, N + 1);
+    TakenKeys[N] := Key;
+    TakenSaved[N] := Saved;
+    TakenOurs[N] := Ours;
+    TakenPrevious[N] := Current;
+    TakenHadPrevious[N] := HadPrevious;
+    if HadPrevious then
+      TakenSavedNow[N] := RegWriteStringValue(HKA, Saved, '', Current)
+    else begin
+      RegDeleteValue(HKA, Saved, '');
+      TakenSavedNow[N] := False;
+    end;
+  end else begin
+    if not RegQueryStringValue(HKA, Key, '', Current) then
+      exit;
+    if CompareText(Current, Ours) <> 0 then
+      exit;
+    if RegQueryStringValue(HKA, Saved, '', Previous) then
+      RegWriteStringValue(HKA, Key, '', Previous)
+    else
+      DeleteOurValue(Key);
+  end;
+end;
+
+// Every shared value the [Registry] section writes, with the same keys and classes:
+// thumbnails in both modes, preview and details for all users only.
+procedure AllShared(Action: Integer);
+begin
+  Shared(Action, 'Software\Classes\.heic\ShellEx\{#ThumbnailShellEx}', 'PreviousThumbnailHandler', '.heic', '{#ThumbnailClsid}');
+  Shared(Action, 'Software\Classes\.heif\ShellEx\{#ThumbnailShellEx}', 'PreviousThumbnailHandler', '.heif', '{#ThumbnailClsid}');
+  if IsAdminInstallMode then begin
+    Shared(Action, 'Software\Classes\.heic\ShellEx\{#PreviewShellEx}', 'PreviousPreviewHandler', '.heic', '{#PreviewClsid}');
+    Shared(Action, 'Software\Classes\.heif\ShellEx\{#PreviewShellEx}', 'PreviousPreviewHandler', '.heif', '{#PreviewClsid}');
+    Shared(Action, 'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heic', 'PreviousPropertyHandler', '.heic', '{#DetailsClsid}');
+    Shared(Action, 'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heif', 'PreviousPropertyHandler', '.heif', '{#DetailsClsid}');
+  end;
+end;
+
+// The install failed or was cancelled after TakeOver (and maybe after [Registry]; a
+// rollback does not touch values without uninstall flags): put back what this run
+// replaced, where the value is still ours, and drop what it saved. What an earlier install
+// saved stays: written back if the rollback deleted it (review I3).
+procedure UndoTakeOvers();
+var
+  I: Integer;
+  Current: String;
+begin
+  for I := 0 to GetArrayLength(TakenKeys) - 1 do begin
+    if RegQueryStringValue(HKA, TakenKeys[I], '', Current) and
+       (CompareText(Current, TakenOurs[I]) = 0) then begin
+      if TakenHadPrevious[I] then
+        RegWriteStringValue(HKA, TakenKeys[I], '', TakenPrevious[I])
+      else
+        DeleteOurValue(TakenKeys[I]);
+    end;
+    if TakenSavedNow[I] then begin
+      RegDeleteValue(HKA, TakenSaved[I], '');
+      RegDeleteKeyIfEmpty(HKA, TakenSaved[I]);
+      RegDeleteKeyIfEmpty(HKA, ExtractFileDir(TakenSaved[I]));
+      RegDeleteKeyIfEmpty(HKA, SavedRoot);
+      RegDeleteKeyIfEmpty(HKA, 'Software\goodflow');
+    end;
+  end;
+  for I := 0 to GetArrayLength(KeptSaved) - 1 do
+    if not RegValueExists(HKA, KeptSaved[I], '') then
+      RegWriteStringValue(HKA, KeptSaved[I], '', KeptValues[I]);
+end;
+
+// This version's shell DLL, the one the registry points at.
+function CurrentShellDll(): String;
+begin
+  Result := 'lv-shell-{#AppVersion}.dll';
+end;
+
+// The RunOnce value that deletes FileName at the next logon.
+function RunOnceName(FileName: String): String;
+begin
+  Result := 'light-view delete ' + FileName;
+end;
+
+// A DLL Explorer (or prevhost, or the search indexer) still holds cannot be deleted now:
+// delete it at the next logon instead (HKCU RunOnce per user, HKLM for all users), when
+// nothing has it loaded because no registration points at it any more. Explorer is never
+// closed (spec §6). After an uninstall, Folder (then empty) goes too.
+procedure DeleteAtNextLogon(Path, Folder: String);
+var
+  Command: String;
+begin
+  Command := '"' + ExpandConstant('{cmd}') + '" /c del /f /q "' + Path + '"';
+  if Folder <> '' then
+    Command := Command + ' & rmdir "' + Folder + '"';
+  RegWriteStringValue(HKA, RunOnceKey, RunOnceName(ExtractFileName(Path)), Command);
+end;
+
+// Deletes the lv-shell-*.dll files in {app}: after an install (the registry already points
+// at this version's DLL) every other version; after an uninstall all that remain.
+procedure DeleteShellDlls(Uninstalling: Boolean);
+var
+  Found: TFindRec;
+  Dir, Path, Folder: String;
+begin
+  Dir := ExpandConstant('{app}');
+  if Uninstalling then
+    Folder := Dir
+  else
+    Folder := '';
+  if FindFirst(Dir + '\lv-shell-*.dll', Found) then begin
+    try
+      repeat
+        if ((Found.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0) and
+           (Uninstalling or (CompareText(Found.Name, CurrentShellDll()) <> 0)) then begin
+          Path := Dir + '\' + Found.Name;
+          if not DeleteFile(Path) then
+            DeleteAtNextLogon(Path, Folder);
+        end;
+      until not FindNext(Found);
+    finally
+      FindClose(Found);
+    end;
+  end;
+  // Uninstalled, then this version reinstalled before the next logon: keep its DLL.
+  if not Uninstalling then
+    RegDeleteValue(HKA, RunOnceKey, RunOnceName(CurrentShellDll()));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    AllShared(TakeOver);
+  if CurStep = ssPostInstall then begin
+    InstallFinished := True;
+    DeleteShellDlls(False);
+  end;
+end;
+
+// Ruling M2: a failed or cancelled install leaves no shared value pointing at us.
+procedure DeinitializeSetup();
+begin
+  if not InstallFinished then
+    UndoTakeOvers();
+end;
+
+// Our handler classes (the keys [Registry] makes and deletes with uninsdeletekey, and the
+// PreviewHandlers value), removed at usUninstall: before [UninstallRun] deletes the worker's
+// AppContainer profile, so Explorer cannot create a handler that starts a worker (and so
+// makes the profile again) in between (review M6). They are ours alone (fixed CLSIDs).
+procedure RemoveHandlerClasses();
+begin
+  RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#ThumbnailClsid}'));
+  if IsAdminInstallMode then begin
+    RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#PreviewClsid}'));
+    RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{#DetailsClsid}'));
+    RegDeleteValue(HKA, 'Software\Microsoft\Windows\CurrentVersion\PreviewHandlers', ExpandConstant('{#PreviewClsid}'));
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  // usUninstall comes before the uninstall log runs ([UninstallRun] first, then the files
+  // and keys).
+  if CurUninstallStep = usUninstall then begin
+    AllShared(GiveBack);
+    RemoveHandlerClasses();
+  end;
+  if CurUninstallStep = usPostUninstall then
+    DeleteShellDlls(True);
 end;

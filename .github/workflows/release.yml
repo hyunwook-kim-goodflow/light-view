@@ -83,11 +83,13 @@ jobs:
         run: cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli
 
       # The same build package.ps1 makes (C runtime linked statically), done here so the
-      # executables can be signed before they are packaged.
+      # executables and the Explorer extension (lv_shell.dll, installer only) can be signed
+      # before they are packaged. SignPath's "executables" artifact configuration must list
+      # all three files.
       - name: Build
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked -p lv-app -p lv-worker
+        run: cargo build --release --locked -p lv-app -p lv-worker -p lv-shell
 
       - name: Upload executables for signing
         id: unsigned-exes
@@ -98,6 +100,7 @@ jobs:
           path: |
             target/release/lv-app.exe
             target/release/lv-worker.exe
+            target/release/lv_shell.dll
           if-no-files-found: error
 
       - name: Sign executables (SignPath)
@@ -115,7 +118,7 @@ jobs:
 
       - name: Use the signed executables
         if: env.SIGNING_ENABLED == 'true'
-        run: cp -f signed-exes/lv-app.exe signed-exes/lv-worker.exe target/release/
+        run: cp -f signed-exes/lv-app.exe signed-exes/lv-worker.exe signed-exes/lv_shell.dll target/release/
 
       # dist/light-view-<version>-portable.zip, dist/stage (installer input) and the
       # notices; fails if the unpacked zip is over 30 MB.
@@ -209,7 +212,7 @@ jobs:
           sha256sum --check SHA256SUMS.txt
           notes="light-view $VERSION
 
-          - light-view-$VERSION-setup.exe: 설치판 (per-user install, no administrator rights)
+          - light-view-$VERSION-setup.exe: 설치판 (for you only by default, no administrator rights; or for all users with administrator rights, which adds the HEIC preview pane and details)
           - light-view-$VERSION-portable.zip: 포터블판 (settings stay next to the exe)
           - SHA256SUMS.txt: SHA-256 checksums. Check with \`Get-FileHash <file>\` (README).
 

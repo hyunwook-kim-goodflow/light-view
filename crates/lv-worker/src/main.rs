@@ -1,5 +1,5 @@
-//! light-view's sandboxed worker: decodes HEIF files, rotates JPEGs losslessly and fits
-//! the app's pixels into lossy WebP files.
+//! light-view's sandboxed worker: decodes HEIF files and makes their thumbnails, rotates
+//! JPEGs losslessly and fits the app's pixels into lossy WebP files.
 //!
 //! Reads [`Request`]s from stdin and writes [`Response`]s to stdout (see `lv-ipc`). stdout
 //! carries framed responses only; diagnostics go to stderr. Exit codes: 0 after `Shutdown` or
@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use lv_core::color::{premultiply_to_bgra, to_srgb_in_place, ColorSource};
 use lv_core::decode::{max_file_bytes, DecodeLimits};
-use lv_heif::{decode_heif, ColorInfo, HeifError};
+use lv_heif::{decode_heif, thumbnail_heif, ColorInfo, HeifError, HeifImage};
 use lv_ipc::{
     max_bytes_response, max_request_data, max_response_pixels, read_request, write_response,
     FailKind, Request, Response, REQUEST_FIXED_LEN,
@@ -196,7 +196,19 @@ fn serve(config: &Config) -> ExitCode {
                 id,
                 max_pixels,
                 data,
-            } => decode(id, &data, decode_limit(max_pixels, config.max_pixels)),
+            } => {
+                let limit = decode_limit(max_pixels, config.max_pixels);
+                heif_response(id, || decode_heif(&data, limit))
+            }
+            Request::ThumbnailHeif {
+                id,
+                max_side,
+                max_pixels,
+                data,
+            } => {
+                let limit = decode_limit(max_pixels, config.max_pixels);
+                heif_response(id, || thumbnail_heif(&data, max_side, limit))
+            }
             Request::RotateJpeg {
                 id,
                 quarters,
@@ -227,11 +239,12 @@ fn serve(config: &Config) -> ExitCode {
     }
 }
 
-/// Decodes one file to premultiplied sRGB BGRA8. Panics anywhere in the pipeline (the
-/// libheif wrapper, qcms) become `Corrupt`; crashes in C code end the process instead.
-fn decode(id: u64, data: &[u8], max_pixels: u64) -> Response {
+/// Answers with the image `decode` makes (a whole file or a thumbnail) as premultiplied
+/// sRGB BGRA8. Panics anywhere in the pipeline (the libheif wrapper, qcms) become
+/// `Corrupt`; crashes in C code end the process instead.
+fn heif_response(id: u64, decode: impl FnOnce() -> Result<HeifImage, HeifError>) -> Response {
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let image = decode_heif(data, max_pixels)?;
+        let image = decode()?;
         let mut rgba = image.rgba;
         let source = match &image.color {
             ColorInfo::None => ColorSource::Srgb,

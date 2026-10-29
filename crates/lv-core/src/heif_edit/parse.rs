@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use super::{MAX_BOXES, MAX_EXTENTS};
+use super::{MAX_ASSOCIATIONS, MAX_BOXES, MAX_EXTENTS, MAX_IPMA_ENTRIES, MAX_ITEMS};
 
 /// How a box stores its size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,17 +113,21 @@ impl Heif {
 
     /// The properties associated with `item`, in `ipma` order.
     pub(super) fn props_of(&self, item: u32) -> Result<Vec<BoxRef>, String> {
-        let mut out = Vec::new();
-        for entry in self.ipma.entries.iter().filter(|e| e.item == item) {
-            for &index in entry.indices.iter().filter(|&&i| i != 0) {
-                let prop = self
-                    .props
-                    .get(usize::from(index) - 1)
-                    .ok_or("ipma refers to a missing property")?;
-                out.push(*prop);
-            }
-        }
-        Ok(out)
+        self.walk_props(item).collect()
+    }
+
+    /// The properties associated with `item`, in `ipma` order, one at a time (an error for
+    /// an index past `ipco`).
+    pub(super) fn walk_props(
+        &self,
+        item: u32,
+    ) -> impl Iterator<Item = Result<BoxRef, String>> + '_ {
+        self.indices_of(item).map(|index| {
+            self.props
+                .get(usize::from(index) - 1)
+                .copied()
+                .ok_or_else(|| "ipma refers to a missing property".to_string())
+        })
     }
 }
 
@@ -322,6 +326,9 @@ pub(super) fn parse_iloc(data: &[u8], b: &BoxRef) -> Result<Iloc, String> {
     } else {
         r.u32()?
     };
+    if item_count as usize > MAX_ITEMS {
+        return Err("too many iloc items".into());
+    }
     let mut items = Vec::new();
     let mut extents_total = 0usize;
     // Every item takes at least 6 bytes, so a false count runs out of data quickly.
@@ -339,7 +346,9 @@ pub(super) fn parse_iloc(data: &[u8], b: &BoxRef) -> Result<Iloc, String> {
         let dref = r.u16()?;
         let base = r.field(base_size)?;
         let extent_count = r.u16()?;
-        let mut extents = Vec::new();
+        // Exactly what this item may still add under the cap: no growth slack per item.
+        let mut extents =
+            Vec::with_capacity(usize::from(extent_count).min(MAX_EXTENTS - extents_total));
         for _ in 0..extent_count {
             extents_total += 1;
             if extents_total > MAX_EXTENTS {
@@ -366,7 +375,11 @@ pub(super) fn parse_ipma(data: &[u8], b: &BoxRef) -> Result<Ipma, String> {
     let wide = flags & 1 != 0;
     let entry_count_at = r.pos;
     let entry_count = r.u32()?;
+    if entry_count as usize > MAX_IPMA_ENTRIES {
+        return Err("too many ipma entries".into());
+    }
     let mut entries = Vec::new();
+    let mut associations = 0usize;
     // Every entry takes at least 3 bytes.
     for _ in 0..entry_count {
         let start = r.pos;
@@ -377,6 +390,10 @@ pub(super) fn parse_ipma(data: &[u8], b: &BoxRef) -> Result<Ipma, String> {
         };
         let count_at = r.pos;
         let count = r.u8()?;
+        associations += usize::from(count);
+        if associations > MAX_ASSOCIATIONS {
+            return Err("too many ipma associations".into());
+        }
         let mut indices = Vec::with_capacity(usize::from(count));
         for _ in 0..count {
             indices.push(if wide {

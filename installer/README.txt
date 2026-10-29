@@ -21,6 +21,26 @@ https://github.com/hyunwook-kim-goodflow/light-view
   once before deleting the folder to remove it.
 
 설치판 (installer)
+- 설치 첫 화면에서 두 방식 중 하나를 골라요 (the first page offers two install modes):
+    나만 사용 (기본, 관리자 권한 없음) / For me only (default, no administrator rights)
+      %LOCALAPPDATA%\Programs\light-view, HKCU
+      탐색기 HEIC/HEIF 썸네일 있음(탐색기 안에서 실행), 미리 보기 창·자세히 탭 없음
+      HEIC/HEIF thumbnails in Explorer (run inside Explorer); no preview pane, no Details tab
+    모든 사용자 (관리자 권한, UAC) / For all users (administrator rights, UAC prompt)
+      C:\Program Files\light-view, HKLM
+      썸네일, 미리 보기 창, 자세히 탭(해상도·찍은 날짜·카메라, 위치 정보는 없음)
+      Thumbnails, the preview pane and the Details tab (size, date taken, camera; no location)
+  두 방식 모두 사진 해석은 샌드박스 작업자(lv-worker.exe)에서만 해요.
+  (Either way, photos are decoded only by the sandboxed lv-worker.exe.)
+  업데이트·제거 때 탐색기를 닫지 않아요. 쓰던 옛 확장 DLL은 다음 로그인 때 지워져요.
+  (Updates and uninstalls never close Explorer; an old extension DLL still in use is
+  deleted at the next logon.)
+  모든 사용자 설치를 제거하면 다른 사용자 계정의 작업자 AppContainer 프로필은 남아요.
+  (Uninstalling the all-users install leaves other accounts' worker AppContainer profiles.)
+- 코드 서명은 v1.0 때 받아요. 그전에는 모든 사용자 설치의 UAC 창에 "알 수 없는 게시자"가
+  나오고 SmartScreen 경고가 뜰 수 있어요("추가 정보" → "실행").
+  (Unsigned until v1.0: the UAC prompt names an unknown publisher, and SmartScreen may
+  warn; choose "More info" → "Run anyway" after checking SHA256SUMS.txt.)
 - 설정은 %APPDATA%\light-view\settings.toml, 크래시 기록은 %LOCALAPPDATA%\light-view\crashes에 있어요.
   제거해도 설정과 크래시 기록은 남아요.
 - 기본 앱은 Windows 설정 > 앱 > 기본 앱에서 고를 수 있어요.

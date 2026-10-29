@@ -52,14 +52,25 @@ use crate::exif_edit::set_tiff_orientation_in_place;
 
 mod edit;
 mod parse;
+mod size;
 
 use edit::{add_irot, verify};
 use parse::{children, full_box, item_ids_of_type, parse, BoxRef, Extent, Heif, IlocItem, Reader};
+pub use size::display_size;
 
 /// Most boxes accepted in one container.
 const MAX_BOXES: usize = 4096;
-/// Most `iloc` extents accepted in one file (an extent can take zero bytes of `iloc`).
-const MAX_EXTENTS: usize = 1 << 20;
+/// Most `iloc` extents accepted in one file (an extent can take zero bytes of `iloc`, so
+/// this bounds what parsing keeps: a few MiB). A 48 MP grid photo has under a hundred.
+const MAX_EXTENTS: usize = 1 << 16;
+/// Most `iloc` items accepted in one file (version 2 counts them in 32 bits).
+const MAX_ITEMS: usize = 1 << 16;
+/// Most `ipma` entries accepted in one file (one per item, and `iinf` holds at most
+/// [`MAX_BOXES`] items).
+const MAX_IPMA_ENTRIES: usize = MAX_BOXES;
+/// Most property associations accepted in one `ipma`, all entries together. With the entry
+/// and item caps this bounds what parsing keeps to a few MiB whatever the input size.
+const MAX_ASSOCIATIONS: usize = 1 << 16;
 /// Top-level boxes that hold no absolute file offsets of their own.
 const SHIFTABLE_TOP_LEVEL: [&[u8; 4]; 5] = [b"ftyp", b"meta", b"mdat", b"free", b"skip"];
 
@@ -114,6 +125,33 @@ pub fn read_rotation(heif: &[u8]) -> Result<u8, String> {
         Some(irot) => irot_angle(heif, &irot),
         None => Ok(0),
     }
+}
+
+/// A transformative property that turns or mirrors an item (`clap` crops and is left out).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnStep {
+    /// `irot`: anti-clockwise quarter turns, 0..=3.
+    Irot(u8),
+    /// `imir`: the `axis` bit, 0 or 1.
+    Imir(u8),
+}
+
+/// The `irot` and `imir` properties associated with `item`, in `ipma` order (the order a
+/// decoder applies them in). Read-only; the input is untrusted.
+pub fn turn_steps(heif: &[u8], item: u32) -> Result<Vec<TurnStep>, String> {
+    let file = parse(heif)?;
+    let mut steps = Vec::new();
+    for prop in file.props_of(item)? {
+        match &prop.typ {
+            b"irot" => steps.push(TurnStep::Irot(irot_angle(heif, &prop)?)),
+            b"imir" => match heif.get(prop.body) {
+                Some(&b) if prop.body < prop.end => steps.push(TurnStep::Imir(b & 1)),
+                _ => return Err("imir box is empty".into()),
+            },
+            _ => {}
+        }
+    }
+    Ok(steps)
 }
 
 /// The primary item's only `irot`; more than one is an error (libheif applies them all).
@@ -674,6 +712,41 @@ mod tests {
         assert_eq!(read_rotation(&sample(PLAIN)).unwrap(), 0);
         assert_eq!(read_rotation(&sample(ALPHA)).unwrap(), 0);
         assert_eq!(read_rotation(&sample(IROT90)).unwrap(), 1);
+    }
+
+    #[test]
+    fn turn_steps_are_read_in_ipma_order() {
+        assert_eq!(turn_steps(&sample(PLAIN), 1).unwrap(), vec![]);
+        assert_eq!(
+            turn_steps(&sample(IROT90), 1).unwrap(),
+            vec![TurnStep::Irot(1)]
+        );
+        let mut s = spec();
+        s.items.push(Item {
+            id: 2,
+            typ: *b"hvc1",
+            method: 0,
+            chunks: vec![b"thumbnail-bytes".to_vec()],
+        });
+        s.props = vec![
+            bx(b"ispe", &[0; 12]),
+            bx(b"imir", &[1]),
+            bx(b"irot", &[0xFE]),
+            bx(b"imir", &[0]),
+            bx(b"clap", &[0; 32]),
+        ];
+        s.assocs = vec![(1, vec![1, 2, 5, 3, 4]), (2, vec![1, 3])];
+        let file = build(&s);
+        assert_eq!(
+            turn_steps(&file, 1).unwrap(),
+            vec![TurnStep::Imir(1), TurnStep::Irot(2), TurnStep::Imir(0)]
+        );
+        assert_eq!(turn_steps(&file, 2).unwrap(), vec![TurnStep::Irot(2)]);
+        assert_eq!(turn_steps(&file, 9).unwrap(), vec![]);
+        // An empty imir is corrupt; so is a file that does not parse.
+        s.props[1] = bx(b"imir", &[]);
+        assert!(turn_steps(&build(&s), 1).is_err());
+        assert!(turn_steps(b"nope", 1).is_err());
     }
 
     #[test]

@@ -62,6 +62,8 @@ const RESIZE: &str = "--resize";
 fn main() -> anyhow::Result<()> {
     let start = Instant::now();
     quiet_system_errors();
+    // The worker's diagnostics go to the app's stderr (lv-sandbox is silent by default).
+    lv_sandbox::sandbox::enable_logging();
     // SAFETY: plain call with valid flags, made before any other DLL is loaded on demand.
     unsafe {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
