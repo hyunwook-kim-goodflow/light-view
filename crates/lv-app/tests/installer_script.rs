@@ -480,7 +480,8 @@ fn installer_registers_heic_shell_handlers() {
     let step = routine(&code, "CurStepChanged");
     assert!(step.contains("if CurStep = ssInstall then\n    AllShared(TakeOver);"));
     let uninstall = routine(&code, "CurUninstallStepChanged");
-    assert!(uninstall.contains("if CurUninstallStep = usUninstall then\n    AllShared(GiveBack);"));
+    assert!(uninstall
+        .contains("if CurUninstallStep = usUninstall then begin\n    AllShared(GiveBack);"));
     // Ruling M2: a failed or cancelled install puts back what it replaced.
     assert!(step.contains("InstallFinished := True;"));
     let deinit = routine(&code, "DeinitializeSetup");
@@ -512,6 +513,57 @@ fn installer_registers_heic_shell_handlers() {
         .1;
     assert!(kept.contains("if not RegValueExists(HKA, KeptSaved[I], '') then"));
     assert!(kept.contains("RegWriteStringValue(HKA, KeptSaved[I], '', KeptValues[I]);"));
+}
+
+/// Review M6: the uninstaller removes our handler classes at usUninstall, which Inno runs
+/// before the uninstall log ([UninstallRun] first), so `--uninstall-cleanup` deletes the
+/// AppContainer profile only once no thumbnail call can start a worker that makes it again.
+#[test]
+fn installer_removes_handlers_before_deleting_the_profile() {
+    let s = script();
+    let code = code(&s);
+    let step = routine(&code, "CurUninstallStepChanged");
+    let at_uninstall = step
+        .split_once("if CurUninstallStep = usUninstall then begin")
+        .expect("usUninstall block")
+        .1;
+    let at_uninstall = &at_uninstall[..at_uninstall.find("end;").unwrap()];
+    assert!(
+        at_uninstall.contains("RemoveHandlerClasses();"),
+        "{at_uninstall}"
+    );
+    let post = step
+        .split_once("if CurUninstallStep = usPostUninstall then")
+        .expect("usPostUninstall block")
+        .1;
+    assert!(!post.contains("RemoveHandlerClasses"));
+    // Every class [Registry] registers, with the same mode checks, and the PreviewHandlers
+    // value. No shared key is touched here (AllShared does those).
+    let remove = routine(&code, "RemoveHandlerClasses");
+    let (both_modes, admin_only) = remove
+        .split_once("if IsAdminInstallMode then begin")
+        .expect("admin-only block");
+    let delete = |name: &str| {
+        format!(
+            r"RegDeleteKeyIncludingSubkeys(HKA, ExpandConstant('Software\Classes\CLSID\{{#{name}}}'));"
+        )
+    };
+    assert!(both_modes.contains(&delete("ThumbnailClsid")), "{remove}");
+    assert!(admin_only.contains(&delete("PreviewClsid")), "{remove}");
+    assert!(admin_only.contains(&delete("DetailsClsid")), "{remove}");
+    assert!(admin_only.contains(
+        r"RegDeleteValue(HKA, 'Software\Microsoft\Windows\CurrentVersion\PreviewHandlers', ExpandConstant('{#PreviewClsid}'));"
+    ));
+    assert_eq!(remove.matches("RegDelete").count(), 4, "{remove}");
+    assert!(!remove.contains("ShellEx") && !remove.contains("PropertyHandlers"));
+    // The profile cleanup stays in [UninstallRun] (it needs light-view.exe, which is gone
+    // by usPostUninstall).
+    let uninstall = section(&s, "UninstallRun");
+    assert!(has_line(
+        &uninstall,
+        &[r#"Parameters: "--uninstall-cleanup""#]
+    ));
+    assert!(!step.contains("--uninstall-cleanup"));
 }
 
 #[test]
