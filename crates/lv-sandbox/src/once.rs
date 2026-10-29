@@ -16,7 +16,6 @@
 use std::io::{BufReader, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use lv_ipc::{
@@ -26,6 +25,7 @@ use lv_ipc::{
 use crate::appcontainer::{for_worker, profile_sid};
 use crate::process::{drain_stderr, WRITE_SETTLE};
 use crate::sandbox::{log, start_suspended, terminate_job, Pipes, Suspended};
+use crate::threads;
 
 /// Room for an answer's fixed fields and a `Failed` message, on top of its pixels.
 const ANSWER_SLACK: u64 = 64 * 1024;
@@ -108,20 +108,21 @@ fn run(
     // Without our copy of its read end, a write to a worker that died fails at once.
     drop(stdin_monitor);
 
-    let named = |what: &str| thread::Builder::new().name(format!("lv-worker {pid} {what}"));
+    // Counted threads (`live_threads`): they may outlive this call by a moment, and a DLL
+    // caller must not be unloaded under them.
+    let named = |what: &str| format!("lv-worker {pid} {what}");
     let (answers, answer) = mpsc::channel();
-    let threads = named("stderr")
-        .spawn(move || drain_stderr(pid, stderr))
-        .and_then(|_| {
-            named("writer").spawn(move || {
+    let threads = threads::spawn(named("stderr"), move || drain_stderr(pid, stderr))
+        .and_then(|()| {
+            threads::spawn(named("writer"), move || {
                 let mut stdin = stdin;
                 // A failed write shows as the worker's missing answer. Dropping `stdin` then
                 // tells the worker there is nothing more, so it exits after answering.
                 let _ = stdin.write_all(&bytes).and_then(|()| stdin.flush());
             })
         })
-        .and_then(|_| {
-            named("reader").spawn(move || {
+        .and_then(|()| {
+            threads::spawn(named("reader"), move || {
                 let mut stdout = BufReader::with_capacity(64 * 1024, stdout);
                 let _ = answers.send(read_response(&mut stdout, cap));
             })
