@@ -73,23 +73,21 @@ pub(crate) fn over_background(bgra: &mut [u8], background: COLORREF) {
 /// A bitmap of ours, deleted with it. GDI objects belong to the process, not a thread.
 struct OwnedBitmap(HBITMAP);
 
+/// Bitmaps of views made and not deleted yet, in the process (tests: GDI may keep answering
+/// for a deleted handle for a while, so its handle cannot tell).
 #[cfg(test)]
-thread_local! {
-    /// Bitmaps made on this thread and not deleted yet (tests: GDI may keep answering for a
-    /// deleted handle for a while, so its handle cannot tell).
-    static LIVE_BITMAPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+static LIVE_BITMAPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Bitmaps of views made on this thread and not deleted yet.
+/// Bitmaps of views made and not deleted yet (tests that make views hold `serial`).
 #[cfg(test)]
 pub(crate) fn live_bitmaps() -> usize {
-    LIVE_BITMAPS.with(|n| n.get())
+    LIVE_BITMAPS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 impl OwnedBitmap {
     fn new(bitmap: HBITMAP) -> OwnedBitmap {
         #[cfg(test)]
-        LIVE_BITMAPS.with(|n| n.set(n.get() + 1));
+        LIVE_BITMAPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         OwnedBitmap(bitmap)
     }
 }
@@ -104,7 +102,7 @@ impl Drop for OwnedBitmap {
         let deleted = unsafe { DeleteObject(self.0) };
         #[cfg(test)]
         if deleted.as_bool() {
-            LIVE_BITMAPS.with(|n| n.set(n.get() - 1));
+            LIVE_BITMAPS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
         let _ = deleted;
     }
@@ -237,6 +235,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::serial;
     use windows::Win32::Graphics::Gdi::CreateCompatibleBitmap;
     use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 
@@ -337,6 +336,7 @@ mod tests {
 
     #[test]
     fn paint_centers_the_image_over_the_background() {
+        let _serial = serial();
         let mut view = View::new();
         view.set_background(COLORREF(0x0000_FF00)); // green
         assert_eq!(painted(&view, 8, 8, &[(0, 0), (4, 4)]), [0xFF00, 0xFF00]);
@@ -359,6 +359,7 @@ mod tests {
 
     #[test]
     fn a_new_background_recomposites_a_translucent_image() {
+        let _serial = serial();
         let mut view = View::new();
         view.set_background(COLORREF(0x0000_00FF)); // red
         view.show(Image {

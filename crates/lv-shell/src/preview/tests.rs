@@ -2,24 +2,31 @@
 //! `SHCreateMemStream`, results posted to the child window and taken by pumping this
 //! thread's messages. Tests that count objects or threads hold [`serial`].
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, ComObject, IUnknown, Interface, Result, PCWSTR};
-use windows::Win32::Foundation::{E_FAIL, HWND, RECT, S_FALSE, S_OK};
-use windows::Win32::System::Com::IClassFactory;
+use windows::core::{implement, w, ComObject, IUnknown, Interface, Result, HRESULT, PCWSTR};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{E_FAIL, E_NOTIMPL, HWND, RECT, S_FALSE, S_OK};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::System::Com::{
+    IClassFactory, ISequentialStream_Impl, IStream, IStream_Impl, LOCKTYPE, STATFLAG, STATSTG,
+    STGC, STREAM_SEEK,
+};
 use windows::Win32::System::Ole::{IObjectWithSite, IOleWindow};
 use windows::Win32::UI::Shell::PropertiesSystem::IInitializeWithStream;
 use windows::Win32::UI::Shell::{IPreviewHandler, IPreviewHandlerVisuals};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, IsWindow, PeekMessageW, TranslateMessage,
-    MSG, PM_REMOVE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DestroyWindow, DispatchMessageW, GetParent, GetWindowRect, IsWindow,
+    PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
 };
 
 use super::draw::{live_bitmaps, Image};
-use super::{preview_side, Handler, Render, MAX_SIDE};
+use super::window::live_windows;
+use super::{preview_side, queue, Handler, Render, MAX_SIDE, MIN_SIDE};
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
 use crate::tests::{built_worker, mem_stream, sample, serial, wait_until_unloadable};
 use crate::CLSID_PREVIEW;
@@ -146,14 +153,23 @@ fn preview_side_is_the_long_side_of_the_area_clamped() {
     };
     assert_eq!(preview_side(huge), MAX_SIDE);
     assert_eq!(MAX_SIDE, 2048);
-    assert_eq!(preview_side(RECT::default()), 1);
+    // A tiny or empty area still asks for a useful image (it is never enlarged later).
+    assert_eq!(MIN_SIDE, 256);
+    assert_eq!(preview_side(RECT::default()), MIN_SIDE);
+    let small = RECT {
+        left: 0,
+        top: 0,
+        right: 40,
+        bottom: 30,
+    };
+    assert_eq!(preview_side(small), MIN_SIDE);
     let inverted = RECT {
         left: 50,
         top: 50,
         right: 0,
         bottom: 0,
     };
-    assert_eq!(preview_side(inverted), 1);
+    assert_eq!(preview_side(inverted), MIN_SIDE);
 }
 
 #[test]
@@ -184,43 +200,327 @@ fn do_preview_without_window_fails() {
     assert_eq!(empty.child(), None);
 }
 
+/// A render whose first call waits for the test (a slow first preview): it says when a call
+/// starts (its index) and answers call `n` with a `30 + n` x 40 image, the first with 10 x 20.
+struct Gated {
+    render: Render,
+    started: mpsc::Receiver<usize>,
+    release: mpsc::Sender<()>,
+}
+
+fn gated_render() -> Gated {
+    let (release, gate) = mpsc::channel::<()>();
+    let (tell, started) = mpsc::channel::<usize>();
+    let (gate, tell) = (Mutex::new(gate), Mutex::new(tell));
+    let calls = AtomicUsize::new(0);
+    let render: Render = Arc::new(move |_, _| {
+        let call = calls.fetch_add(1, Ordering::SeqCst);
+        let _ = tell.lock().unwrap().send(call);
+        if call == 0 {
+            let _ = gate.lock().unwrap().recv();
+            Some(image(10, 20))
+        } else {
+            Some(image(30 + call as u32, 40))
+        }
+    });
+    Gated {
+        render,
+        started,
+        release,
+    }
+}
+
 /// Review Focus 4: when an earlier preview's result arrives after a later DoPreview, only
 /// the later one is drawn.
 #[test]
 fn stale_preview_result_is_dropped() {
     let _serial = serial();
     let parent = Parent::new();
-    let (release, gate) = mpsc::channel::<()>();
-    let gate = Mutex::new(gate);
-    let calls = AtomicUsize::new(0);
-    let render: Render = std::sync::Arc::new(move |_, _| {
-        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            // The first preview is slow: it answers only when the test says so.
-            let _ = gate.lock().unwrap().recv();
-            Some(image(10, 20))
-        } else {
-            Some(image(30, 40))
-        }
-    });
-    let handler = handler_with(render, &parent, b"heic");
+    let gated = gated_render();
+    let handler = handler_with(gated.render, &parent, b"heic");
     do_preview(&handler).expect("first DoPreview");
+    assert_eq!(gated.started.recv_timeout(Duration::from_secs(10)), Ok(0));
     do_preview(&handler).expect("second DoPreview");
+    // Now the first preview answers, late, and then the second runs.
+    gated.release.send(()).unwrap();
+    let mut seen = Vec::new();
     assert!(
-        pump_until(Duration::from_secs(10), || shown(&handler).is_some()),
+        pump_until(Duration::from_secs(10), || {
+            let now = shown(&handler);
+            if now.is_some() && seen.last() != Some(&now) {
+                seen.push(now);
+            }
+            now.is_some()
+        }),
         "the second result is drawn"
     );
-    assert_eq!(shown(&handler), Some((30, 40)));
-
-    // Now the first preview answers, late.
-    release.send(()).unwrap();
     wait_for_no_threads();
     pump_until(Duration::from_millis(200), || false);
     assert_eq!(
-        shown(&handler),
-        Some((30, 40)),
-        "the stale result was drawn"
+        seen,
+        [Some((31, 40))],
+        "only the second result was ever shown"
     );
+    assert_eq!(shown(&handler), Some((31, 40)));
     assert!(!handler.shared().has_ready(), "the stale result was kept");
+}
+
+/// Ruling I2: one render at a time in the process, the latest request wins. While the first
+/// render runs, more previews come; only the first and the last start a worker.
+#[test]
+fn only_the_first_and_the_last_of_many_previews_start() {
+    let _serial = serial();
+    wait_for_no_threads();
+    let before = queue::started();
+    let parent = Parent::new();
+    let gated = gated_render();
+    let handler = handler_with(gated.render, &parent, b"heic");
+    do_preview(&handler).expect("first DoPreview");
+    assert_eq!(gated.started.recv_timeout(Duration::from_secs(10)), Ok(0));
+    for _ in 0..5 {
+        do_preview(&handler).expect("DoPreview while the first renders");
+    }
+    // A second handler's request (another file in the same prevhost) is the latest of all.
+    let other_parent = Parent::new();
+    let other = handler_with(Arc::new(|_, _| Some(image(7, 7))), &other_parent, b"other");
+    do_preview(&other).expect("the other handler's DoPreview");
+    gated.release.send(()).unwrap();
+    assert!(pump_until(Duration::from_secs(10), || shown(&other).is_some()));
+    wait_for_no_threads();
+    assert_eq!(
+        queue::started() - before,
+        2,
+        "only the first and the last started"
+    );
+    assert_eq!(
+        gated.started.try_iter().collect::<Vec<_>>(),
+        Vec::<usize>::new(),
+        "none of the replaced previews started"
+    );
+    assert_eq!(shown(&other), Some((7, 7)));
+    // The first handler's only started preview was superseded: it shows nothing.
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(shown(&handler), None);
+
+    // Unload empties the queue of the handler's waiting request.
+    let late = gated_render();
+    let third = handler_with(late.render, &parent, b"third");
+    do_preview(&third).unwrap();
+    assert_eq!(late.started.recv_timeout(Duration::from_secs(10)), Ok(0));
+    do_preview(&third).unwrap();
+    // SAFETY: plain call.
+    unsafe { third.to_interface::<IPreviewHandler>().Unload() }.unwrap();
+    let before = queue::started();
+    late.release.send(()).unwrap();
+    wait_for_no_threads();
+    assert_eq!(
+        queue::started(),
+        before,
+        "an unloaded preview's request started"
+    );
+}
+
+/// Review I1: the parent destroys our window before Unload (the pane closes). Nothing is
+/// posted to the dead window, every call afterwards leaves it alone, and the next SetWindow
+/// and DoPreview make a new window that shows the image.
+#[test]
+fn a_window_destroyed_by_its_parent_is_forgotten() {
+    let _serial = serial();
+    let parent = Parent::new();
+    let gated = gated_render();
+    let handler = handler_with(gated.render, &parent, b"heic");
+    let preview: IPreviewHandler = handler.to_interface();
+    do_preview(&handler).unwrap();
+    assert_eq!(gated.started.recv_timeout(Duration::from_secs(10)), Ok(0));
+    let old = handler.child().expect("a window");
+    assert_eq!(live_windows(), 1);
+    drop(parent);
+    // SAFETY: plain query of a handle value.
+    assert!(!unsafe { IsWindow(old) }.as_bool());
+    assert_eq!(handler.child(), None, "the dead window is still ours");
+    assert_eq!(live_windows(), 0);
+
+    // The render finishes for the dead window: nothing is posted or kept.
+    gated.release.send(()).unwrap();
+    wait_for_no_threads();
+    assert!(!handler.shared().has_ready());
+    assert_eq!(shown(&handler), None);
+    // SAFETY: a local rect; plain calls. None may touch the dead window.
+    unsafe {
+        preview.SetRect(&AREA).unwrap();
+        assert_eq!(
+            (Interface::vtable(&preview).SetFocus)(preview.as_raw()),
+            S_FALSE,
+            "no window to focus"
+        );
+    }
+
+    let parent = Parent::new();
+    // SAFETY: our window and a local rect.
+    unsafe { preview.SetWindow(parent.0, &AREA) }.unwrap();
+    do_preview(&handler).expect("DoPreview in the new parent");
+    assert!(pump_until(Duration::from_secs(10), || shown(&handler).is_some()));
+    let new = handler.child().expect("a new window");
+    assert_ne!(new, old);
+    // SAFETY: plain query of a handle value.
+    assert!(unsafe { IsWindow(new) }.as_bool());
+    // SAFETY: plain call.
+    unsafe { preview.Unload() }.unwrap();
+    assert_eq!(live_windows(), 0);
+    drop((preview, handler));
+    assert_eq!(wait_until_unloadable(), S_OK);
+}
+
+#[test]
+fn set_window_and_set_rect_move_the_child() {
+    let _serial = serial();
+    let parent = Parent::new();
+    let handler = handler_with(Arc::new(|_, _| Some(image(5, 5))), &parent, b"heic");
+    let preview: IPreviewHandler = handler.to_interface();
+    do_preview(&handler).unwrap();
+    let child = handler.child().unwrap();
+    let placed = |want: RECT| {
+        let mut got = RECT::default();
+        // SAFETY: our window and a local rect.
+        unsafe { GetWindowRect(child, &mut got) }.unwrap();
+        let mut corner = [POINT {
+            x: got.left,
+            y: got.top,
+        }];
+        // SAFETY: plain call on a local array.
+        assert!(unsafe { ScreenToClient(GetParent(child).unwrap(), &mut corner[0]) }.as_bool());
+        assert_eq!(
+            (
+                corner[0].x,
+                corner[0].y,
+                got.right - got.left,
+                got.bottom - got.top
+            ),
+            (
+                want.left,
+                want.top,
+                want.right - want.left,
+                want.bottom - want.top
+            )
+        );
+    };
+    placed(AREA);
+    let moved = RECT {
+        left: 10,
+        top: 20,
+        right: 110,
+        bottom: 70,
+    };
+    // SAFETY: a local rect.
+    unsafe { preview.SetRect(&moved) }.unwrap();
+    placed(moved);
+    let other = Parent::new();
+    // SAFETY: our window and a local rect.
+    unsafe { preview.SetWindow(other.0, &AREA) }.unwrap();
+    // SAFETY: plain call.
+    assert_eq!(unsafe { GetParent(child) }.unwrap(), other.0, "reparented");
+    placed(AREA);
+    // SAFETY: plain call.
+    unsafe { preview.Unload() }.unwrap();
+}
+
+/// A memory stream whose first Read first runs `on_read`: another call of ours coming in
+/// while prevhost's stream proxy is out of the apartment.
+#[implement(IStream)]
+struct Reentrant {
+    inner: IStream,
+    on_read: RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+#[allow(non_snake_case)]
+impl ISequentialStream_Impl for Reentrant_Impl {
+    fn Read(&self, pv: *mut c_void, cb: u32, pcbread: *mut u32) -> HRESULT {
+        let hook = self.on_read.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        // SAFETY: the caller's buffer and out-pointer, passed on.
+        unsafe {
+            (Interface::vtable(&self.inner).base__.Read)(self.inner.as_raw(), pv, cb, pcbread)
+        }
+    }
+
+    fn Write(&self, _pv: *const c_void, _cb: u32, _pcbwritten: *mut u32) -> HRESULT {
+        E_NOTIMPL
+    }
+}
+
+#[allow(non_snake_case)]
+impl IStream_Impl for Reentrant_Impl {
+    fn Seek(&self, mv: i64, origin: STREAM_SEEK, newpos: *mut u64) -> Result<()> {
+        // SAFETY: passed on to a valid stream.
+        unsafe {
+            self.inner
+                .Seek(mv, origin, (!newpos.is_null()).then_some(newpos))
+        }
+    }
+    fn SetSize(&self, _size: u64) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn CopyTo(&self, _: Option<&IStream>, _: u64, _: *mut u64, _: *mut u64) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Commit(&self, _flags: &STGC) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Revert(&self) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn LockRegion(&self, _: u64, _: u64, _: &LOCKTYPE) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn UnlockRegion(&self, _: u64, _: u64, _: u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn Stat(&self, stat: *mut STATSTG, flag: &STATFLAG) -> Result<()> {
+        // SAFETY: passed on to a valid stream.
+        unsafe { self.inner.Stat(stat, *flag) }
+    }
+    fn Clone(&self) -> Result<IStream> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+/// Review I3: Unload comes in while DoPreview reads the stream. The DoPreview then stops:
+/// no window is made (none leaks), no render starts, nothing is shown.
+#[test]
+fn unload_during_the_stream_read_stops_the_preview() {
+    let _serial = serial();
+    wait_for_no_threads();
+    let before = queue::started();
+    let parent = Parent::new();
+    let handler = ComObject::new(Handler::with_render(Arc::new(|_, _| Some(image(5, 5)))));
+    let preview: IPreviewHandler = handler.to_interface();
+    let reentrant = preview.clone();
+    let stream: IStream = Reentrant {
+        inner: mem_stream(b"heic bytes"),
+        on_read: RefCell::new(Some(Box::new(move || {
+            // SAFETY: plain call, reentering the handler as a nested COM call would.
+            unsafe { reentrant.Unload() }.unwrap();
+        }))),
+    }
+    .into();
+    // SAFETY: our window, a local rect and a valid stream.
+    unsafe {
+        preview.SetWindow(parent.0, &AREA).unwrap();
+        handler
+            .to_interface::<IInitializeWithStream>()
+            .Initialize(&stream, 0)
+            .unwrap();
+    }
+    assert!(do_preview(&handler).is_err(), "an unloaded preview went on");
+    assert_eq!(handler.child(), None);
+    assert_eq!(live_windows(), 0, "a window leaked");
+    wait_for_no_threads();
+    assert_eq!(queue::started(), before, "a render started");
+    assert_eq!(shown(&handler), None);
+    drop((stream, preview, handler));
+    assert_eq!(wait_until_unloadable(), S_OK);
 }
 
 #[test]
