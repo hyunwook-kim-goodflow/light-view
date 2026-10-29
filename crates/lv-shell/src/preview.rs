@@ -3,7 +3,7 @@
 //!
 //! `DoPreview` reads the stream (up to [`READ_CAP`]) on the calling thread, makes a child
 //! window of the preview pane's window, and queues the render ([`queue`]: one sandboxed
-//! worker at a time in the process, the latest request wins). The image's long side is the
+//! worker at a time in the process; a handler's latest request replaces its waiting one). The image's long side is the
 //! pane's long side, at least [`MIN_SIDE`] and at most [`MAX_SIDE`]. The result is posted to
 //! the window, which draws it fitted (aspect kept, never enlarged, centered) over the pane's
 //! background. Each `DoPreview` starts a new generation, so a result of an earlier one is
@@ -132,11 +132,13 @@ impl Handler {
             state.calls += 1;
             state.stream.take()
         };
-        // Released with the borrow ended: a Release may leave the apartment.
-        drop(stream);
+        // The window first: the mailbox no longer tracks it, so it must be gone before
+        // anything that may leave the apartment (where its parent could destroy it).
         if let Some(child) = child {
             window::destroy(child);
         }
+        // Released with the borrow ended: a Release may leave the apartment.
+        drop(stream);
         self.shared.view().clear();
     }
 

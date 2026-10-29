@@ -1,10 +1,13 @@
-//! At most one preview render runs in the process (ruling I2): a newer request replaces the
-//! waiting one, so a request replaced before it starts never starts, and scrolling quickly
-//! through a folder starts the first file's worker and the last one's only.
+//! At most one preview render runs in the process (rulings I2 and its amendment), and each
+//! handler has at most one request waiting: a handler's newer request replaces its waiting
+//! one, so a request replaced before it starts never starts, and scrolling quickly through a
+//! folder starts the first file's worker and the last one's only. Requests of different
+//! handlers (two preview panes in one prevhost) all wait, so every pane gets its image, one
+//! render after another.
 //!
 //! One counted background thread (`lv_sandbox::spawn_counted`) runs while there is work: it
-//! takes the waiting request, renders it unless its preview is no longer current, and hands
-//! the result to its window ([`Shared::deliver`]), until nothing waits.
+//! drops the waiting requests whose preview is no longer current, renders the newest of the
+//! others and hands the result to its window ([`Shared::deliver`]), until nothing waits.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,8 +28,10 @@ pub(crate) struct Request {
 }
 
 struct Queue {
-    waiting: Option<Request>,
-    /// Whether the background thread runs (it takes `waiting` before it ends).
+    /// At most one request per handler, each with its submission number.
+    waiting: Vec<(u64, Request)>,
+    submitted: u64,
+    /// Whether the background thread runs (it empties `waiting` before it ends).
     running: bool,
     /// Renders started (tests).
     #[cfg(test)]
@@ -34,7 +39,8 @@ struct Queue {
 }
 
 static QUEUE: Mutex<Queue> = Mutex::new(Queue {
-    waiting: None,
+    waiting: Vec::new(),
+    submitted: 0,
     running: false,
     #[cfg(test)]
     started: 0,
@@ -44,17 +50,29 @@ fn queue() -> MutexGuard<'static, Queue> {
     QUEUE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Queues `request` in place of any waiting one (dropped unstarted) and starts the
-/// background thread if it does not run.
+/// Takes the waiting request of `shared` out of `waiting`, if any.
+fn take_of(waiting: &mut Vec<(u64, Request)>, shared: &Shared) -> Option<Request> {
+    let at = waiting
+        .iter()
+        .position(|(_, r)| std::ptr::eq(Arc::as_ptr(&r.shared), shared))?;
+    Some(waiting.swap_remove(at).1)
+}
+
+/// Queues `request` in place of its handler's waiting one (dropped unstarted) and starts
+/// the background thread if it does not run.
 pub(crate) fn submit(request: Request) -> Result<()> {
+    let shared = Arc::clone(&request.shared);
     let replaced;
     {
         let mut queue = queue();
-        replaced = queue.waiting.replace(request);
+        replaced = take_of(&mut queue.waiting, &shared);
+        queue.submitted += 1;
+        let number = queue.submitted;
+        queue.waiting.push((number, request));
         if !queue.running {
             if lv_sandbox::spawn_counted("light-view preview".into(), run).is_err() {
                 // Nothing will take it: drop it with the lock released.
-                let mine = queue.waiting.take();
+                let mine = take_of(&mut queue.waiting, &shared);
                 drop(queue);
                 drop((mine, replaced));
                 return Err(E_FAIL.into());
@@ -69,41 +87,59 @@ pub(crate) fn submit(request: Request) -> Result<()> {
 
 /// Drops the waiting request of `shared`, if any: its preview is over (Unload).
 pub(crate) fn cancel(shared: &Shared) {
-    let mine = {
-        let mut queue = queue();
-        let is_mine = queue
-            .waiting
-            .as_ref()
-            .is_some_and(|r| std::ptr::eq(Arc::as_ptr(&r.shared), shared));
-        if is_mine {
-            queue.waiting.take()
-        } else {
-            None
-        }
-    };
+    let mine = take_of(&mut queue().waiting, shared);
     drop(mine);
 }
 
-/// The background thread: renders waiting requests until none is left.
+/// Clears `running` if the background thread unwinds, so that a later [`submit`] starts a
+/// new one: previews never stall. (A normal end clears it under the lock, as it finds no
+/// work.)
+struct Running;
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            queue().running = false;
+        }
+    }
+}
+
+/// The background thread: renders the newest current request until none is left.
 fn run() {
+    let _running = Running;
     loop {
-        let request = {
+        let (request, stale) = {
             let mut queue = queue();
-            match queue.waiting.take() {
-                Some(request) => request,
+            // Lock order: the queue, then a handler's mailbox (`is_current`); nothing takes
+            // them the other way round.
+            let (current, stale): (Vec<_>, Vec<_>) = std::mem::take(&mut queue.waiting)
+                .into_iter()
+                .partition(|(_, r)| r.shared.is_current(r.generation));
+            queue.waiting = current;
+            let newest = queue
+                .waiting
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (number, _))| *number)
+                .map(|(at, _)| at);
+            match newest {
+                Some(at) => {
+                    #[cfg(test)]
+                    {
+                        queue.started += 1;
+                    }
+                    (queue.waiting.swap_remove(at).1, stale)
+                }
                 None => {
                     queue.running = false;
+                    drop(queue);
+                    drop(stale);
                     return;
                 }
             }
         };
-        if !request.shared.is_current(request.generation) {
-            continue;
-        }
-        #[cfg(test)]
-        {
-            queue().started += 1;
-        }
+        // Stale requests (whole files' bytes) are freed outside the lock.
+        drop(stale);
         let Request {
             shared,
             generation,
