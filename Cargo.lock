@@ -260,7 +260,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lv-app"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "image",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "lv-bench"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "windows",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "lv-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "jpeg-decoder",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "lv-heif"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "libheif-rs",
  "lv-core",
@@ -308,11 +308,11 @@ dependencies = [
 
 [[package]]
 name = "lv-ipc"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "lv-jpegtran"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "lv-core",
  "lv-ipc",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "lv-sandbox"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "lv-ipc",
  "tempfile",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "lv-shell"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "lv-core",
  "lv-ipc",
@@ -340,14 +340,14 @@ dependencies = [
 
 [[package]]
 name = "lv-webp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "lv-worker"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "lv-core",
  "lv-heif",

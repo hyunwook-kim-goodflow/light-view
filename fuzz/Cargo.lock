@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "lv-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "jpeg-decoder",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "lv-ipc"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "miniz_oxide"
