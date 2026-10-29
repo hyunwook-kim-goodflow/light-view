@@ -314,6 +314,11 @@ var
   // previous values are kept here in memory too).
   TakenKeys, TakenSaved, TakenOurs, TakenPrevious: TArrayOfString;
   TakenHadPrevious, TakenSavedNow: array of Boolean;
+  // The values an earlier install saved (SavedRoot\Group\Ext) that this run found and
+  // kept (an upgrade or reinstall, where the shared value is already ours). A rollback of
+  // this run may delete SavedRoot; UndoTakeOvers then writes them back, so a later
+  // uninstall can still put Windows' own handlers back (review I3).
+  KeptSaved, KeptValues: TArrayOfString;
   InstallFinished: Boolean;
 
 // True when {app} is the spec folder of the install mode, %LOCALAPPDATA%\Programs\light-view
@@ -360,8 +365,9 @@ end;
 // class Ours. Key and Ours may hold Inno constants ({{ escapes). The value found before
 // ours is kept under SavedRoot\Group\Ext.
 //   TakeOver, at ssInstall (before [Registry] runs): save the value found, once. A
-//     reinstall finds ours there and keeps what the first install saved; no value now
-//     means there is nothing to put back (and a stale saved value goes).
+//     reinstall finds ours there and keeps what the first install saved (remembering it
+//     in KeptSaved/KeptValues too); no value now means there is nothing to put back (and
+//     a stale saved value goes).
 //   GiveBack, at usUninstall (before the uninstaller deletes SavedRoot): only while the
 //     value is still ours, put the saved value back, or delete ours (and the key if then
 //     empty) when nothing was saved. A value someone else wrote after us is left alone.
@@ -376,8 +382,16 @@ begin
   Saved := SavedRoot + '\' + Group + '\' + Ext;
   if Action = TakeOver then begin
     HadPrevious := RegQueryStringValue(HKA, Key, '', Current);
-    if HadPrevious and (CompareText(Current, Ours) = 0) then
+    if HadPrevious and (CompareText(Current, Ours) = 0) then begin
+      if RegQueryStringValue(HKA, Saved, '', Previous) then begin
+        N := GetArrayLength(KeptSaved);
+        SetArrayLength(KeptSaved, N + 1);
+        SetArrayLength(KeptValues, N + 1);
+        KeptSaved[N] := Saved;
+        KeptValues[N] := Previous;
+      end;
       exit;
+    end;
     N := GetArrayLength(TakenKeys);
     SetArrayLength(TakenKeys, N + 1);
     SetArrayLength(TakenSaved, N + 1);
@@ -424,7 +438,8 @@ end;
 
 // The install failed or was cancelled after TakeOver (and maybe after [Registry]; a
 // rollback does not touch values without uninstall flags): put back what this run
-// replaced, where the value is still ours, and drop what it saved.
+// replaced, where the value is still ours, and drop what it saved. What an earlier install
+// saved stays: written back if the rollback deleted it (review I3).
 procedure UndoTakeOvers();
 var
   I: Integer;
@@ -446,6 +461,9 @@ begin
       RegDeleteKeyIfEmpty(HKA, 'Software\goodflow');
     end;
   end;
+  for I := 0 to GetArrayLength(KeptSaved) - 1 do
+    if not RegValueExists(HKA, KeptSaved[I], '') then
+      RegWriteStringValue(HKA, KeptSaved[I], '', KeptValues[I]);
 end;
 
 // This version's shell DLL, the one the registry points at.

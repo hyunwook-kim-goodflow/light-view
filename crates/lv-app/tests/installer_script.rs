@@ -489,6 +489,29 @@ fn installer_registers_heic_shell_handlers() {
     assert!(undo.contains("(CompareText(Current, TakenOurs[I]) = 0)"));
     assert!(undo.contains("RegWriteStringValue(HKA, TakenKeys[I], '', TakenPrevious[I])"));
     assert!(undo.contains("DeleteOurValue(TakenKeys[I]);"));
+    // Review I3: an upgrade finds the value already ours and keeps what the first install
+    // saved; it remembers that saved value in memory, and a failed or cancelled upgrade
+    // writes it back if its rollback deleted SavedRoot, so a later uninstall still finds it.
+    let take_over = helper.split("end else begin").next().unwrap();
+    let ours = take_over
+        .split_once("if HadPrevious and (CompareText(Current, Ours) = 0) then begin")
+        .expect("the already-ours branch of TakeOver")
+        .1;
+    let ours = &ours[..ours.find("exit;").expect("exit in the already-ours branch")];
+    assert!(ours.contains("if RegQueryStringValue(HKA, Saved, '', Previous) then begin"));
+    assert!(ours.contains("KeptSaved[N] := Saved;"));
+    assert!(ours.contains("KeptValues[N] := Previous;"));
+    assert!(
+        !ours.contains("RegWrite") && !ours.contains("RegDelete"),
+        "{ours}"
+    );
+    assert!(code.contains("KeptSaved, KeptValues: TArrayOfString;"));
+    let kept = undo
+        .split_once("for I := 0 to GetArrayLength(KeptSaved) - 1 do")
+        .expect("UndoTakeOvers restores the kept values")
+        .1;
+    assert!(kept.contains("if not RegValueExists(HKA, KeptSaved[I], '') then"));
+    assert!(kept.contains("RegWriteStringValue(HKA, KeptSaved[I], '', KeptValues[I]);"));
 }
 
 #[test]
