@@ -9,8 +9,14 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # `windows` and `windows-core` (and the macro crates they pull in) must move
+      # together: the `implement` macro from one version does not compile against the
+      # other's traits. Every update type, majors included, comes as one pull request.
+      windows-crates:
+        patterns: ["windows", "windows-*"]
       cargo-minor:
         update-types: [minor, patch]
+        exclude-patterns: ["windows", "windows-*"]
   - package-ecosystem: cargo
     directory: /fuzz
     schedule:
