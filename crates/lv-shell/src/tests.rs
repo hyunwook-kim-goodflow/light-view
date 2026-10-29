@@ -21,18 +21,15 @@ use windows::Win32::UI::Shell::{IThumbnailProvider, SHCreateMemStream, WTSAT_ARG
 use crate::bitmap::tests::take;
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
 use crate::thumbnail::{Provider, READ_CAP};
-use crate::{guarded, worker_exe, CLSID_THUMBNAIL};
+use crate::{guarded, worker_exe, CLSID_PREVIEW, CLSID_THUMBNAIL};
 
-/// The preview handler's CLSID (Global Constraints); not served by this DLL yet.
-const CLSID_PREVIEW: GUID = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
-
-fn serial() -> MutexGuard<'static, ()> {
+pub(crate) fn serial() -> MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// `target/<profile>`, where `lv-worker.exe` and its codec DLLs are built.
-fn profile_dir() -> PathBuf {
+pub(crate) fn profile_dir() -> PathBuf {
     let test_exe = std::env::current_exe().expect("current exe");
     // target/<profile>/deps/lv_shell-<hash>.exe
     test_exe
@@ -42,7 +39,7 @@ fn profile_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn built_worker() -> PathBuf {
+pub(crate) fn built_worker() -> PathBuf {
     let exe = profile_dir().join("lv-worker.exe");
     assert!(
         exe.is_file(),
@@ -52,13 +49,13 @@ fn built_worker() -> PathBuf {
     exe
 }
 
-fn sample() -> Vec<u8> {
+pub(crate) fn sample() -> Vec<u8> {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/heif/rainbow-451x461.heic");
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn mem_stream(bytes: &[u8]) -> IStream {
+pub(crate) fn mem_stream(bytes: &[u8]) -> IStream {
     // SAFETY: plain call; the stream copies `bytes`.
     unsafe { SHCreateMemStream(Some(bytes)) }.expect("SHCreateMemStream")
 }
@@ -204,10 +201,24 @@ fn a_panic_is_an_error_not_an_unwind() {
 }
 
 #[test]
-fn only_the_thumbnail_class_is_served() {
+fn only_our_two_classes_are_served() {
     let _serial = serial();
     let mut out: *mut c_void = std::ptr::null_mut();
-    for clsid in [CLSID_PREVIEW, GUID::zeroed()] {
+    for clsid in [CLSID_THUMBNAIL, CLSID_PREVIEW] {
+        // SAFETY: valid GUID pointers and a local out-pointer.
+        let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut out) };
+        assert_eq!(hr, S_OK);
+        // SAFETY: on S_OK `out` holds an IClassFactory reference that we now own.
+        drop(unsafe { IClassFactory::from_raw(out) });
+    }
+    let thumbnail_class = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
+    let preview_class = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
+    assert_eq!(
+        (CLSID_THUMBNAIL, CLSID_PREVIEW),
+        (thumbnail_class, preview_class)
+    );
+    let details_class = GUID::from_u128(0x0EA2AA38_AE7B_4906_9BD9_605EA0348914);
+    for clsid in [details_class, GUID::zeroed()] {
         // SAFETY: valid GUID pointers and a local out-pointer.
         let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut out) };
         assert_eq!(hr, CLASS_E_CLASSNOTAVAILABLE);
@@ -231,7 +242,7 @@ fn class_factory() -> IClassFactory {
     unsafe { IClassFactory::from_raw(out) }
 }
 
-fn wait_until_unloadable() -> HRESULT {
+pub(crate) fn wait_until_unloadable() -> HRESULT {
     let deadline = Instant::now() + Duration::from_secs(10);
     while DllCanUnloadNow() != S_OK && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));

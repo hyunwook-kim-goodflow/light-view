@@ -87,7 +87,8 @@ impl IThumbnailProvider_Impl for Provider_Impl {
             }
             let stream = self.stream().clone().ok_or(E_UNEXPECTED)?;
             let data = stream::read_capped(&stream, READ_CAP)?;
-            let (width, height, bgra) = thumbnail(&self.exe, cx, data).ok_or(E_FAIL)?;
+            let max_side = cx.clamp(1, MAX_SIDE);
+            let (width, height, bgra) = ask_worker(&self.exe, max_side, data).ok_or(E_FAIL)?;
             let made = bitmap::to_hbitmap(width, height, &bgra)?;
             // SAFETY: checked non-null; COM contract: writable.
             unsafe {
@@ -99,13 +100,13 @@ impl IThumbnailProvider_Impl for Provider_Impl {
     }
 }
 
-/// The worker's thumbnail of `data` for Explorer's size `cx`: width, height and
-/// premultiplied BGRA. `None` for an empty file or any failure.
-fn thumbnail(exe: &Path, cx: u32, data: Vec<u8>) -> Option<(u32, u32, Vec<u8>)> {
+/// The worker's (`exe`) image of the HEIC file `data`, its long side `max_side` at most (the
+/// caller clamps it well under lv-ipc's 4096): width, height and premultiplied BGRA. `None`
+/// for an empty file or any failure. The thumbnail and the preview handler both ask so.
+pub(crate) fn ask_worker(exe: &Path, max_side: u32, data: Vec<u8>) -> Option<(u32, u32, Vec<u8>)> {
     if data.is_empty() {
         return None;
     }
-    let max_side = cx.clamp(1, MAX_SIDE);
     let max_pixels = DecodeLimits::default().max_pixels;
     let request = Request::ThumbnailHeif {
         id: REQUEST_ID,
