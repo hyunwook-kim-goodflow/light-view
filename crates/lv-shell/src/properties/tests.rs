@@ -19,6 +19,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithStream, IPropertyStore, IPropertyStoreCapabilities, PROPERTYKEY,
 };
 
+use super::boundary::{used_paths, violations, ALLOWED};
 use super::read::{heif_properties, DateTaken, HeifProps};
 use super::Store;
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
@@ -386,79 +387,25 @@ fn property_store_survives_corrupt_heic() {
 }
 
 /// The details code is never a way to a worker: it is called by the SYSTEM search indexer.
-/// Its sources (and the stream reader it uses) name nothing of the sandbox, the worker, the
-/// other handlers, processes, threads, files, the network or C; and making and using one
-/// through the DLL asks for no worker path and leaves no thread.
+/// Every path its sources (and the stream reader it uses) name is on the allowlist of
+/// `boundary.rs`, which has nothing of the sandbox, the worker, the other handlers,
+/// processes, threads, files, the network or C; and making and using one through the DLL
+/// asks for no worker path and leaves no thread.
 #[test]
 fn property_store_never_starts_worker() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let forbidden = [
-        "lv_sandbox",
-        "lv_ipc",
-        "thumbnail",
-        "preview",
-        "worker",
-        "run_once",
-        "spawn",
-        "std::thread",
-        "std::process",
-        "std::fs",
-        "std::net",
-        "File::",
-        "CreateFile",
-        "OpenFile",
-        "IInitializeWithFile",
-        "Path::",
-        "PathBuf",
-        "Command",
-        "CreateProcess",
-        "ShellExecute",
-        "LoadLibrary",
-        "extern",
-        "#[link",
-        "asm!",
-    ];
+    let mut used = Vec::new();
     for file in ["properties.rs", "properties/read.rs", "stream.rs"] {
         let text = std::fs::read_to_string(src.join(file)).unwrap();
-        // The product code: up to the tests, without comments.
-        let code: String = text
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap()
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for word in forbidden {
-            assert!(!code.contains(word), "{file} names {word}");
-        }
-        // Only these crates and modules of this one.
-        for (at, _) in code.match_indices("lv_") {
-            assert!(
-                code[at..].starts_with("lv_core::"),
-                "{file}: {}",
-                &code[at..at + 20]
-            );
-        }
-        for (at, _) in code.match_indices("lv_core::") {
-            let rest = &code[at + "lv_core::".len()..];
-            assert!(
-                rest.starts_with("heif_edit::display_size")
-                    || rest.starts_with("exif_info::camera_facts"),
-                "{file}: lv_core::{}",
-                &rest[..20.min(rest.len())]
-            );
-        }
-        for (at, _) in code.match_indices("crate::") {
-            let rest = &code[at + "crate::".len()..];
-            assert!(
-                ["stream::", "{guarded, ObjectCount}"]
-                    .iter()
-                    .any(|ok| rest.starts_with(ok)),
-                "{file}: crate::{}",
-                &rest[..20.min(rest.len())]
-            );
-        }
+        assert_eq!(violations(&text), Vec::<String>::new(), "{file}");
+        used.extend(used_paths(&text));
+    }
+    // The scan sees the imports, and the list holds nothing they do not use.
+    for allowed in ALLOWED {
+        assert!(
+            used.iter().any(|u| u == allowed),
+            "{allowed} is listed but unused"
+        );
     }
 
     let _serial = serial();
@@ -590,4 +537,53 @@ fn a_stream_over_the_cap_is_refused() {
     assert!(unsafe { init.Initialize(&stream, STGM_READ.0) }.is_err());
     // SAFETY: plain call.
     assert_eq!(unsafe { store.GetCount() }.unwrap(), 0);
+}
+
+/// The boundary scan refuses what the old deny-list let through: a module imported under a
+/// short name, a thread started through Win32, a process or file reached after a test
+/// module, an alias, a new handler's code.
+#[test]
+fn the_boundary_scan_refuses_new_ways_out() {
+    let refused = |source: &str| {
+        let found = violations(source);
+        assert!(!found.is_empty(), "accepted: {source}");
+        found
+    };
+    let found = refused(
+        "use std::{fs, io};
+fn f() { let _ = fs::read(\"x\"); }
+",
+    );
+    assert!(found.contains(&"use std::fs".to_string()), "{found:?}");
+    assert!(found.contains(&"use std::io".to_string()), "{found:?}");
+    assert!(found.contains(&"path fs::read".to_string()), "{found:?}");
+    let found = refused(
+        "fn f() { unsafe { windows::Win32::System::Threading::CreateThread(None, 0, None, None, 0, None) }; }",
+    );
+    assert_eq!(
+        found,
+        ["path windows::Win32::System::Threading::CreateThread"]
+    );
+    refused("use windows::Win32::System::Threading::{CreateThread as Go};");
+    refused("use windows::Win32::UI::Shell::SHCreateStreamOnFileEx;");
+    refused("use crate::{guarded, preview::Handler};");
+    refused("use crate::stream;");
+    refused("use windows::Win32::Foundation::*;");
+    refused("extern \"system\" { fn WinExec(); }");
+    // Test modules are skipped, but product code after one is not.
+    let found = refused(
+        "#[cfg(test)]
+mod tests {
+    use std::fs;
+}
+fn later() { std::process::exit(0) }
+",
+    );
+    assert_eq!(found, ["path std::process::exit"]);
+    // Comments, strings, primitives and type paths are not paths out.
+    let fine = "// std::fs::read
+use crate::guarded;
+fn f() -> u32 { let _ = \"std::fs\";                 let _ = '\''; u32::from(1u8) + Value::Count as u32 }
+";
+    assert_eq!(violations(fine), Vec::<String>::new());
 }
