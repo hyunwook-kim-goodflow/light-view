@@ -1,15 +1,14 @@
 //! The thumbnail handler: `IInitializeWithStream` + `IThumbnailProvider`.
 //!
-//! `Initialize` keeps Explorer's stream; `GetThumbnail(cx)` reads it (up to the app's HEIC
-//! file size cap), has one sandboxed worker make a thumbnail whose long side is `cx` at most
-//! (never upscaled; `cx` clamped to [`MAX_SIDE`]) and answers it as a premultiplied ARGB
+//! `Initialize` keeps Explorer's stream; `GetThumbnail(cx)` reads it (up to [`READ_CAP`]),
+//! has one sandboxed worker make a thumbnail whose long side is `cx` at most (never upscaled; `cx` clamped to [`MAX_SIDE`]) and answers it as a premultiplied ARGB
 //! bitmap. Anything else is an error HRESULT, so Explorer shows the icon.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use lv_core::decode::{max_file_bytes, DecodeLimits};
+use lv_core::decode::DecodeLimits;
 use lv_ipc::{Request, Response};
 use windows::core::{implement, Result};
 use windows::Win32::Foundation::{
@@ -32,6 +31,10 @@ pub(crate) const MAX_SIDE: u32 = 1024;
 /// How long the worker may take; `run_once` may return up to a second later (ruling R3's
 /// 10 s bound).
 const DEADLINE: Duration = Duration::from_secs(9);
+/// The most bytes read from Explorer's stream: 64 MiB. iPhone HEIC photos are 1 to 10 MB and
+/// 48 MP ones up to about 25 MB; a larger file gets no thumbnail. Far under the app's HEIC
+/// cap (about 1 GiB), which would let one thumbnail take gigabytes inside explorer.exe.
+pub(crate) const READ_CAP: u64 = 64 * 1024 * 1024;
 /// Each worker answers one request only, so one id does.
 const REQUEST_ID: u64 = 1;
 
@@ -83,7 +86,7 @@ impl IThumbnailProvider_Impl for Provider_Impl {
                 return Err(E_INVALIDARG.into());
             }
             let stream = self.stream().clone().ok_or(E_UNEXPECTED)?;
-            let data = stream::read_capped(&stream, max_file_bytes(&DecodeLimits::default()))?;
+            let data = stream::read_capped(&stream, READ_CAP)?;
             let (width, height, bgra) = thumbnail(&self.exe, cx, data).ok_or(E_FAIL)?;
             let made = bitmap::to_hbitmap(width, height, &bgra)?;
             // SAFETY: checked non-null; COM contract: writable.
@@ -110,7 +113,8 @@ fn thumbnail(exe: &Path, cx: u32, data: Vec<u8>) -> Option<(u32, u32, Vec<u8>)> 
         max_pixels,
         data,
     };
-    let response = lv_sandbox::run_once(exe, max_pixels, &request, DEADLINE).ok()?;
+    // The request owns the file's bytes; run_once writes them without copying.
+    let response = lv_sandbox::run_once(exe, max_pixels, request, DEADLINE).ok()?;
     checked(response, max_side)
 }
 

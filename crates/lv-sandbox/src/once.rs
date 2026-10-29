@@ -13,7 +13,7 @@
 //! deadline the worker's Job is terminated, and the call returns only once the worker has
 //! exited (or a short grace period has passed, which is logged).
 
-use std::io::{BufReader, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -57,13 +57,14 @@ impl std::error::Error for RunError {}
 
 /// Starts `exe` (`lv-worker.exe`) in its sandbox with `--max-pixels max_pixels`, sends it
 /// `request` and returns its one answer, whatever its kind: the caller checks that it is
-/// the kind it asked for. `deadline` counts from the call, the worker's start included; when
-/// it passes, the worker is ended and the call fails with [`RunError::Timeout`]. The worker
-/// never outlives the call.
+/// the kind it asked for. `request` is moved to the thread that writes it, so its bytes (a
+/// whole file) are never copied. `deadline` counts from the call, the worker's start
+/// included; when it passes, the worker is ended and the call fails with
+/// [`RunError::Timeout`]. The worker never outlives the call.
 pub fn run_once(
     exe: &Path,
     max_pixels: u64,
-    request: &Request,
+    request: Request,
     deadline: Duration,
 ) -> Result<Response, RunError> {
     run(exe, max_pixels, &[], request, deadline, |_| {})
@@ -75,18 +76,18 @@ fn run(
     exe: &Path,
     max_pixels: u64,
     args: &[&str],
-    request: &Request,
+    request: Request,
     deadline: Duration,
     on_start: impl FnOnce(&Suspended),
 ) -> Result<Response, RunError> {
     let started = Instant::now();
-    // Encoded up front: a request lv-ipc refuses starts no worker, and the writer thread owns
-    // its bytes.
-    let mut bytes = Vec::new();
-    write_request(&mut bytes, request)
+    // Checked up front (lv-ipc validates a request before it writes any of it, so a sink costs
+    // nothing): a request lv-ipc refuses starts no worker. Not encoded into a buffer: the
+    // writer thread writes the request itself, and its data is not copied.
+    write_request(&mut io::sink(), &request)
         .map_err(|e| RunError::Start(format!("the request cannot be encoded: {e}")))?;
     let id = request.id();
-    let cap = response_cap(request, max_pixels);
+    let cap = response_cap(&request, max_pixels);
 
     let container = for_worker(exe, profile_sid);
     let suspended = start_suspended(exe, max_pixels, args, true, container.as_ref())
@@ -115,10 +116,10 @@ fn run(
     let threads = threads::spawn(named("stderr"), move || drain_stderr(pid, stderr))
         .and_then(|()| {
             threads::spawn(named("writer"), move || {
-                let mut stdin = stdin;
+                let mut stdin = BufWriter::new(stdin);
                 // A failed write shows as the worker's missing answer. Dropping `stdin` then
                 // tells the worker there is nothing more, so it exits after answering.
-                let _ = stdin.write_all(&bytes).and_then(|()| stdin.flush());
+                let _ = write_request(&mut stdin, &request).and_then(|()| stdin.flush());
             })
         })
         .and_then(|()| {

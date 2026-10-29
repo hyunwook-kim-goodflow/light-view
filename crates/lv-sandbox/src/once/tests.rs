@@ -89,7 +89,7 @@ fn in_job(suspended: &Suspended) -> bool {
 #[test]
 fn run_once_decodes_heic() {
     assert_thumbnail(
-        run_once(&worker_exe(), MAX_PIXELS, &thumbnail_request(7), DEADLINE),
+        run_once(&worker_exe(), MAX_PIXELS, thumbnail_request(7), DEADLINE),
         7,
     );
     let decode = Request::DecodeHeif {
@@ -97,7 +97,7 @@ fn run_once_decodes_heic() {
         max_pixels: MAX_PIXELS,
         data: sample(),
     };
-    match run_once(&worker_exe(), MAX_PIXELS, &decode, DEADLINE) {
+    match run_once(&worker_exe(), MAX_PIXELS, decode, DEADLINE) {
         Ok(Response::Image {
             id, width, height, ..
         }) => assert_eq!((id, width, height), (8, 451, 461)),
@@ -111,7 +111,7 @@ fn run_once_decodes_heic() {
         data: vec![0; 64],
     };
     assert!(matches!(
-        run_once(&worker_exe(), MAX_PIXELS, &garbage, DEADLINE),
+        run_once(&worker_exe(), MAX_PIXELS, garbage, DEADLINE),
         Ok(Response::Failed { id: 9, .. })
     ));
 }
@@ -124,7 +124,7 @@ fn run_once_times_out_and_kills_worker() {
         &worker_exe(),
         MAX_PIXELS,
         &["--test-mode=hang"],
-        &thumbnail_request(1),
+        thumbnail_request(1),
         Duration::from_secs(1),
         |suspended| watch = Some(Process::open(suspended.sandboxed.pid)),
     );
@@ -148,7 +148,7 @@ fn run_once_worker_is_born_in_job() {
         &worker_exe(),
         MAX_PIXELS,
         &[],
-        &thumbnail_request(3),
+        thumbnail_request(3),
         DEADLINE,
         |suspended| {
             seen = Some((
@@ -172,7 +172,7 @@ fn run_once_worker_is_born_in_job() {
 fn run_once_failures_are_errors() {
     let missing = worker_exe().with_file_name("no-such-worker.exe");
     assert!(matches!(
-        run_once(&missing, MAX_PIXELS, &thumbnail_request(1), DEADLINE),
+        run_once(&missing, MAX_PIXELS, thumbnail_request(1), DEADLINE),
         Err(RunError::Start(_))
     ));
     for (mode, id) in [("--test-mode=crash", 1), ("--test-mode=die-at-start", 2)] {
@@ -180,7 +180,7 @@ fn run_once_failures_are_errors() {
             &worker_exe(),
             MAX_PIXELS,
             &[mode],
-            &thumbnail_request(id),
+            thumbnail_request(id),
             DEADLINE,
             |_| {},
         );
@@ -197,7 +197,7 @@ fn run_once_failures_are_errors() {
         max_pixels: MAX_PIXELS,
         data: vec![],
     };
-    let result = run(&worker_exe(), MAX_PIXELS, &[], &invalid, DEADLINE, |_| {
+    let result = run(&worker_exe(), MAX_PIXELS, &[], invalid, DEADLINE, |_| {
         started = true
     });
     assert!(matches!(result, Err(RunError::Start(_))), "{result:?}");
@@ -338,7 +338,7 @@ fn run_once_uses_the_appcontainer_where_the_folder_allows_it() {
         &exe,
         MAX_PIXELS,
         &[],
-        &thumbnail_request(6),
+        thumbnail_request(6),
         DEADLINE,
         |suspended| boxed = Some(in_appcontainer(suspended)),
     );
@@ -368,7 +368,7 @@ fn low_integrity_host_child() {
         Path::new(&exe),
         MAX_PIXELS,
         &[],
-        &thumbnail_request(5),
+        thumbnail_request(5),
         DEADLINE,
         |suspended| seen = Some(in_job(suspended)),
     );
