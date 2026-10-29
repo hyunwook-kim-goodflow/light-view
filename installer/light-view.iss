@@ -64,10 +64,14 @@ DefaultDirName={autopf}\light-view
 ; drive root). Hiding the page is not enough (/DIR= and a previous install's folder still
 ; choose it), so the grant also checks the folder itself (IsDefaultAppDir in [Code]).
 DisableDirPage=yes
-; Never close or restart Explorer (spec §6). The default, yes, lets the Restart Manager
-; offer to close every program using a file being replaced, Explorer included when it holds
-; the shell DLL. A running light-view.exe now gets Inno Setup's retry prompt instead.
-CloseApplications=no
+; Never close or restart Explorer (spec §6). The Restart Manager looks only for programs
+; using the files this filter names: our two exes. A running viewer or worker is offered
+; for closing (and not restarted); the shell DLL is not in the filter, so Explorer,
+; prevhost or the search indexer holding lv-shell-*.dll are never checked nor offered.
+; (The default filter, *.exe,*.dll,*.chm, would offer to close Explorer.)
+CloseApplications=yes
+CloseApplicationsFilter=light-view.exe,lv-worker.exe
+RestartApplications=no
 DisableProgramGroupPage=yes
 ; Windows 10 22H2 or later, x64 (spec §9).
 MinVersion=10.0.19045
@@ -235,8 +239,12 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
 ; --- HEIC/HEIF in Explorer (M7). The DLL never decodes: the sandboxed lv-worker.exe next to
-; it does. Only our class keys and our handler subkeys under .heic/.heif\ShellEx are deleted
-; on uninstall, never the shared .heic, .heif or ShellEx keys.
+; it does. Only our own class keys are deleted on uninstall. The handler values under
+; .heic/.heif\ShellEx\{guid} and PropertyHandlers\.heic/.heif are shared with other
+; programs (another HEIC tool may own them): they carry no uninsdelete flag. [Code]
+; (Shared, AllShared) saves the value it finds before [Registry] writes ours, and on
+; uninstall puts it back, or deletes ours (and the key only if then empty) when there was
+; none; a value someone else wrote after us is left alone.
 ; Thumbnails, both modes. Per user the thumbnail host (dllhost) ignores HKCU-only classes
 ; (Task 1 spike, 0x80040154), so the class runs inside Explorer: DisableProcessIsolation.
 ; All users: Windows' isolated thumbnail host, no DisableProcessIsolation.
@@ -244,21 +252,20 @@ Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}"; ValueType: string
 Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}"; ValueType: dword; ValueName: "DisableProcessIsolation"; ValueData: "1"; Check: not IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"
 Root: HKA; Subkey: "Software\Classes\CLSID\{#ThumbnailClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
-Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"
+Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#ThumbnailShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#ThumbnailClsid}"
 ; Preview pane, all users only: prevhost ignores HKCU-only classes (Task 1b spike).
 Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}"; ValueType: string; ValueName: ""; ValueData: "light-view HEIC preview"; Flags: uninsdeletekey; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}"; ValueType: string; ValueName: "AppID"; ValueData: "{#PrevhostAppId}"; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#PreviewClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"; Check: IsAdminInstallMode
-Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Flags: uninsdeletekey; Check: IsAdminInstallMode
-Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Flags: uninsdeletekey; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\.heic\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Check: IsAdminInstallMode
+Root: HKA; Subkey: "Software\Classes\.heif\ShellEx\{#PreviewShellEx}"; ValueType: string; ValueName: ""; ValueData: "{#PreviewClsid}"; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\PreviewHandlers"; ValueType: string; ValueName: "{#PreviewClsid}"; ValueData: "light-view HEIC preview"; Flags: uninsdeletevalue; Check: IsAdminInstallMode
 ; Details (size, date taken, camera), all users only: Windows reads PropertyHandlers from
 ; HKLM only, and the search indexer (SYSTEM) loads the class too. The value replaces
-; Windows' own handler: [Code] saves the previous value under
-; HKLM\Software\goodflow\light-view\PreviousPropertyHandler before this runs and puts it
-; back on uninstall (or deletes ours if there was none), so no uninsdelete flag here.
+; Windows' own handler; its previous value is kept under
+; HKLM\Software\goodflow\light-view\PreviousPropertyHandler (see Shared in [Code]).
 Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}"; ValueType: string; ValueName: ""; ValueData: "light-view HEIC details"; Flags: uninsdeletekey; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\lv-shell-{#AppVersion}.dll"; Check: IsAdminInstallMode
 Root: HKA; Subkey: "Software\Classes\CLSID\{#DetailsClsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"; Check: IsAdminInstallMode
@@ -293,9 +300,21 @@ Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /remove:g *S-1-15-2-1"; Fla
 const
   // Inno Setup's uninstall entry for the AppId above, in either hive.
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7FCE06F6-E068-426B-A625-25814604682E}_is1';
-  PropertyHandlers = 'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers';
-  SavedHandlers = 'Software\goodflow\light-view\PreviousPropertyHandler';
+  // Where a shared value we replace is kept: SavedRoot\<Group>\<.ext>, default value
+  // (deleted with the rest of SavedRoot on uninstall, after it was put back).
+  SavedRoot = 'Software\goodflow\light-view';
   RunOnceKey = 'Software\Microsoft\Windows\CurrentVersion\RunOnce';
+  // What Shared does.
+  TakeOver = 0;
+  GiveBack = 1;
+
+var
+  // The shared values this setup run replaced (TakeOver), so that DeinitializeSetup can
+  // put them back when the install does not finish (a rollback deletes SavedRoot, so the
+  // previous values are kept here in memory too).
+  TakenKeys, TakenSaved, TakenOurs, TakenPrevious: TArrayOfString;
+  TakenHadPrevious, TakenSavedNow: array of Boolean;
+  InstallFinished: Boolean;
 
 // True when {app} is the spec folder of the install mode, %LOCALAPPDATA%\Programs\light-view
 // per user or {autopf}\light-view (C:\Program Files\light-view) for all users
@@ -319,6 +338,7 @@ end;
 function InitializeSetup(): Boolean;
 begin
   Result := True;
+  InstallFinished := False;
   if IsAdminInstallMode then begin
     if RegKeyExists(HKCU, UninstallKey) then
       SuppressibleMsgBox(CustomMessage('PerUserAlsoInstalled'), mbInformation, MB_OK, IDOK);
@@ -328,46 +348,103 @@ begin
   end;
 end;
 
-// The details handler's class ID, '{0EA2AA38-...}'.
-function DetailsClass(): String;
+// Deletes our default value of Key, then Key itself only if nothing else is left in it
+// (another program's values and subkeys stay).
+procedure DeleteOurValue(Key: String);
 begin
-  Result := ExpandConstant('{#DetailsClsid}');
+  RegDeleteValue(HKA, Key, '');
+  RegDeleteKeyIfEmpty(HKA, Key);
 end;
 
-// All users only, before [Registry] runs: remember the property handler Windows (or
-// another program) registered for Ext, so the uninstaller can put it back. A reinstall
-// finds our own class there and keeps what the first install saved.
-procedure SavePropertyHandler(Ext: String);
+// One shared handler value, the default value of Key (HKA), which [Registry] sets to our
+// class Ours. Key and Ours may hold Inno constants ({{ escapes). The value found before
+// ours is kept under SavedRoot\Group\Ext.
+//   TakeOver, at ssInstall (before [Registry] runs): save the value found, once. A
+//     reinstall finds ours there and keeps what the first install saved; no value now
+//     means there is nothing to put back (and a stale saved value goes).
+//   GiveBack, at usUninstall (before the uninstaller deletes SavedRoot): only while the
+//     value is still ours, put the saved value back, or delete ours (and the key if then
+//     empty) when nothing was saved. A value someone else wrote after us is left alone.
+procedure Shared(Action: Integer; Key, Group, Ext, Ours: String);
 var
+  Saved, Current, Previous: String;
+  HadPrevious: Boolean;
+  N: Integer;
+begin
+  Key := ExpandConstant(Key);
+  Ours := ExpandConstant(Ours);
+  Saved := SavedRoot + '\' + Group + '\' + Ext;
+  if Action = TakeOver then begin
+    HadPrevious := RegQueryStringValue(HKA, Key, '', Current);
+    if HadPrevious and (CompareText(Current, Ours) = 0) then
+      exit;
+    N := GetArrayLength(TakenKeys);
+    SetArrayLength(TakenKeys, N + 1);
+    SetArrayLength(TakenSaved, N + 1);
+    SetArrayLength(TakenOurs, N + 1);
+    SetArrayLength(TakenPrevious, N + 1);
+    SetArrayLength(TakenHadPrevious, N + 1);
+    SetArrayLength(TakenSavedNow, N + 1);
+    TakenKeys[N] := Key;
+    TakenSaved[N] := Saved;
+    TakenOurs[N] := Ours;
+    TakenPrevious[N] := Current;
+    TakenHadPrevious[N] := HadPrevious;
+    if HadPrevious then
+      TakenSavedNow[N] := RegWriteStringValue(HKA, Saved, '', Current)
+    else begin
+      RegDeleteValue(HKA, Saved, '');
+      TakenSavedNow[N] := False;
+    end;
+  end else begin
+    if not RegQueryStringValue(HKA, Key, '', Current) then
+      exit;
+    if CompareText(Current, Ours) <> 0 then
+      exit;
+    if RegQueryStringValue(HKA, Saved, '', Previous) then
+      RegWriteStringValue(HKA, Key, '', Previous)
+    else
+      DeleteOurValue(Key);
+  end;
+end;
+
+// Every shared value the [Registry] section writes, with the same keys and classes:
+// thumbnails in both modes, preview and details for all users only.
+procedure AllShared(Action: Integer);
+begin
+  Shared(Action, 'Software\Classes\.heic\ShellEx\{#ThumbnailShellEx}', 'PreviousThumbnailHandler', '.heic', '{#ThumbnailClsid}');
+  Shared(Action, 'Software\Classes\.heif\ShellEx\{#ThumbnailShellEx}', 'PreviousThumbnailHandler', '.heif', '{#ThumbnailClsid}');
+  if IsAdminInstallMode then begin
+    Shared(Action, 'Software\Classes\.heic\ShellEx\{#PreviewShellEx}', 'PreviousPreviewHandler', '.heic', '{#PreviewClsid}');
+    Shared(Action, 'Software\Classes\.heif\ShellEx\{#PreviewShellEx}', 'PreviousPreviewHandler', '.heif', '{#PreviewClsid}');
+    Shared(Action, 'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heic', 'PreviousPropertyHandler', '.heic', '{#DetailsClsid}');
+    Shared(Action, 'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heif', 'PreviousPropertyHandler', '.heif', '{#DetailsClsid}');
+  end;
+end;
+
+// The install failed or was cancelled after TakeOver (and maybe after [Registry]; a
+// rollback does not touch values without uninstall flags): put back what this run
+// replaced, where the value is still ours, and drop what it saved.
+procedure UndoTakeOvers();
+var
+  I: Integer;
   Current: String;
 begin
-  if not RegQueryStringValue(HKA, PropertyHandlers + '\' + Ext, '', Current) then begin
-    // None now: the uninstaller deletes ours.
-    RegDeleteValue(HKA, SavedHandlers + '\' + Ext, '');
-    exit;
-  end;
-  if CompareText(Current, DetailsClass()) = 0 then
-    exit;
-  RegWriteStringValue(HKA, SavedHandlers + '\' + Ext, '', Current);
-end;
-
-// All users only, before the uninstaller deletes our keys (SavedHandlers is under
-// Software\goodflow\light-view): put the saved handler back, or delete ours when there was
-// none. A handler someone registered after us is left alone.
-procedure RestorePropertyHandler(Ext: String);
-var
-  Key, Current, Previous: String;
-begin
-  Key := PropertyHandlers + '\' + Ext;
-  if not RegQueryStringValue(HKA, Key, '', Current) then
-    exit;
-  if CompareText(Current, DetailsClass()) <> 0 then
-    exit;
-  if RegQueryStringValue(HKA, SavedHandlers + '\' + Ext, '', Previous) then
-    RegWriteStringValue(HKA, Key, '', Previous)
-  else begin
-    RegDeleteValue(HKA, Key, '');
-    RegDeleteKeyIfEmpty(HKA, Key);
+  for I := 0 to GetArrayLength(TakenKeys) - 1 do begin
+    if RegQueryStringValue(HKA, TakenKeys[I], '', Current) and
+       (CompareText(Current, TakenOurs[I]) = 0) then begin
+      if TakenHadPrevious[I] then
+        RegWriteStringValue(HKA, TakenKeys[I], '', TakenPrevious[I])
+      else
+        DeleteOurValue(TakenKeys[I]);
+    end;
+    if TakenSavedNow[I] then begin
+      RegDeleteValue(HKA, TakenSaved[I], '');
+      RegDeleteKeyIfEmpty(HKA, TakenSaved[I]);
+      RegDeleteKeyIfEmpty(HKA, ExtractFileDir(TakenSaved[I]));
+      RegDeleteKeyIfEmpty(HKA, SavedRoot);
+      RegDeleteKeyIfEmpty(HKA, 'Software\goodflow');
+    end;
   end;
 end;
 
@@ -430,20 +507,25 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssInstall) and IsAdminInstallMode then begin
-    SavePropertyHandler('.heic');
-    SavePropertyHandler('.heif');
-  end;
-  if CurStep = ssPostInstall then
+  if CurStep = ssInstall then
+    AllShared(TakeOver);
+  if CurStep = ssPostInstall then begin
+    InstallFinished := True;
     DeleteShellDlls(False);
+  end;
+end;
+
+// Ruling M2: a failed or cancelled install leaves no shared value pointing at us.
+procedure DeinitializeSetup();
+begin
+  if not InstallFinished then
+    UndoTakeOvers();
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if (CurUninstallStep = usUninstall) and IsAdminInstallMode then begin
-    RestorePropertyHandler('.heic');
-    RestorePropertyHandler('.heif');
-  end;
+  if CurUninstallStep = usUninstall then
+    AllShared(GiveBack);
   if CurUninstallStep = usPostUninstall then
     DeleteShellDlls(True);
 end;

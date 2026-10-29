@@ -413,78 +413,82 @@ fn installer_registers_heic_shell_handlers() {
     );
     assert!(handlers.contains("uninsdeletevalue"), "{handlers}");
     assert!(!handlers.contains("uninsdeletekey"), "{handlers}");
+    // The handler values under .heic/.heif\ShellEx and PropertyHandlers are shared with
+    // other programs (review I1, ruling): Inno Setup never deletes them; [Code] saves the
+    // previous value and puts it back (AllShared below). Thumbnails in both modes, preview
+    // and details for all users only.
+    let mut shared = Vec::new();
     for ext in SHELL_EXTENSIONS {
-        // Only our handler's subkey is deleted, never `.heic` or its ShellEx key.
-        let thumb = value_line(
-            &registry,
-            &format!(r"Software\Classes\.{ext}\ShellEx\{{#ThumbnailShellEx}}"),
-            "",
-        );
-        assert!(
-            thumb.contains(r#"ValueData: "{#ThumbnailClsid}""#),
-            "{thumb}"
-        );
-        assert!(thumb.contains("uninsdeletekey"), "{thumb}");
-        let preview = value_line(
-            &registry,
-            &format!(r"Software\Classes\.{ext}\ShellEx\{{#PreviewShellEx}}"),
-            "",
-        );
-        assert!(
-            preview.contains(r#"ValueData: "{#PreviewClsid}""#),
-            "{preview}"
-        );
-        assert!(preview.contains("uninsdeletekey"), "{preview}");
-        // The details handler replaces Windows' own; [Code] saves the previous value and
-        // puts it back on uninstall, so Inno Setup must not delete it.
-        let details = value_line(
-            &registry,
-            &format!(
+        shared.push((
+            format!(r"Software\Classes\.{ext}\ShellEx\{{#ThumbnailShellEx}}"),
+            "{#ThumbnailClsid}",
+            "PreviousThumbnailHandler",
+            ext,
+            false,
+        ));
+        shared.push((
+            format!(r"Software\Classes\.{ext}\ShellEx\{{#PreviewShellEx}}"),
+            "{#PreviewClsid}",
+            "PreviousPreviewHandler",
+            ext,
+            true,
+        ));
+        shared.push((
+            format!(
                 r"Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.{ext}"
             ),
-            "",
-        );
-        assert!(
-            details.contains(r#"ValueData: "{#DetailsClsid}""#),
-            "{details}"
-        );
-        assert!(!details.contains("uninsdelete"), "{details}");
+            "{#DetailsClsid}",
+            "PreviousPropertyHandler",
+            ext,
+            true,
+        ));
     }
-
     let code = code(&s);
-    assert!(code.contains(r"'Software\goodflow\light-view\PreviousPropertyHandler'"));
-    assert!(code
-        .contains(r"'Software\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers'"));
-    // Saved before [Registry] writes ours (ssInstall), never overwritten with our own class
-    // on a reinstall; put back before the uninstaller deletes our keys (usUninstall), only
-    // while the value is still ours; deleted when there was none.
-    let save = routine(&code, "SavePropertyHandler");
-    assert!(save.contains("RegQueryStringValue(HKA, PropertyHandlers + '\\' + Ext, '', Current)"));
-    assert!(save.contains("CompareText(Current, DetailsClass()) = 0"));
-    assert!(save.contains("RegWriteStringValue(HKA, SavedHandlers + '\\' + Ext, '', Current)"));
-    let restore = routine(&code, "RestorePropertyHandler");
-    assert!(restore.contains("CompareText(Current, DetailsClass()) <> 0"));
-    assert!(restore.contains("RegQueryStringValue(HKA, SavedHandlers + '\\' + Ext, '', Previous)"));
-    assert!(restore.contains("RegWriteStringValue(HKA, Key, '', Previous)"));
-    assert!(restore.contains("RegDeleteValue(HKA, Key, '')"));
+    let all = routine(&code, "AllShared");
+    let (both_modes, admin_only) = all
+        .split_once("if IsAdminInstallMode then begin")
+        .expect("admin-only block in AllShared");
+    for (key, class, group, ext, admin) in &shared {
+        let line = value_line(&registry, key, "");
+        assert!(line.contains(&format!(r#"ValueData: "{class}""#)), "{line}");
+        assert!(!line.contains("uninsdelete"), "{line}");
+        let call = format!("Shared(Action, '{key}', '{group}', '.{ext}', '{class}');");
+        let part = if *admin { admin_only } else { both_modes };
+        assert!(part.contains(&call), "{call}");
+    }
+    assert_eq!(all.matches("Shared(Action, ").count(), shared.len());
+    // Saved under HKLM\Software\goodflow\light-view\PreviousPropertyHandler\.ext (Global
+    // Constraints) and its siblings; SavedRoot goes on uninstall, after GiveBack.
+    assert!(code.contains(r"SavedRoot = 'Software\goodflow\light-view';"));
+    let helper = routine(&code, "Shared");
+    assert!(helper.contains(r"Saved := SavedRoot + '\' + Group + '\' + Ext;"));
+    // TakeOver: saved once, never overwritten with our own class on a reinstall.
+    assert!(helper.contains("HadPrevious := RegQueryStringValue(HKA, Key, '', Current);"));
+    assert!(helper.contains("if HadPrevious and (CompareText(Current, Ours) = 0) then"));
+    assert!(helper.contains("RegWriteStringValue(HKA, Saved, '', Current)"));
+    // GiveBack: only while the value is ours; the saved value back, or ours deleted and
+    // the key only if then empty.
+    let give_back = helper.split("end else begin").last().unwrap();
+    assert!(give_back.contains("if CompareText(Current, Ours) <> 0 then"));
+    assert!(give_back.contains("if RegQueryStringValue(HKA, Saved, '', Previous) then"));
+    assert!(give_back.contains("RegWriteStringValue(HKA, Key, '', Previous)"));
+    assert!(give_back.contains("DeleteOurValue(Key);"));
+    let delete = routine(&code, "DeleteOurValue");
+    assert!(delete.contains("RegDeleteValue(HKA, Key, '');"));
+    assert!(delete.contains("RegDeleteKeyIfEmpty(HKA, Key);"));
+    assert!(!delete.contains("RegDeleteKey(") && !delete.contains("RegDeleteKeyIncludingSubkeys"));
     let step = routine(&code, "CurStepChanged");
-    assert!(step.contains("if (CurStep = ssInstall) and IsAdminInstallMode then"));
-    for ext in SHELL_EXTENSIONS {
-        assert!(
-            step.contains(&format!("SavePropertyHandler('.{ext}');")),
-            "{ext}"
-        );
-    }
+    assert!(step.contains("if CurStep = ssInstall then\n    AllShared(TakeOver);"));
     let uninstall = routine(&code, "CurUninstallStepChanged");
-    assert!(uninstall.contains("if (CurUninstallStep = usUninstall) and IsAdminInstallMode then"));
-    for ext in SHELL_EXTENSIONS {
-        assert!(
-            uninstall.contains(&format!("RestorePropertyHandler('.{ext}');")),
-            "{ext}"
-        );
-    }
-    let class = routine(&code, "DetailsClass");
-    assert!(class.contains("Result := ExpandConstant('{#DetailsClsid}');"));
+    assert!(uninstall.contains("if CurUninstallStep = usUninstall then\n    AllShared(GiveBack);"));
+    // Ruling M2: a failed or cancelled install puts back what it replaced.
+    assert!(step.contains("InstallFinished := True;"));
+    let deinit = routine(&code, "DeinitializeSetup");
+    assert!(deinit.contains("if not InstallFinished then\n    UndoTakeOvers();"));
+    let undo = routine(&code, "UndoTakeOvers");
+    assert!(undo.contains("(CompareText(Current, TakenOurs[I]) = 0)"));
+    assert!(undo.contains("RegWriteStringValue(HKA, TakenKeys[I], '', TakenPrevious[I])"));
+    assert!(undo.contains("DeleteOurValue(TakenKeys[I]);"));
 }
 
 #[test]
@@ -537,10 +541,20 @@ fn installer_uses_versioned_shell_dll_and_runonce_cleanup() {
     // A reinstall of the same version cancels a pending delete of its own DLL.
     assert!(delete.contains("RegDeleteValue(HKA, RunOnceKey, RunOnceName(CurrentShellDll()))"));
 
-    // Spec §6: never close or restart Explorer. Inno Setup's CloseApplications defaults
-    // to yes (Restart Manager would offer to close Explorer for a DLL it holds).
+    // Spec §6: never close or restart Explorer. Ruling M1: the Restart Manager may close
+    // our own programs only; the filter names our two exes, so a DLL Explorer holds is
+    // never checked (the default filter, *.exe,*.dll,*.chm, would offer Explorer).
     let setup = section(&s, "Setup");
-    assert!(setup.contains(&"CloseApplications=no".to_owned()));
+    assert!(setup.contains(&"CloseApplications=yes".to_owned()));
+    assert!(setup.contains(&"CloseApplicationsFilter=light-view.exe,lv-worker.exe".to_owned()));
+    assert!(setup.contains(&"RestartApplications=no".to_owned()));
+    assert_eq!(
+        setup
+            .iter()
+            .filter(|l| l.starts_with("CloseApplications"))
+            .count(),
+        2
+    );
     // (Comments may explain why; entries and code must not do it.)
     let lower = s
         .lines()
@@ -550,7 +564,6 @@ fn installer_uses_versioned_shell_dll_and_runonce_cleanup() {
         .join("\n")
         .to_ascii_lowercase();
     for banned in [
-        "closeapplications=yes",
         "closeapplications=force",
         "restartapplications=yes",
         "taskkill",
