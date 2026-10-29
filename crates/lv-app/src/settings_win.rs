@@ -165,6 +165,8 @@ fn register_class() -> windows::core::Result<()> {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: crate::window::run::app_icon(instance.into(), false),
+            hIconSm: crate::window::run::app_icon(instance.into(), true),
             lpszClassName: CLASS_NAME,
             ..Default::default()
         };

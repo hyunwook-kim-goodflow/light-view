@@ -1,11 +1,18 @@
-//! Embeds `app.manifest` (PerMonitorV2 DPI awareness, long paths, Common Controls v6)
+//! Embeds `app.manifest` and the icons in `res/` (PerMonitorV2 DPI awareness, long paths, Common Controls v6)
 //! and makes the loader resolve the exe's static DLL imports from System32 only.
 
 fn main() {
     println!("cargo:rerun-if-changed=app.manifest");
+    println!("cargo:rerun-if-changed=res/light-view.ico");
+    println!("cargo:rerun-if-changed=res/photo-file.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_manifest_file("app.manifest");
+        // Icon 1 is the app (window, taskbar, Start menu); icon 2 is the file-type icon
+        // the installer names as `light-view.exe,1` (index 1 = the second icon group).
+        // Made by scripts/make-icons.py.
+        res.set_icon_with_id("res/light-view.ico", "1");
+        res.set_icon_with_id("res/photo-file.ico", "2");
         res.compile().expect("failed to embed app.manifest");
         // DependentLoadFlags = LOAD_LIBRARY_SEARCH_SYSTEM32 for static imports, so a
         // planted DLL next to the exe or in the working folder is never loaded
