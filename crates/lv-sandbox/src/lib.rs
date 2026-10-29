@@ -6,6 +6,9 @@
 //! [`sandbox`] creates one process, [`appcontainer`] decides on and creates the AppContainer,
 //! and [`process`] runs a started worker's writer, reader and stderr threads. The app's
 //! worker pool builds on these; the Explorer extension uses [`run_once`].
+//!
+//! Diagnostics ([`sandbox::log`], with the workers' stderr) are silent until the host calls
+//! [`sandbox::enable_logging`]: the app does, the Explorer extension never does.
 
 pub mod appcontainer;
 #[cfg(any(test, feature = "test-support"))]
