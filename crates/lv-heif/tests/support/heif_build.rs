@@ -343,6 +343,16 @@ impl Builder {
         grid
     }
 
+    /// An `Exif` item describing `of` (`cdsc`): `tiff` (a TIFF block, no `Exif\0\0` prefix)
+    /// behind a zero `exif_tiff_header_offset`. Its data goes after what `mdat` holds so far.
+    pub fn exif(&mut self, of: u32, tiff: &[u8]) -> u32 {
+        let mut data = vec![0u8; 4];
+        data.extend_from_slice(tiff);
+        let id = self.item(b"Exif", &data, Vec::new());
+        self.refs.push((*b"cdsc", id, vec![of]));
+        id
+    }
+
     /// Makes `thumb` a `thmb` thumbnail of `of`.
     pub fn thumbnail(&mut self, thumb: u32, of: u32) {
         self.refs.push((*b"thmb", thumb, vec![of]));

@@ -1,4 +1,4 @@
-//! The class factory of the thumbnail and the preview handler.
+//! The class factory of the thumbnail, preview and details handlers.
 
 use std::ffi::c_void;
 
@@ -9,11 +9,14 @@ use windows::Win32::UI::Shell::{IPreviewHandler, IThumbnailProvider};
 
 use crate::preview::Handler;
 use crate::thumbnail::Provider;
-use crate::{guarded, lock_server, worker_exe, ObjectCount, CLSID_PREVIEW};
+use crate::{
+    guarded, lock_server, properties, worker_exe, ObjectCount, CLSID_DETAILS, CLSID_PREVIEW,
+};
 
 #[implement(IClassFactory)]
 pub(crate) struct Factory {
-    /// The class this factory makes: [`CLSID_PREVIEW`], else the thumbnail handler.
+    /// The class this factory makes: [`CLSID_DETAILS`], [`CLSID_PREVIEW`], else the
+    /// thumbnail handler.
     clsid: GUID,
     _count: ObjectCount,
 }
@@ -45,11 +48,13 @@ impl IClassFactory_Impl for Factory_Impl {
             if outer.is_some() {
                 return Err(CLASS_E_NOAGGREGATION.into());
             }
-            let exe = worker_exe()?;
-            let made: IUnknown = if self.clsid == CLSID_PREVIEW {
-                IPreviewHandler::from(Handler::new(exe)).cast()?
+            // The details handler is made without the worker's path: it never starts one.
+            let made: IUnknown = if self.clsid == CLSID_DETAILS {
+                properties::create().cast()?
+            } else if self.clsid == CLSID_PREVIEW {
+                IPreviewHandler::from(Handler::new(worker_exe()?)).cast()?
             } else {
-                IThumbnailProvider::from(Provider::new(exe)).cast()?
+                IThumbnailProvider::from(Provider::new(worker_exe()?)).cast()?
             };
             // SAFETY: COM contract: `iid` points to a GUID and `out` is writable.
             unsafe { made.query(iid, out).ok() }

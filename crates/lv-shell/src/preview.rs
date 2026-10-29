@@ -44,7 +44,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{SetParent, MSG};
 
-use crate::thumbnail::{ask_worker, READ_CAP};
+use crate::stream::READ_CAP;
+use crate::thumbnail::ask_worker;
 use crate::{guarded, stream, ObjectCount};
 use draw::Image;
 use window::Shared;
