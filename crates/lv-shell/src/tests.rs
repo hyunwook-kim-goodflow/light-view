@@ -14,13 +14,13 @@ use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_UNEXPECTED, S_FALSE, S_OK,
 };
 use windows::Win32::Graphics::Gdi::HBITMAP;
-use windows::Win32::System::Com::{IClassFactory, IStream};
+use windows::Win32::System::Com::{IClassFactory, IStream, STREAM_SEEK_CUR};
 use windows::Win32::UI::Shell::PropertiesSystem::IInitializeWithStream;
 use windows::Win32::UI::Shell::{IThumbnailProvider, SHCreateMemStream, WTSAT_ARGB, WTS_ALPHATYPE};
 
 use crate::bitmap::tests::take;
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
-use crate::thumbnail::Provider;
+use crate::thumbnail::{Provider, READ_CAP};
 use crate::{guarded, worker_exe, CLSID_THUMBNAIL};
 
 /// The preview handler's CLSID (Global Constraints); not served by this DLL yet.
@@ -140,6 +140,25 @@ fn truncated_stream_fails() {
     assert!(thumbnail(&provider, 256).is_err());
 }
 
+/// Over the shell's 64 MiB cap by one byte: refused before any read (the reported size is
+/// over the cap), so explorer.exe never holds such a file.
+#[test]
+fn stream_reporting_over_64_mib_is_refused_before_reading() {
+    let _serial = serial();
+    assert_eq!(READ_CAP, 64 * 1024 * 1024);
+    assert!(READ_CAP <= lv_core::decode::max_file_bytes(&lv_core::decode::DecodeLimits::default()));
+    let stream = mem_stream(&vec![0u8; READ_CAP as usize + 1]);
+    let provider: IThumbnailProvider = Provider::new(built_worker()).into();
+    let init: IInitializeWithStream = provider.cast().unwrap();
+    // SAFETY: a valid stream.
+    unsafe { init.Initialize(&stream, 0) }.expect("Initialize");
+    assert!(thumbnail(&provider, 256).is_err());
+    let mut position = u64::MAX;
+    // SAFETY: a valid stream and a local out-pointer.
+    unsafe { stream.Seek(0, STREAM_SEEK_CUR, Some(&mut position)) }.unwrap();
+    assert_eq!(position, 0, "read from a stream over the cap");
+}
+
 #[test]
 fn null_out_pointers_and_zero_size_are_refused() {
     let _serial = serial();
@@ -194,9 +213,12 @@ fn only_the_thumbnail_class_is_served() {
         assert_eq!(hr, CLASS_E_CLASSNOTAVAILABLE);
         assert!(out.is_null());
     }
-    // SAFETY: null pointers are what is tested.
+    // A null GUID pointer fails and still nulls `*out`.
+    out = std::ptr::NonNull::<c_void>::dangling().as_ptr();
+    // SAFETY: null pointers are what is tested; `out` is only written, never read through.
     let hr = unsafe { DllGetClassObject(std::ptr::null(), &IClassFactory::IID, &mut out) };
     assert!(hr.is_err());
+    assert!(out.is_null(), "*out not nulled on failure");
 }
 
 /// The class factory from `DllGetClassObject`, as COM gets it.

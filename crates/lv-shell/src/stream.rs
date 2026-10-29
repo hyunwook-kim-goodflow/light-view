@@ -6,11 +6,9 @@ use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG};
 
 /// Bytes asked of the stream per read.
 const CHUNK: usize = 256 * 1024;
-/// Most bytes reserved from the stream's reported size before reading.
-const FIRST_RESERVE: u64 = 64 * 1024 * 1024;
 
 /// The stream's bytes from its current position to its end, or an error when there are more
-/// than `cap` (`E_FAIL`, as for a stream that fails). Never holds more than `cap` bytes, and
+/// than `cap` (`E_FAIL`, as for a stream that fails). Never allocates more than `cap` bytes, and
 /// reads at most one byte past the cap: a stream whose reported size is over the cap is
 /// refused before any read.
 pub fn read_capped(stream: &IStream, cap: u64) -> Result<Vec<u8>> {
@@ -40,14 +38,14 @@ fn size_of(stream: &IStream) -> Option<u64> {
 }
 
 /// The read loop of [`read_capped`]: `read` fills a buffer and says how many bytes it put
-/// there (0 at the end). `size_hint` only sizes the first allocation.
+/// there (0 at the end). `size_hint` (at most `cap`) is reserved exactly up front; past it the
+/// buffer grows by doubling, never beyond `cap`.
 fn read_capped_with(
     mut read: impl FnMut(&mut [u8]) -> Result<usize>,
     cap: u64,
     size_hint: Option<u64>,
 ) -> Result<Vec<u8>> {
-    // A stream may claim any size: reserve no more than a large photo up front.
-    let first = size_hint.unwrap_or(0).min(cap).min(FIRST_RESERVE) as usize;
+    let first = usize::try_from(size_hint.unwrap_or(0).min(cap)).map_err(|_| E_FAIL)?;
     let mut data = Vec::new();
     data.try_reserve_exact(first).map_err(|_| E_FAIL)?;
     let mut chunk = vec![0u8; CHUNK];
@@ -62,7 +60,13 @@ fn read_capped_with(
         if got > want || room == 0 {
             return Err(E_FAIL.into());
         }
-        data.try_reserve(got).map_err(|_| E_FAIL)?;
+        let need = data.len() + got;
+        if need > data.capacity() {
+            // `need <= cap` (`got <= room`), so this stays within the cap.
+            let grown = (data.capacity() * 2).max(need).min(cap as usize);
+            data.try_reserve_exact(grown - data.len())
+                .map_err(|_| E_FAIL)?;
+        }
         data.extend_from_slice(&chunk[..got]);
     }
 }
@@ -155,5 +159,30 @@ mod tests {
     fn a_stream_claiming_more_than_asked_is_refused() {
         let result = read_capped_with(|buf| Ok(buf.len() + 1), 10, None);
         assert!(result.is_err());
+    }
+
+    /// A source of `len` bytes in reads of at most 999.
+    fn source(len: usize) -> impl FnMut(&mut [u8]) -> Result<usize> {
+        let mut left = len;
+        move |buf: &mut [u8]| {
+            let n = buf.len().min(left).min(999);
+            buf[..n].fill(5);
+            left -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_buffer_never_grows_past_the_cap() {
+        let cap = 1_000_003u64;
+        let got = read_capped_with(source(cap as usize), cap, None).unwrap();
+        assert_eq!(got.len() as u64, cap);
+        assert!(got.capacity() as u64 <= cap, "capacity {}", got.capacity());
+        // With the size known, exactly that is reserved and never grown.
+        let got = read_capped_with(source(123_456), cap, Some(123_456)).unwrap();
+        assert_eq!((got.len(), got.capacity()), (123_456, 123_456));
+        // A size hint over the cap reserves the cap at most.
+        let got = read_capped_with(source(10), cap, Some(u64::MAX)).unwrap();
+        assert!(got.capacity() as u64 <= cap);
     }
 }

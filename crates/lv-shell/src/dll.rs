@@ -22,12 +22,16 @@ pub unsafe extern "system" fn DllGetClassObject(
     out: *mut *mut c_void,
 ) -> HRESULT {
     catch_unwind(AssertUnwindSafe(|| {
-        if clsid.is_null() || iid.is_null() || out.is_null() {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: checked non-null; COM contract: writable. Nulled before any failure.
+        unsafe { *out = std::ptr::null_mut() };
+        if clsid.is_null() || iid.is_null() {
             return E_POINTER;
         }
         // SAFETY: checked non-null; the caller guarantees they are valid.
         unsafe {
-            *out = std::ptr::null_mut();
             if *clsid != CLSID_THUMBNAIL {
                 return CLASS_E_CLASSNOTAVAILABLE;
             }
