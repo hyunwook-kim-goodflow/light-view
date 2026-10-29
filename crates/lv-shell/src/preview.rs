@@ -3,10 +3,10 @@
 //!
 //! `DoPreview` reads the stream (up to [`READ_CAP`]) on the calling thread, makes a child
 //! window of the preview pane's window, and queues the render ([`queue`]: one sandboxed
-//! worker at a time in the process; a handler's latest request replaces its waiting one). The image's long side is the
-//! pane's long side, at least [`MIN_SIDE`] and at most [`MAX_SIDE`]. The result is posted to
-//! the window, which draws it fitted (aspect kept, never enlarged, centered) over the pane's
-//! background. Each `DoPreview` starts a new generation, so a result of an earlier one is
+//! worker at a time in the process; a handler's latest request replaces its waiting one).
+//! The image's long side is the pane's long side, at least [`MIN_SIDE`] and at most
+//! [`MAX_SIDE`]. The result is posted to the window, which draws it fitted (aspect kept,
+//! never enlarged, centered) over the pane's background. Each `DoPreview` starts a new generation, so a result of an earlier one is
 //! dropped; `Unload` destroys the window and the bitmap, and a result arriving after it, or
 //! after the window's parent destroyed it, is dropped too (`window::Shared`). A failed
 //! preview shows the background only.
