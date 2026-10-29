@@ -331,7 +331,9 @@ dependencies = [
 name = "lv-shell"
 version = "0.1.1"
 dependencies = [
+ "lv-core",
  "lv-ipc",
+ "lv-sandbox",
  "windows",
  "windows-core",
 ]
