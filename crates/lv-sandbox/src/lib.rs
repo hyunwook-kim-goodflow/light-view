@@ -5,13 +5,15 @@
 //!
 //! [`sandbox`] creates one process, [`appcontainer`] decides on and creates the AppContainer,
 //! and [`process`] runs a started worker's writer, reader and stderr threads. The app's
-//! worker pool builds on these.
+//! worker pool builds on these; the Explorer extension uses [`run_once`].
 
 pub mod appcontainer;
+mod once;
 pub mod process;
 pub mod sandbox;
 
 pub use appcontainer::delete_profile;
+pub use once::{run_once, RunError};
 
 #[cfg(test)]
 pub(crate) mod test_support;

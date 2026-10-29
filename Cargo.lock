@@ -323,6 +323,7 @@ name = "lv-sandbox"
 version = "0.1.1"
 dependencies = [
  "lv-ipc",
+ "tempfile",
  "windows",
 ]
 

@@ -144,13 +144,13 @@ pub fn spawn(
 /// A worker created suspended and already inside its Job, not yet resumed. Dropping it
 /// ends the Job and with it the process.
 pub struct Suspended {
-    sandboxed: Sandboxed,
+    pub(crate) sandboxed: Sandboxed,
     thread: OwnedHandle,
     pipes: Pipes,
     /// The process was created inside the Job (PROC_THREAD_ATTRIBUTE_JOB_LIST), not
     /// assigned to it afterwards. Read by the tests only.
     #[cfg_attr(not(test), allow(dead_code))]
-    born_in_job: bool,
+    pub(crate) born_in_job: bool,
 }
 
 impl Suspended {
@@ -301,7 +301,7 @@ fn pipe() -> windows::core::Result<(OwnedHandle, OwnedHandle)> {
 
 /// A primary token like ours with every privilege but SeChangeNotify removed, at low
 /// integrity.
-fn low_integrity_token() -> windows::core::Result<OwnedHandle> {
+pub(crate) fn low_integrity_token() -> windows::core::Result<OwnedHandle> {
     let mut current = HANDLE::default();
     // SAFETY: pseudo handle of our own process; `current` receives a new handle.
     unsafe {
