@@ -7,12 +7,15 @@ publish = false
 description = "Starts light-view's decode worker in its sandbox (low integrity token, kill-on-close Job, AppContainer when the folder allows it, creation mitigations)."
 
 [features]
-# Hooks other crates' tests use (a container whose start always fails). Never enabled in
-# a release build: only dev-dependencies turn it on.
-test-support = []
+# Hooks other crates' tests use (a container whose start always fails, and `low_host`: a
+# test rerun at low integrity in a Job). Never enabled in a release build: only
+# dev-dependencies turn it on.
+test-support = ["dep:tempfile"]
 
 [dependencies]
 lv-ipc = { path = "../lv-ipc" }
+# Only for `test-support`: the staged worker folder of `low_host`.
+tempfile = { version = "3", optional = true }
 
 [dependencies.windows]
 version = "0.58"

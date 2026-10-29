@@ -8,6 +8,8 @@
 //! worker pool builds on these; the Explorer extension uses [`run_once`].
 
 pub mod appcontainer;
+#[cfg(any(test, feature = "test-support"))]
+pub mod low_host;
 mod once;
 pub mod process;
 pub mod sandbox;
@@ -15,7 +17,7 @@ mod threads;
 
 pub use appcontainer::delete_profile;
 pub use once::{run_once, RunError};
-pub use threads::live_threads;
+pub use threads::{live_threads, spawn as spawn_counted};
 
 #[cfg(test)]
 pub(crate) mod test_support;
