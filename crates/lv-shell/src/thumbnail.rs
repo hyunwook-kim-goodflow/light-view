@@ -1,8 +1,9 @@
 //! The thumbnail handler: `IInitializeWithStream` + `IThumbnailProvider`.
 //!
 //! `Initialize` keeps Explorer's stream; `GetThumbnail(cx)` reads it (up to [`READ_CAP`]),
-//! has one sandboxed worker make a thumbnail whose long side is `cx` at most (never upscaled; `cx` clamped to [`MAX_SIDE`]) and answers it as a premultiplied ARGB
-//! bitmap. Anything else is an error HRESULT, so Explorer shows the icon.
+//! has one sandboxed worker make a thumbnail whose long side is `cx` at most (never
+//! upscaled; `cx` clamped to [`MAX_SIDE`]) and answers it as a premultiplied ARGB bitmap.
+//! Anything else is an error HRESULT, so Explorer shows the icon.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
