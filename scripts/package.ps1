@@ -8,20 +8,26 @@
         powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version 0.1.0
 
     1. Checks that -Version is the workspace version (Cargo.toml), so About shows it.
-    2. Builds light-view.exe (lv-app) and lv-worker.exe in release mode with the C runtime
-       linked statically (-C target-feature=+crt-static): light-view.exe resolves its
-       imports from System32 only, so it must not need vcruntime140.dll. Skipped with
-       -SkipBuild (the release workflow signs the built exes first). Then checks the
-       import tables: the C libraries (the vcpkg DLLs) are imported by lv-worker.exe only,
-       never by light-view.exe, and lv-worker.exe imports each library it serves.
+    2. Builds light-view.exe (lv-app), lv-worker.exe and the Explorer extension lv_shell.dll
+       (lv-shell) in release mode with the C runtime linked statically
+       (-C target-feature=+crt-static): light-view.exe resolves its imports from System32
+       only, so it must not need vcruntime140.dll, and the shell DLL is loaded into
+       Explorer and the search indexer. Skipped with -SkipBuild (the release workflow
+       signs the built files first). Then checks the import tables: the C libraries (the
+       vcpkg DLLs) are imported by lv-worker.exe only, never by light-view.exe or the
+       shell DLL, lv-worker.exe imports each library it serves, and the shell DLL imports
+       Windows DLLs only.
     3. Writes THIRD_PARTY_NOTICES.md: notices/native.md (the C libraries), then
        `cargo about generate` over about.hbs (every crate in the shipped executables), then
        the full license texts in notices/ as an appendix.
     4. Fills dist\stage (the installer's input, installer/light-view.iss): light-view.exe,
        lv-worker.exe, the vcpkg DLLs, the Visual C++ runtime DLLs those DLLs need,
-       THIRD_PARTY_NOTICES.md, LICENSE-MIT, LICENSE-APACHE and README.txt.
-    5. Zips dist\stage plus portable.txt into dist\light-view-<version>-portable.zip, unpacks
-       it again and fails if the unpacked files take more than 30 MB (spec §7).
+       THIRD_PARTY_NOTICES.md, LICENSE-MIT, LICENSE-APACHE, README.txt and the shell DLL
+       as lv-shell-<version>.dll (a new name per version, M7 spec §6). Fails if the stage
+       (the installed size) is over 30 MB (spec §7).
+    5. Zips dist\stage, without the shell DLL (the portable copy registers nothing), plus
+       portable.txt into dist\light-view-<version>-portable.zip, unpacks it again and fails
+       if the unpacked files take more than 30 MB (spec §7).
     6. Writes dist\SHA256SUMS.txt for the zip (and an installer already in dist).
 
     Other modes:
@@ -238,6 +244,33 @@ function Assert-NativeImportsInWorkerOnly {
     Write-Host "Native libraries ($($WorkerImports -join ', ')) imported by lv-worker.exe only."
 }
 
+# The shell DLL runs inside Explorer, prevhost and the search indexer (SYSTEM): no C code
+# (M7 Global Constraints) and no DLL from beside it. It may import Windows DLLs only: one
+# in System32 or an API set, never a vcpkg DLL and never the dynamic C runtime (it links it
+# statically, like the exes). This is the gate for lv-shell's own import test, which may
+# see a stale debug DLL.
+function Assert-ShellDllImportsWindowsOnly {
+    param([string]$Dll)
+    $imports = @(Get-PeImports $Dll)
+    if ($imports.Count -eq 0) { throw "No imports read from $Dll" }
+    $vcpkgDlls = @(Get-ChildItem -Path (Join-Path $RepoRoot 'vcpkg_installed\x64-windows\bin') -Filter '*.dll' |
+        ForEach-Object { $_.Name })
+    $system32 = Join-Path $env:SystemRoot 'System32'
+    foreach ($name in $imports) {
+        if (($vcpkgDlls + $NativeDlls) -contains $name) {
+            throw "$Dll imports $name; C libraries belong to lv-worker.exe only"
+        }
+        if ($name -match '^(?i)(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)') {
+            throw "$Dll imports $name; it must link the C runtime statically"
+        }
+        if ($name -match '^(?i)api-ms-win-') { continue }
+        if (-not (Test-Path -LiteralPath (Join-Path $system32 $name) -PathType Leaf)) {
+            throw "$Dll imports $name, which is not a Windows DLL in $system32"
+        }
+    }
+    Write-Host "$(Split-Path -Leaf $Dll) imports Windows DLLs only: $($imports -join ', ')"
+}
+
 # This version's zip and, once built, its installer.
 function Write-Checksums {
     $names = @("light-view-$Version-portable.zip", "light-view-$Version-setup.exe")
@@ -284,7 +317,7 @@ if (-not $SkipBuild) {
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
     Push-Location $RepoRoot
     try {
-        Invoke-Native cargo @('build', '--release', '--locked', '-p', 'lv-app', '-p', 'lv-worker')
+        Invoke-Native cargo @('build', '--release', '--locked', '-p', 'lv-app', '-p', 'lv-worker', '-p', 'lv-shell')
     } finally {
         Pop-Location
         $env:RUSTFLAGS = $previous
@@ -292,11 +325,14 @@ if (-not $SkipBuild) {
 }
 $appExe = Join-Path $release 'lv-app.exe'
 $workerExe = Join-Path $release 'lv-worker.exe'
-foreach ($exe in @($appExe, $workerExe)) {
+$shellDll = Join-Path $release 'lv_shell.dll'
+foreach ($exe in @($appExe, $workerExe, $shellDll)) {
     if (-not (Test-Path $exe)) { throw "$exe not found" }
-    Assert-NoVcRuntimeImport $exe
 }
+foreach ($exe in @($appExe, $workerExe)) { Assert-NoVcRuntimeImport $exe }
 Assert-NativeImportsInWorkerOnly -AppExe $appExe -WorkerExe $workerExe
+Assert-NoVcRuntimeImport $shellDll
+Assert-ShellDllImportsWindowsOnly $shellDll
 
 # --- 3, 4. Stage -------------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
@@ -318,6 +354,13 @@ New-Notices -OutFile (Join-Path $StageDir 'THIRD_PARTY_NOTICES.md')
 Copy-Item (Join-Path $RepoRoot 'LICENSE-MIT') $StageDir
 Copy-Item (Join-Path $RepoRoot 'LICENSE-APACHE') $StageDir
 Copy-Item (Join-Path $RepoRoot 'installer\README.txt') $StageDir
+# The Explorer extension, for the installer only (installer/light-view.iss registers
+# lv-shell-<version>.dll; the name changes with every version, M7 spec §6).
+Copy-Item $shellDll (Join-Path $StageDir "lv-shell-$Version.dll")
+$stageBytes = Get-FolderBytes $StageDir
+if ($stageBytes -gt $MaxUnpackedBytes) {
+    throw "Installer input is $([math]::Round($stageBytes / 1000000, 2)) MB, over the 30 MB limit (spec §7)"
+}
 
 # --- 5. Portable zip ---------------------------------------------------------------------
 $name = "light-view-$Version-portable"
@@ -326,7 +369,8 @@ $work = Join-Path $DistDir "work-$([guid]::NewGuid())"
 $portableDir = Join-Path $work $name
 try {
     New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-    Copy-Item -Path (Join-Path $StageDir '*') -Destination $portableDir -Recurse
+    # The portable copy registers nothing, so it has no use for the shell DLL.
+    Copy-Item -Path (Join-Path $StageDir '*') -Destination $portableDir -Recurse -Exclude 'lv-shell-*.dll'
     $marker = "light-view portable: settings and crash records are kept in the 'data' folder next to light-view.exe.`r`n" +
         "light-view 포터블판: 설정과 크래시 기록을 light-view.exe 옆의 data 폴더에 저장해요. 이 파일을 지우면 설치판처럼 %APPDATA%를 써요.`r`n"
     [System.IO.File]::WriteAllText((Join-Path $portableDir 'portable.txt'), $marker, (New-Object System.Text.UTF8Encoding($true)))
@@ -344,6 +388,8 @@ try {
             'LICENSE-MIT', 'LICENSE-APACHE', 'README.txt') + $NativeDlls + $VcRuntimeDlls) {
         if (-not (Test-Path (Join-Path $unpacked $required))) { throw "$required missing from $zip" }
     }
+    $shellInZip = @(Get-ChildItem -Path $check -Recurse -File | Where-Object { $_.Name -like 'lv*shell*.dll' })
+    if ($shellInZip.Count -gt 0) { throw "$($shellInZip[0].Name) is in the portable zip" }
     $bytes = Get-FolderBytes $check
     $mb = [math]::Round($bytes / 1000000, 2)
     if ($bytes -gt $MaxUnpackedBytes) {

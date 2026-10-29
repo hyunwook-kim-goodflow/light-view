@@ -1,5 +1,6 @@
 # cargo-about configuration: collects the licenses of every crate compiled into the
-# shipped binaries (light-view.exe = lv-app, lv-worker.exe) for THIRD_PARTY_NOTICES.md.
+# shipped binaries (light-view.exe = lv-app, lv-worker.exe, lv-shell-<version>.dll =
+# lv-shell) for THIRD_PARTY_NOTICES.md.
 # `scripts/package.ps1` runs `cargo about generate --workspace about.hbs` and puts the
 # hand-written notices for the C libraries (notices/native.md) in front of the result.
 #
