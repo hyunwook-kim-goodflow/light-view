@@ -1,5 +1,6 @@
-//! The helper threads this crate starts (a worker's writer, reader and stderr threads),
-//! counted until their OS threads have ended.
+//! The helper threads this crate starts (a worker's writer, reader and stderr threads) and
+//! those other crates start through [`spawn`] (`spawn_counted`: the Explorer extension's
+//! preview render thread), counted until their OS threads have ended.
 //!
 //! The Explorer extension is a DLL that per-user installs load into `explorer.exe`: it must
 //! not be unloaded while one of these threads still runs its code, and [`run_once`]
@@ -74,8 +75,9 @@ fn exited(thread: &JoinHandle<()>) -> bool {
 /// Every helper thread this crate starts.
 static LIVE: Registry = Registry::new();
 
-/// Helper threads (writer, reader, stderr) of this crate's workers whose OS threads have not
-/// exited yet, in every caller of the process. Zero means none of them runs code any more.
+/// Threads started by [`spawn`] (this crate's workers' writer, reader and stderr threads,
+/// and `spawn_counted` callers' threads) whose OS threads have not exited yet, in the whole
+/// process. Zero means none of them runs code any more.
 pub fn live_threads() -> usize {
     LIVE.live()
 }

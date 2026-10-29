@@ -42,10 +42,19 @@ pub unsafe extern "system" fn DllGetClassObject(
     .unwrap_or(E_FAIL)
 }
 
-/// `S_OK` only when no object, server lock or worker helper thread of this DLL is alive.
+/// `S_OK` only when no object, server lock or helper thread of this DLL is alive; then the
+/// preview window class (no window of it is left) is unregistered too.
 #[no_mangle]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-    match catch_unwind(can_unload) {
+    let unloadable = || {
+        let yes = can_unload();
+        if yes {
+            // No window is left: unregister the preview window class before the DLL goes.
+            crate::preview::unregister_class();
+        }
+        yes
+    };
+    match catch_unwind(unloadable) {
         Ok(true) => S_OK,
         _ => S_FALSE,
     }
