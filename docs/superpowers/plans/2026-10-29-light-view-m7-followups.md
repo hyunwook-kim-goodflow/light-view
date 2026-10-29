@@ -1,0 +1,44 @@
+# light-view M7 follow-ups
+
+M7 (HEIC in Windows Explorer: thumbnails, preview, details; per-user and all-users installs) on branch m7-explorer-heic. Spec: docs/superpowers/specs/2026-10-29-light-view-m7-explorer-heic-design.md. Plan: docs/superpowers/plans/2026-10-29-light-view-m7-explorer-heic.md.
+
+## Rulings and decisions
+
+- User decision (2026-10-29): offer both install modes — per-user (default; thumbnails run inside Explorer via DisableProcessIsolation, decoding stays in the sandboxed worker; no details tab) and all-users admin (HKLM, Windows isolation, plus details/property handler). Signing at v1.0. Spec and plan revised (commit above): new Task 1b (per-user preview spike), Task 6 property handler, Task 7 installer two modes, Task 8 docs.
+- Ruling: per-user installs get no preview pane (thumbnails only); all-users installs keep the preview handler — as the brief pre-decided — if wrong: per-user users lack the preview pane.
+- Ruling: spikes (Task 1, 1b) get no code review — their code is replaced in Tasks 4–6, which are reviewed; their result documents were checked by the controller — if wrong: spike leftovers survive into Task 4 (Task 4 review must confirm the spike code is gone or rewritten).
+- Task 2: Ruling: thumbnails apply irot/imir only, not EXIF Orientation, matching the app's HEIC decode (HEIF transforms are authoritative) — if wrong: a HEIC whose EXIF disagrees with irot shows like the app does.
+- Ruling: run_once's detached reader/writer/stderr threads are load-bearing for an in-Explorer DLL — if the DLL unloads while they run, Explorer crashes. Task 4 must add a live-thread counter in lv-sandbox (or a bounded join) and DllCanUnloadNow returns S_FALSE while any run_once thread is alive; the shell passes a 9 s deadline — if wrong: Explorer crash on unload.
+- Ruling (I1): "alive" is the OS thread object: run_once keeps its helper threads' handles; the counter decrements only after the OS thread has exited (WaitForSingleObject on the handle), e.g. a registry of handles pruned on DllCanUnloadNow — if wrong: DllCanUnloadNow returns S_FALSE a little longer.
+- Ruling (I2): the shell's read cap is 64 MiB (iPhone HEIC are 1–10 MB, 48 MP up to ~25 MB), well under the app's cap as the constraint allows; reserve exactly toward the Stat size; no second full copy of the bytes (move the Vec into the request) — if wrong: HEIC files over 64 MiB get no thumbnail.
+- Ruling (I2): one render in flight per process with a latest-request-wins slot; stale requests never start; Unload/DoPreview empty the slot — if wrong: slightly slower first preview after fast scrolling.
+- Ruling (amends I2): one render in flight per process, but one waiting request per handler (Shared); a new request replaces only its own handler's waiting request; the thread takes the newest current request first and skips non-current ones — avoids a silently blank second pane — if wrong: two panes render one after the other.
+- Ruling (amends Task 7 brief): save/restore the thumbnail ShellEx {e357…} value (both modes) and preview {8895…} (admin) exactly like PropertyHandlers: save the previous value once, write ours, on uninstall restore only if the value is still ours, else leave it; delete the key only when empty; no uninsdeletekey on those keys — the spec's "never delete another program's registration" outranks the brief — if wrong: slightly more [Code].
+- Ruling (M1): CloseApplications=yes with CloseApplicationsFilter=light-view.exe,lv-worker.exe (exe files only — the shell DLL Explorer holds is never checked, so Explorer is never offered for closing); RestartApplications=no — if wrong: a running viewer still blocks an update.
+- Ruling (M2): restore saved shared values in DeinitializeSetup when the install did not finish.
+- Ruling: the docs-only fix round 1 of Task 8 is checked by the controller (README-only diff) and by the final whole-branch review instead of a separate re-review — if wrong: a README wording slip survives to the final review.
+- Ruling (I2, amends Global Constraints "max_pixels = app default"): thumbnail requests use their own max_pixels = 1<<26 (64 MP, well above 48 MP phones) so each worker's Job is smaller, and at most 2 thumbnail workers run at once per process (a counting semaphore; a waiting call gives up at its deadline and returns failure) — anti-goal 3 outranks the constraint's convenience — if wrong: HEICs over 64 MP get no thumbnail; very large folders fill in a bit slower.
+- Ruling: residual long doc line and N1/N2 parked as follow-ups — cosmetic or wasted-work-only, no safety impact — if wrong: a wasted worker start under load; slightly incomplete SECURITY.md wording.
+
+## Deferred
+
+- Task 2: minor (deferred): peak memory at max_side 4096 on near-limit images unmeasured (shrink keeps full RGBA alive); test hook take_decoded_items ships in product; misplaced/outdated docs; bad max_side → Corrupt; Turn::of parses twice. Unverified: real iPhone HEIC embedded thumbnail accepted by lv-core parser.
+- Task 3: minor (deferred): docs overstate bound (deadline + ≤1 s); test inheritance race flake; wrong-id/oversized answer branches untested; low-IL test lacks born_in_job assert; profile_sid_named public.
+- Task 4: minor (deferred): deadline does not cover the stream read (bounded by 64 MiB); lv-shell depends on all of lv-core for constants; DLL import test may check a stale DLL (Task 7 package check is the gate); GetThumbnail can block ~10 s without pumping; long doc line thumbnail.rs:829. Note: implementer killed a hung test process it had started itself (allowed by instructions).
+- Task 5: fix round 1/5 (3 addressed + minors, 0 open Important; commits e2f9d57..b838298). New minors: unload drops stream before destroying child; queue `running` not reset on unwind.
+- Task 5: minor (deferred): no re-render on pane resize (256 floor); stream read on prevhost thread; newest-first queue has no fairness bound; default panic hook prints before catch_unwind; long doc lines; unwind guard untested. Task 8 smoke: confirm Explorer calls Unload on the old handler before the next file.
+- Task 6: minor (deferred): boundary scan can be fooled by raw strings and by a new `mod x;` pointing to an unscanned file; hostile-only clap/ispe differences from libheif; exif_item_tiff linear search (bounded CPU); camera_facts parses twice (both capped). Note: MAX_EXTENTS now 1<<16 also for app rotation save (real files ≪ cap).
+- Task 7: minor (deferred): HKLM RunOnce runs only at admin logon (MoveFileEx delay-until-reboot better in admin mode); % in paths breaks RunOnce del; orphan CLSID restored as-is; notices list test-only crates; empty HKCU .heic\ShellEx parent left; failed-upgrade rollback may drop saved previous values; other-mode notice mostly only with /ALLUSERS or /CURRENTUSER. Unverified until CI/real install: ISCC compile of [Code], PreviewHandlers ValueName {{ expansion, IsAdminInstallMode in InitializeSetup, Restart Manager filter, SignPath artifact config lists lv_shell.dll.
+- Final: fix wave scope: I1 SECURITY.md (EN+KO) + README wording (DLL loads into any process using the shell thumbnail API, not only Explorer; details parser in the SYSTEM indexer); I2 as ruled; I3 rollback keeps saved values; M1 fuzz targets for display_size/camera_facts/turn_steps; M2 README "whole file up to 64 MiB"; M3 lv-sandbox logging silent unless the app turns it on; M5 Seek(0) in thumbnail; M6 uninstall order (unregister handlers before deleting the AppContainer profile); long doc lines. Later: M4 protocol version guard and everything else deferred.
+- Final: fix wave re-review — I1, I2, I3, M1, M2, M3, M5, M6 addressed; residual: one long doc line preview.rs:9 (trivial). New minors N1 (slot taken at deadline still starts a worker), N2 (SECURITY.md wording: details handler also loads in any program reading file properties; preview may queue behind another render).
+
+## Measured
+
+- Task 8: numbers (release, battery, 256 px, warm median): direct COM 47–68 / 220–284 / 44–99 ms; via Windows thumbnail API with AppContainer worker 75–115 / 329–383 / 228 ms (embedded / 12 MP no thumbnail / rainbow). 12 MP without embedded thumbnail misses 300 ms target (documented). Explorer's own call not observed (Details view); API path from own process passed. Explorer window PID 7812 left open for the user to close.
+
+## Only CI or a real install can verify
+
+- ISCC compile of the [Code] (two install modes, shared-value save/restore, rollback, uninstall order).
+- Per-user: thumbnails in a real Explorer folder (Large icons) for real iPhone HEIC; Explorer stays responsive on a big folder.
+- All-users: thumbnails, preview pane (Explorer calls Unload before the next file), details tab; uninstall restores Windows' handlers.
+- Update removes the old lv-shell-<version>.dll (RunOnce), an account without the HEVC extension, AC vs battery timing, SignPath lists lv_shell.dll.
