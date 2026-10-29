@@ -393,3 +393,39 @@ fn no_c_library_is_imported() {
         }
     }
 }
+
+/// M7 Task 8 measurement, not a check: one thumbnail end to end through the COM object
+/// (stream read, one sandboxed worker, bitmap) for the sample HEICs, first call and the
+/// median of 10 more. Run on a release build:
+/// `cargo test --release -p lv-shell thumbnail_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "measurement; run by hand on a release build"]
+fn thumbnail_timing() {
+    let _serial = serial();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/heif");
+    for name in [
+        "grid-4032x3024-thumbs.heic",
+        "grid-4032x3024.heic",
+        "rainbow-451x461.heic",
+    ] {
+        let bytes = std::fs::read(dir.join(name)).expect(name);
+        let mut times: Vec<f64> = (0..11)
+            .map(|_| {
+                let start = Instant::now();
+                let (bitmap, _) = thumbnail(&provider_with(&bytes), 256).expect(name);
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                take(bitmap);
+                ms
+            })
+            .collect();
+        let first = times.remove(0);
+        times.sort_by(f64::total_cmp);
+        println!(
+            "{name}: first {first:.0} ms, warm median {:.0} ms (min {:.0}, max {:.0}, n {})",
+            times[times.len() / 2],
+            times[0],
+            times[times.len() - 1],
+            times.len()
+        );
+    }
+}
