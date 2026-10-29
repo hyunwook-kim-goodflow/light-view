@@ -280,12 +280,8 @@ fn only_the_first_and_the_last_of_many_previews_start() {
     for _ in 0..5 {
         do_preview(&handler).expect("DoPreview while the first renders");
     }
-    // A second handler's request (another file in the same prevhost) is the latest of all.
-    let other_parent = Parent::new();
-    let other = handler_with(Arc::new(|_, _| Some(image(7, 7))), &other_parent, b"other");
-    do_preview(&other).expect("the other handler's DoPreview");
     gated.release.send(()).unwrap();
-    assert!(pump_until(Duration::from_secs(10), || shown(&other).is_some()));
+    assert!(pump_until(Duration::from_secs(10), || shown(&handler).is_some()));
     wait_for_no_threads();
     assert_eq!(
         queue::started() - before,
@@ -294,13 +290,11 @@ fn only_the_first_and_the_last_of_many_previews_start() {
     );
     assert_eq!(
         gated.started.try_iter().collect::<Vec<_>>(),
-        Vec::<usize>::new(),
-        "none of the replaced previews started"
+        [1],
+        "the last request rendered, as the second call; none of the replaced ones"
     );
-    assert_eq!(shown(&other), Some((7, 7)));
-    // The first handler's only started preview was superseded: it shows nothing.
-    pump_until(Duration::from_millis(100), || false);
-    assert_eq!(shown(&handler), None);
+    // The first result was stale (later DoPreviews came): only the last one is shown.
+    assert_eq!(shown(&handler), Some((31, 40)));
 
     // Unload empties the queue of the handler's waiting request.
     let late = gated_render();
@@ -317,6 +311,56 @@ fn only_the_first_and_the_last_of_many_previews_start() {
         queue::started(),
         before,
         "an unloaded preview's request started"
+    );
+}
+
+/// Amended ruling I2: two preview panes in one prevhost (two handlers) both get their image
+/// while a third renders, one render at a time; each pane's earlier waiting request is
+/// replaced by its later one.
+#[test]
+fn two_panes_both_render() {
+    let _serial = serial();
+    wait_for_no_threads();
+    let before = queue::started();
+    let active = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    let counted = |size: u32| -> Render {
+        let (active, most) = (Arc::clone(&active), Arc::clone(&most));
+        Arc::new(move |_, _| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            active.fetch_sub(1, Ordering::SeqCst);
+            Some(image(size, size))
+        })
+    };
+    let parent = Parent::new();
+    let gated = gated_render();
+    let first = handler_with(gated.render, &parent, b"first");
+    do_preview(&first).unwrap();
+    assert_eq!(gated.started.recv_timeout(Duration::from_secs(10)), Ok(0));
+
+    let (pane_a, pane_b) = (Parent::new(), Parent::new());
+    let a = handler_with(counted(11), &pane_a, b"a");
+    let b = handler_with(counted(12), &pane_b, b"b");
+    do_preview(&a).unwrap();
+    do_preview(&b).unwrap();
+    do_preview(&a).unwrap();
+    gated.release.send(()).unwrap();
+    assert!(
+        pump_until(Duration::from_secs(10), || {
+            shown(&a).is_some() && shown(&b).is_some()
+        }),
+        "a pane was left blank"
+    );
+    wait_for_no_threads();
+    assert_eq!((shown(&a), shown(&b)), (Some((11, 11)), Some((12, 12))));
+    assert_eq!(shown(&first), Some((10, 20)), "the first pane's image too");
+    assert_eq!(queue::started() - before, 3, "the first, a's last and b's");
+    assert_eq!(
+        most.load(Ordering::SeqCst),
+        1,
+        "renders ran at the same time"
     );
 }
 
