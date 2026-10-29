@@ -1,45 +1,43 @@
-//! SPIKE (M7 Task 1, ruling R1): the smallest per-user thumbnail handler that answers the
-//! question "does Explorer call a handler registered under HKCU only, in which host, at what
-//! integrity, and can that host start the sandboxed worker?". Task 4 rewrites this crate.
+//! light-view's Explorer extension: a COM in-process server (pure Rust, no C code) with the
+//! HEIC thumbnail handler (`IThumbnailProvider` + `IInitializeWithStream`).
 //!
-//! `GetThumbnail` logs the host process (name, PID, integrity, AppContainer or not) to
-//! `log.txt` in the parent folder of the folder holding this DLL, starts one sandboxed
-//! `lv-worker.exe` (from this DLL's folder) with a copy of lv-app's start code, sends it the
-//! stream's bytes as `DecodeHeif`, logs the outcome and the time, and answers a lime bitmap
-//! whatever the worker said.
+//! The handler never decodes: it reads the file's bytes from Explorer's stream (up to the
+//! app's HEIC file size cap), has one sandboxed `lv-worker.exe` from this DLL's folder make
+//! the thumbnail ([`lv_sandbox::run_once`], ruling R3) and answers it as a 32 bpp bitmap. Any
+//! failure is an error HRESULT (Explorer then shows the file's icon) and is not logged.
 //!
-//! Task 1b adds the preview class (`preview.rs`): a magenta child window whose `DoPreview`
-//! logs its host the same way and runs one worker decode.
+//! Per-user installs load this DLL into `explorer.exe` itself (`DisableProcessIsolation`), so
+//! no panic may cross a COM boundary ([`guarded`]) and `DllCanUnloadNow` refuses while any
+//! object, server lock or worker helper thread is alive ([`can_unload`]).
 
-mod appcontainer;
-mod host;
-mod preview;
-mod provider;
-mod sandbox;
-mod worker;
+mod bitmap;
+mod dll;
+mod factory;
+mod stream;
+mod thumbnail;
 
-use std::ffi::c_void;
-use std::io::Write;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use windows::core::{implement, Interface, GUID, HRESULT};
-use windows::Win32::Foundation::{
-    BOOL, CLASS_E_CLASSNOTAVAILABLE, E_POINTER, HINSTANCE, HMODULE, S_FALSE, S_OK,
+use windows::core::{Result, GUID, PCWSTR};
+use windows::Win32::Foundation::{E_FAIL, HMODULE};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
-use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
-use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
-use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
 /// Thumbnail handler CLSID (Global Constraints).
 pub const CLSID_THUMBNAIL: GUID = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
-/// Preview handler CLSID (Global Constraints).
-pub const CLSID_PREVIEW: GUID = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
 
-static MODULE: AtomicIsize = AtomicIsize::new(0);
-/// Live COM objects (factories and providers), for `DllCanUnloadNow`.
+/// Live COM objects of this DLL (class factories and thumbnail providers).
 static OBJECTS: AtomicUsize = AtomicUsize::new(0);
+/// `IClassFactory::LockServer(TRUE)` calls not yet undone.
+static LOCKS: AtomicUsize = AtomicUsize::new(0);
 
+/// Counts one COM object in [`OBJECTS`] while it lives; a field of every object.
 pub(crate) struct ObjectCount;
 
 impl ObjectCount {
@@ -55,108 +53,59 @@ impl Drop for ObjectCount {
     }
 }
 
-/// This DLL's module handle.
-pub(crate) fn module_handle() -> HMODULE {
-    HMODULE(MODULE.load(Ordering::SeqCst) as *mut c_void)
-}
-
-/// This DLL's full path.
-pub(crate) fn dll_path() -> PathBuf {
-    let module = module_handle();
-    let mut buf = vec![0u16; 32 * 1024];
-    // SAFETY: valid module handle of this DLL (set in DllMain) and a writable buffer.
-    let len = unsafe { GetModuleFileNameW(module, &mut buf) } as usize;
-    PathBuf::from(String::from_utf16_lossy(&buf[..len]))
-}
-
-/// Appends one line to the spike log (`<dll folder>\..\log.txt`). Failures are ignored.
-pub(crate) fn spike_log(msg: &str) {
-    let dll = dll_path();
-    let Some(root) = dll.parent().and_then(|bin| bin.parent()) else {
-        return;
-    };
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join("log.txt"))
-    {
-        let _ = writeln!(f, "{ms} pid={pid} {msg}");
-    }
-}
-
-#[no_mangle]
-extern "system" fn DllMain(module: HINSTANCE, reason: u32, _reserved: *mut c_void) -> BOOL {
-    if reason == DLL_PROCESS_ATTACH {
-        MODULE.store(module.0 as isize, Ordering::SeqCst);
-    }
-    BOOL::from(true)
-}
-
-/// # Safety
-/// COM contract: valid GUID pointers and a writable out-pointer.
-#[no_mangle]
-unsafe extern "system" fn DllGetClassObject(
-    clsid: *const GUID,
-    iid: *const GUID,
-    out: *mut *mut c_void,
-) -> HRESULT {
-    if clsid.is_null() || iid.is_null() || out.is_null() {
-        return E_POINTER;
-    }
-    *out = std::ptr::null_mut();
-    let preview = if *clsid == CLSID_THUMBNAIL {
-        false
-    } else if *clsid == CLSID_PREVIEW {
-        true
+pub(crate) fn lock_server(lock: bool) {
+    if lock {
+        LOCKS.fetch_add(1, Ordering::SeqCst);
     } else {
-        return CLASS_E_CLASSNOTAVAILABLE;
+        // An unbalanced unlock is the caller's bug; never wrap below zero.
+        let _ = LOCKS.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    }
+}
+
+/// Whether nothing of this DLL is in use: no object, no server lock and no worker helper
+/// thread (those of [`lv_sandbox::run_once`] may outlive a `GetThumbnail` by a moment).
+pub(crate) fn can_unload() -> bool {
+    OBJECTS.load(Ordering::SeqCst) == 0
+        && LOCKS.load(Ordering::SeqCst) == 0
+        && lv_sandbox::live_threads() == 0
+}
+
+/// Runs `f`, turning a panic into `E_FAIL`: no panic may unwind into a COM caller.
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(E_FAIL.into()))
+}
+
+/// `lv-worker.exe` in the folder of the module holding this code (the DLL, or a test exe).
+pub(crate) fn worker_exe() -> Result<PathBuf> {
+    static ANCHOR: u8 = 0;
+    let mut module = HMODULE::default();
+    // SAFETY: FROM_ADDRESS takes any address inside the module (a static of ours);
+    // UNCHANGED_REFCOUNT leaves the module's reference count alone, so nothing to release.
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(std::ptr::from_ref(&ANCHOR).cast()),
+            &mut module,
+        )?
     };
-    spike_log(&format!("DllGetClassObject(preview={preview})"));
-    let factory: IClassFactory = Factory {
-        preview,
-        _count: ObjectCount::new(),
-    }
-    .into();
-    factory.query(iid, out)
-}
-
-#[no_mangle]
-extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if OBJECTS.load(Ordering::SeqCst) == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
-}
-
-#[implement(IClassFactory)]
-struct Factory {
-    /// Creates preview handlers (else thumbnail providers).
-    preview: bool,
-    _count: ObjectCount,
-}
-
-#[allow(non_snake_case)]
-impl IClassFactory_Impl for Factory_Impl {
-    fn CreateInstance(
-        &self,
-        outer: Option<&windows::core::IUnknown>,
-        iid: *const GUID,
-        out: *mut *mut c_void,
-    ) -> windows::core::Result<()> {
-        if self.preview {
-            preview::create(outer, iid, out)
-        } else {
-            provider::create(outer, iid, out)
+    let mut buf = vec![0u16; 1024];
+    loop {
+        // SAFETY: a valid module handle of this process and a writable buffer.
+        let len = unsafe { GetModuleFileNameW(module, &mut buf) } as usize;
+        if len == 0 {
+            return Err(windows::core::Error::from_win32());
         }
-    }
-
-    fn LockServer(&self, _lock: BOOL) -> windows::core::Result<()> {
-        Ok(())
+        if len < buf.len() {
+            let dll = PathBuf::from(OsString::from_wide(&buf[..len]));
+            return Ok(dll.with_file_name("lv-worker.exe"));
+        }
+        // Truncated: try again with more room (long paths are up to 32 767 characters).
+        if buf.len() >= 32 * 1024 {
+            return Err(E_FAIL.into());
+        }
+        buf.resize(buf.len() * 4, 0);
     }
 }
+
+#[cfg(test)]
+mod tests;
