@@ -16,7 +16,7 @@ use windows::Win32::Foundation::{
     ERROR_ALREADY_INITIALIZED, E_FAIL, E_INVALIDARG, E_POINTER, E_UNEXPECTED,
 };
 use windows::Win32::Graphics::Gdi::HBITMAP;
-use windows::Win32::System::Com::IStream;
+use windows::Win32::System::Com::{IStream, STREAM_SEEK_SET};
 use windows::Win32::UI::Shell::PropertiesSystem::{
     IInitializeWithStream, IInitializeWithStream_Impl,
 };
@@ -84,6 +84,10 @@ impl IThumbnailProvider_Impl for Provider_Impl {
                 return Err(E_INVALIDARG.into());
             }
             let stream = self.stream().clone().ok_or(E_UNEXPECTED)?;
+            // From the start, like the preview and details handlers; a stream that cannot
+            // seek is read from where it is.
+            // SAFETY: a valid stream.
+            let _ = unsafe { stream.Seek(0, STREAM_SEEK_SET, None) };
             let data = stream::read_capped(&stream, READ_CAP)?;
             let max_side = cx.clamp(1, MAX_SIDE);
             let (width, height, bgra) = ask_worker(&self.exe, max_side, data).ok_or(E_FAIL)?;
