@@ -20,8 +20,14 @@ use windows::Win32::UI::Shell::{IThumbnailProvider, SHCreateMemStream, WTSAT_ARG
 
 use crate::bitmap::tests::take;
 use crate::dll::{DllCanUnloadNow, DllGetClassObject};
-use crate::thumbnail::{Provider, READ_CAP};
-use crate::{guarded, worker_exe, CLSID_PREVIEW, CLSID_THUMBNAIL};
+use crate::stream::READ_CAP;
+use crate::thumbnail::Provider;
+use crate::{guarded, worker_exe, CLSID_DETAILS, CLSID_PREVIEW, CLSID_THUMBNAIL};
+
+thread_local! {
+    /// How often this thread asked for the worker's path ([`worker_exe`]).
+    pub(crate) static WORKER_EXE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 pub(crate) fn serial() -> MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
@@ -201,10 +207,10 @@ fn a_panic_is_an_error_not_an_unwind() {
 }
 
 #[test]
-fn only_our_two_classes_are_served() {
+fn only_our_three_classes_are_served() {
     let _serial = serial();
     let mut out: *mut c_void = std::ptr::null_mut();
-    for clsid in [CLSID_THUMBNAIL, CLSID_PREVIEW] {
+    for clsid in [CLSID_THUMBNAIL, CLSID_PREVIEW, CLSID_DETAILS] {
         // SAFETY: valid GUID pointers and a local out-pointer.
         let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut out) };
         assert_eq!(hr, S_OK);
@@ -213,12 +219,13 @@ fn only_our_two_classes_are_served() {
     }
     let thumbnail_class = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
     let preview_class = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
-    assert_eq!(
-        (CLSID_THUMBNAIL, CLSID_PREVIEW),
-        (thumbnail_class, preview_class)
-    );
     let details_class = GUID::from_u128(0x0EA2AA38_AE7B_4906_9BD9_605EA0348914);
-    for clsid in [details_class, GUID::zeroed()] {
+    assert_eq!(
+        (CLSID_THUMBNAIL, CLSID_PREVIEW, CLSID_DETAILS),
+        (thumbnail_class, preview_class, details_class)
+    );
+    let other = GUID::from_u128(0x0EA2AA38_AE7B_4906_9BD9_605EA0348915);
+    for clsid in [other, GUID::zeroed()] {
         // SAFETY: valid GUID pointers and a local out-pointer.
         let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut out) };
         assert_eq!(hr, CLASS_E_CLASSNOTAVAILABLE);

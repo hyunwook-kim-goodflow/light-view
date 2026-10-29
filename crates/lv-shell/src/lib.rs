@@ -1,12 +1,14 @@
 //! light-view's Explorer extension: a COM in-process server (pure Rust, no C code) with the
 //! HEIC thumbnail handler (`IThumbnailProvider` + `IInitializeWithStream`) and, for all-users
-//! installs, the HEIC preview handler (`IPreviewHandler` and friends, in `prevhost.exe`).
+//! installs, the HEIC preview handler (`IPreviewHandler` and friends, in `prevhost.exe`) and
+//! the HEIC details handler (`IPropertyStore`, in `explorer.exe` and the SYSTEM search
+//! indexer; [`properties`] only parses bytes and never reaches a worker).
 //!
-//! The handlers never decode: they read the file's bytes from Explorer's stream (up to the
-//! shell's 64 MiB cap), have one sandboxed `lv-worker.exe` from this DLL's folder make the
-//! image ([`lv_sandbox::run_once`], ruling R3) and show it as a 32 bpp bitmap. Any failure is
-//! an error HRESULT (Explorer then shows the file's icon) or an empty preview, and is not
-//! logged.
+//! The thumbnail and preview handlers never decode: they read the file's bytes from
+//! Explorer's stream (up to the shell's 64 MiB cap), have one sandboxed `lv-worker.exe` from
+//! this DLL's folder make the image ([`lv_sandbox::run_once`], ruling R3) and show it as a
+//! 32 bpp bitmap. Any failure is an error HRESULT (Explorer then shows the file's icon), an
+//! empty preview or no details, and is not logged.
 //!
 //! Per-user installs load this DLL into `explorer.exe` itself (`DisableProcessIsolation`), so
 //! no panic may cross a COM boundary ([`guarded`]) and `DllCanUnloadNow` refuses while any
@@ -16,6 +18,7 @@ mod bitmap;
 mod dll;
 mod factory;
 mod preview;
+mod properties;
 mod stream;
 mod thumbnail;
 
@@ -36,6 +39,8 @@ use windows::Win32::System::LibraryLoader::{
 pub const CLSID_THUMBNAIL: GUID = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
 /// Preview handler CLSID (Global Constraints).
 pub const CLSID_PREVIEW: GUID = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
+/// Details (property) handler CLSID (Global Constraints); all-users installs only.
+pub const CLSID_DETAILS: GUID = GUID::from_u128(0x0EA2AA38_AE7B_4906_9BD9_605EA0348914);
 
 /// Live COM objects of this DLL (class factories, handlers, and the state a preview window
 /// and its background thread share).
@@ -100,6 +105,8 @@ pub(crate) fn this_module() -> Result<HMODULE> {
 
 /// `lv-worker.exe` in the folder of the module holding this code (the DLL, or a test exe).
 pub(crate) fn worker_exe() -> Result<PathBuf> {
+    #[cfg(test)]
+    tests::WORKER_EXE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let module = this_module()?;
     let mut buf = vec![0u16; 1024];
     loop {
@@ -120,5 +127,9 @@ pub(crate) fn worker_exe() -> Result<PathBuf> {
     }
 }
 
+/// The HEIF box writer of lv-heif's thumbnail tests, shared for the details fixtures.
+#[cfg(test)]
+#[path = "../../lv-heif/tests/support/heif_build.rs"]
+mod heif_build;
 #[cfg(test)]
 mod tests;

@@ -23,6 +23,7 @@ use windows::Win32::UI::Shell::{
     IThumbnailProvider, IThumbnailProvider_Impl, WTSAT_ARGB, WTS_ALPHATYPE,
 };
 
+use crate::stream::READ_CAP;
 use crate::{bitmap, guarded, stream, ObjectCount};
 
 /// The largest long side asked of the worker, whatever `cx` Explorer asks for (Explorer's
@@ -31,10 +32,6 @@ pub(crate) const MAX_SIDE: u32 = 1024;
 /// How long the worker may take; `run_once` may return up to a second later (ruling R3's
 /// 10 s bound).
 const DEADLINE: Duration = Duration::from_secs(9);
-/// The most bytes read from Explorer's stream: 64 MiB. iPhone HEIC photos are 1 to 10 MB and
-/// 48 MP ones up to about 25 MB; a larger file gets no thumbnail. Far under the app's HEIC
-/// cap (about 1 GiB), which would let one thumbnail take gigabytes inside explorer.exe.
-pub(crate) const READ_CAP: u64 = 64 * 1024 * 1024;
 /// Each worker answers one request only, so one id does.
 const REQUEST_ID: u64 = 1;
 

@@ -4,6 +4,12 @@ use windows::core::Result;
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG};
 
+/// The most bytes any handler reads from Explorer's stream: 64 MiB. iPhone HEIC photos are 1
+/// to 10 MB and 48 MP ones up to about 25 MB; a larger file gets no thumbnail, preview or
+/// details. Far under the app's HEIC cap (about 1 GiB), which would let one file take
+/// gigabytes inside explorer.exe or the search indexer.
+pub(crate) const READ_CAP: u64 = 64 * 1024 * 1024;
+
 /// Bytes asked of the stream per read.
 const CHUNK: usize = 256 * 1024;
 

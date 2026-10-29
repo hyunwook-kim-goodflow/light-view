@@ -40,6 +40,20 @@ cargo test -p lv-heif --test thumbnail -- --ignored write_thumbnail_fixtures
 
 `irot`·`imir`가 붙은 변형은 테스트 안에서 같은 방법으로 그때그때 만들고 저장하지 않아요.
 
+## 자세히(속성) 처리기 시험용 합성 파일
+
+| 파일 | 크기(표시 방향) | EXIF | SHA-256 |
+|---|---|---|---|
+| `rainbow-451x461-exif.heic` | 451×461 (`ispe` 452×462 + `clap`) | Make `Apple`, Model `iPhone 15 Pro`, DateTimeOriginal `2024:05:06 07:08:09`, OffsetTimeOriginal `+09:00`, GPS 37°33′N 126°58′E | `901a3cc13a2a9d8a18ad843ffabaf795894157d92155c02ae021ff0f050040b5` |
+
+위의 샘플들에는 EXIF가 없어서 같은 상자 작성기(`heif_build.rs`의 `Builder::exif`)로 만들었어요. `rainbow-451x461.heic` 주 이미지(`hvcC`·HEVC 데이터·`colr`·`clap`)를 그대로 쓰고, `mdat`에서 이미지 데이터 **뒤에** `Exif` item(`cdsc`로 주 이미지를 가리킴, `exif_tiff_header_offset` 0)을 붙였어요. EXIF(TIFF) 블록은 `crates/lv-shell/src/properties/tests.rs`가 손으로 짜요. GPS는 자세히 처리기가 내보내지 않는지 보려고 일부러 넣은 가짜 위치예요. 픽셀 데이터는 libheif 샘플의 것이라 라이선스도 같아요.
+
+다시 만드는 명령(같은 바이트가 나와야 하고, `committed_exif_fixture_is_what_the_builder_makes` 테스트가 확인해요):
+
+```text
+cargo test -p lv-shell --lib -- --ignored write_exif_fixture
+```
+
 ## 직접 확인할 것
 
 실제 아이폰 사진(그리드 타일, 10비트, 깊이 맵·게인 맵, EXIF Orientation이 있는 HEIC)은 공개 라이선스가 분명한 파일을 구하지 못해 여기에는 없어요. 사용자 제공 샘플(`testdata/private/`, git에 올리지 않음)로 확인해요.
