@@ -7,9 +7,13 @@
 //! `lv-worker.exe` (from this DLL's folder) with a copy of lv-app's start code, sends it the
 //! stream's bytes as `DecodeHeif`, logs the outcome and the time, and answers a lime bitmap
 //! whatever the worker said.
+//!
+//! Task 1b adds the preview class (`preview.rs`): a magenta child window whose `DoPreview`
+//! logs its host the same way and runs one worker decode.
 
 mod appcontainer;
 mod host;
+mod preview;
 mod provider;
 mod sandbox;
 mod worker;
@@ -29,6 +33,8 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 
 /// Thumbnail handler CLSID (Global Constraints).
 pub const CLSID_THUMBNAIL: GUID = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
+/// Preview handler CLSID (Global Constraints).
+pub const CLSID_PREVIEW: GUID = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
 
 static MODULE: AtomicIsize = AtomicIsize::new(0);
 /// Live COM objects (factories and providers), for `DllCanUnloadNow`.
@@ -49,9 +55,14 @@ impl Drop for ObjectCount {
     }
 }
 
+/// This DLL's module handle.
+pub(crate) fn module_handle() -> HMODULE {
+    HMODULE(MODULE.load(Ordering::SeqCst) as *mut c_void)
+}
+
 /// This DLL's full path.
 pub(crate) fn dll_path() -> PathBuf {
-    let module = HMODULE(MODULE.load(Ordering::SeqCst) as *mut c_void);
+    let module = module_handle();
     let mut buf = vec![0u16; 32 * 1024];
     // SAFETY: valid module handle of this DLL (set in DllMain) and a writable buffer.
     let len = unsafe { GetModuleFileNameW(module, &mut buf) } as usize;
@@ -98,11 +109,16 @@ unsafe extern "system" fn DllGetClassObject(
         return E_POINTER;
     }
     *out = std::ptr::null_mut();
-    if *clsid != CLSID_THUMBNAIL {
+    let preview = if *clsid == CLSID_THUMBNAIL {
+        false
+    } else if *clsid == CLSID_PREVIEW {
+        true
+    } else {
         return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    spike_log("DllGetClassObject");
+    };
+    spike_log(&format!("DllGetClassObject(preview={preview})"));
     let factory: IClassFactory = Factory {
+        preview,
         _count: ObjectCount::new(),
     }
     .into();
@@ -120,6 +136,8 @@ extern "system" fn DllCanUnloadNow() -> HRESULT {
 
 #[implement(IClassFactory)]
 struct Factory {
+    /// Creates preview handlers (else thumbnail providers).
+    preview: bool,
     _count: ObjectCount,
 }
 
@@ -131,7 +149,11 @@ impl IClassFactory_Impl for Factory_Impl {
         iid: *const GUID,
         out: *mut *mut c_void,
     ) -> windows::core::Result<()> {
-        provider::create(outer, iid, out)
+        if self.preview {
+            preview::create(outer, iid, out)
+        } else {
+            provider::create(outer, iid, out)
+        }
     }
 
     fn LockServer(&self, _lock: BOOL) -> windows::core::Result<()> {

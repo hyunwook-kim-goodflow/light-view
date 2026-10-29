@@ -95,7 +95,7 @@ impl Provider_Impl {
     }
 }
 
-fn read_all(stream: &IStream) -> Result<Vec<u8>> {
+pub(crate) fn read_all(stream: &IStream) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
