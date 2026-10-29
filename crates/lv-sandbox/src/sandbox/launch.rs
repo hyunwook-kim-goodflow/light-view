@@ -19,8 +19,8 @@ use windows::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-use super::super::appcontainer::Container;
 use super::{log, raw};
+use crate::appcontainer::Container;
 
 /// PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON.
 const WIN32K_SYSTEM_CALL_DISABLE: u64 = 1 << 28;

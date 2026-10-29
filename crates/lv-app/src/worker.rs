@@ -6,9 +6,10 @@
 //! ([`WorkerPool::single_use`]), so a worker that a hostile file took over cannot answer a
 //! request whose output is saved (ruling R21).
 //!
-//! Each slot holds at most one worker (see [`sandbox`]). A call ([`WorkerPool::request`])
-//! takes an idle slot, starts a worker in it if needed, sends one request and waits for the
-//! answer on a channel fed by the worker's reader thread: if no matching answer arrives
+//! Each slot holds at most one worker (see [`lv_sandbox::sandbox`]). A call
+//! ([`WorkerPool::request`]) takes an idle slot, starts a worker in it if needed, sends one
+//! request and waits for the answer on a channel fed by the worker's reader thread: if no
+//! matching answer arrives
 //! within the request's deadline (ruling R4: 10 s for a decode, 10 s + 10 s per 100 MP for
 //! a rotation), or the worker dies or breaks the protocol (an answer of the wrong kind
 //! included), its Job is terminated, the slot is emptied and the call fails with
@@ -33,9 +34,7 @@
 //! no prefetch thread is left waiting out a hung worker's timeout.
 
 mod appcontainer;
-mod process;
 mod protocol;
-mod sandbox;
 #[cfg(test)]
 mod webp_tests;
 
@@ -50,12 +49,12 @@ use std::time::{Duration, Instant};
 use lv_core::decode::DecodeError;
 use lv_ipc::Request;
 
-pub use appcontainer::delete_profile;
-use appcontainer::Container;
-use process::{took_request, Event, Worker, WriteOutcome};
-use protocol::{request_data_cap, to_request, Expect};
+use lv_sandbox::appcontainer::Container;
+pub use lv_sandbox::delete_profile;
+use lv_sandbox::process::{took_request, Event, Worker, WriteOutcome, WRITE_SETTLE};
+use lv_sandbox::sandbox::{log, terminate_job};
+use protocol::{request_data_cap, response_cap, to_request, Expect};
 pub use protocol::{PoolError, PoolRequest, Reply};
-use sandbox::{log, terminate_job};
 
 /// How long a worker may take to decode one file (ruling R4), and a caller may wait for a
 /// free slot.
@@ -63,8 +62,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed starts after which a slot stops trying.
 const MAX_SPAWN_FAILURES: u32 = 3;
 const NOT_RESPONDING: &str = "작업자가 응답하지 않아요";
-/// How long a failed first request waits for the writer thread to report its write.
-const WRITE_SETTLE: Duration = Duration::from_secs(1);
 
 pub struct WorkerPool {
     exe: PathBuf,
@@ -188,7 +185,7 @@ impl WorkerPool {
             container: OnceLock::new(),
             container_failed: AtomicBool::new(false),
             #[cfg(test)]
-            profile_name: appcontainer::PROFILE_NAME,
+            profile_name: lv_sandbox::appcontainer::PROFILE_NAME,
             #[cfg(test)]
             single_use_pids: Mutex::new(Vec::new()),
         }
@@ -276,8 +273,15 @@ impl WorkerPool {
         let mitigations = !self.single_use_degraded.load(Ordering::Relaxed);
         let args: Vec<&str> = self.every_args.iter().map(String::as_str).collect();
         let container = if mitigations { self.container() } else { None };
-        let worker = match Worker::start(&self.exe, self.max_pixels, &args, mitigations, container)
-        {
+        let cap = response_cap(self.max_pixels);
+        let worker = match Worker::start(
+            &self.exe,
+            self.max_pixels,
+            &args,
+            mitigations,
+            container,
+            cap,
+        ) {
             Ok(worker) => {
                 self.check_container(&worker);
                 worker
@@ -422,7 +426,15 @@ impl WorkerPool {
         } else {
             self.container()
         };
-        match Worker::start(&self.exe, self.max_pixels, &args, !slot.degraded, container) {
+        let cap = response_cap(self.max_pixels);
+        match Worker::start(
+            &self.exe,
+            self.max_pixels,
+            &args,
+            !slot.degraded,
+            container,
+            cap,
+        ) {
             Ok(worker) => {
                 self.check_container(&worker);
                 let mut state = self.lock();
@@ -457,9 +469,9 @@ impl WorkerPool {
         };
         let id = request.id();
         let bytes = match &request {
-            Request::DecodeHeif { data, .. } | Request::RotateJpeg { data, .. } => {
-                data.len() as u64
-            }
+            Request::DecodeHeif { data, .. }
+            | Request::RotateJpeg { data, .. }
+            | Request::ThumbnailHeif { data, .. } => data.len() as u64,
             Request::FitWebp { rgba, .. } => rgba.len() as u64,
             Request::Shutdown => 0,
         };

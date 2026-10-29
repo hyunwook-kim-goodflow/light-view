@@ -5,7 +5,7 @@
 //! is created in (PROC_THREAD_ATTRIBUTE_JOB_LIST; where Windows refuses that, it joins
 //! while still suspended), so it never runs outside the Job. Best-effort layers (logged
 //! when they fail): the worker's AppContainer with no capabilities (ruling R2, see
-//! [`appcontainer`](super::appcontainer)), win32k system call lockdown and the
+//! [`appcontainer`](crate::appcontainer)), win32k system call lockdown and the
 //! no-child-process policy at creation, and the Job's UI restrictions. Only the three pipe
 //! ends are inherited, the working directory is the worker's folder and the environment
 //! holds `SystemRoot` alone (plus `LOCALAPPDATA` in an AppContainer, which Windows points at
@@ -44,7 +44,7 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcessToken, ResumeThread, TerminateProcess, WaitForSingleObject,
 };
 
-use super::appcontainer::Container;
+use crate::appcontainer::Container;
 use launch::Launch;
 
 mod launch;
@@ -118,8 +118,31 @@ impl StdinMonitor {
     }
 }
 
+/// Whether [`log`] writes anything: off until the host calls [`enable_logging`].
+static LOGGING: AtomicBool = AtomicBool::new(false);
+
+/// Turns [`log`] (and so the copy of the workers' stderr) on for this process. The app does
+/// so at its start; the Explorer extension never does, so nothing of light-view's reaches
+/// the console of a process that merely uses the shell's thumbnails.
+pub fn enable_logging() {
+    LOGGING.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`enable_logging`] was called in this process.
+pub fn logging_enabled() -> bool {
+    LOGGING.load(Ordering::Relaxed)
+}
+
+/// Writes `msg` to stderr once [`enable_logging`] was called, else nothing. Never panics: a
+/// failed write is ignored (there may be no stderr or a broken one).
 pub fn log(msg: &str) {
-    eprintln!("light-view: worker: {msg}");
+    log_to(logging_enabled(), &mut std::io::stderr(), msg);
+}
+
+fn log_to(enabled: bool, out: &mut impl std::io::Write, msg: &str) {
+    if enabled {
+        let _ = writeln!(out, "light-view: worker: {msg}");
+    }
 }
 
 /// Whether CreateProcessAsUserW refused PROC_THREAD_ATTRIBUTE_JOB_LIST once (before
@@ -144,13 +167,13 @@ pub fn spawn(
 /// A worker created suspended and already inside its Job, not yet resumed. Dropping it
 /// ends the Job and with it the process.
 pub struct Suspended {
-    sandboxed: Sandboxed,
+    pub(crate) sandboxed: Sandboxed,
     thread: OwnedHandle,
     pipes: Pipes,
     /// The process was created inside the Job (PROC_THREAD_ATTRIBUTE_JOB_LIST), not
     /// assigned to it afterwards. Read by the tests only.
     #[cfg_attr(not(test), allow(dead_code))]
-    born_in_job: bool,
+    pub(crate) born_in_job: bool,
 }
 
 impl Suspended {
@@ -301,7 +324,7 @@ fn pipe() -> windows::core::Result<(OwnedHandle, OwnedHandle)> {
 
 /// A primary token like ours with every privilege but SeChangeNotify removed, at low
 /// integrity.
-fn low_integrity_token() -> windows::core::Result<OwnedHandle> {
+pub(crate) fn low_integrity_token() -> windows::core::Result<OwnedHandle> {
     let mut current = HANDLE::default();
     // SAFETY: pseudo handle of our own process; `current` receives a new handle.
     unsafe {
@@ -410,12 +433,29 @@ fn create_job(max_pixels: u64) -> windows::core::Result<OwnedHandle> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn log_writes_only_when_enabled() {
+        let mut out = Vec::new();
+        log_to(false, &mut out, "quiet");
+        assert!(out.is_empty());
+        log_to(true, &mut out, "heard");
+        assert_eq!(out, b"light-view: worker: heard\n");
+    }
+
+    /// The only test that turns logging on: before it, nothing in this crate did.
+    #[test]
+    fn logging_is_off_until_the_host_enables_it() {
+        assert!(!logging_enabled(), "on before anyone asked");
+        enable_logging();
+        assert!(logging_enabled());
+    }
+
     use std::time::Duration;
 
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::System::JobObjects::IsProcessInJob;
 
-    use crate::worker::tests::{worker_exe, Process};
+    use crate::test_support::{worker_exe, Process};
 
     fn in_job(sandboxed: &Sandboxed) -> bool {
         let mut in_job = BOOL::default();

@@ -1,6 +1,6 @@
 # light-view
 
-**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Since M5 it draws images larger than a GPU texture in tiles with mipmaps, opens JPEGs over the memory limit at reduced size (marked "Opened at reduced size"), runs the HEIC worker in an AppContainer where the install folder allows it, keeps local crash records, and has an opt-in update check (the only network use). M5 measurements on one laptop: 12 MP JPEG first pixel about 290 ms (target 200 ms, not met) and about 294 MB memory (target 300 MB); see "현재 수치". Since M6 it resizes photos for upload: a resize screen (Explorer right-click "Resize with light-view" in the installed copy, the in-app menu, or several photos dropped on the window) with resolution, file-size and scale targets, JPEG/PNG/WebP output, location removal on by default, and "Replace original" with an undo that keeps the original until the toast is gone. M6 measurement: ten 12 MP JPEGs to 1920 px JPEG estimated in about 3.8 s with a peak of about 604 MB (targets 10 s / 600 MB; memory just over). Releases come as a per-user installer (no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`) and a portable zip (settings stay in a `data` folder next to the exe); check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
+**English summary:** light-view is a lightweight, free, open-source image viewer for Windows 10/11 (x64), written in Rust. Double-click a photo in Explorer, flip through the folder with the arrow keys, zoom and pan. It opens JPEG, PNG, GIF, WebP, BMP and, since M2, HEIC/HEIF (decoded by libheif + libde265 in a separate sandboxed process). Since M3 it also saves rotations losslessly and deletes to the Recycle Bin with undo. Since M4 it has an EXIF card (I), an in-window right-click menu with an Open dialog, an empty start screen, a small settings window, Korean and English text (following the Windows display language by default), screen-reader names (UI Automation), and it lets go of a folder on a USB drive when you safely remove the drive. Since M5 it draws images larger than a GPU texture in tiles with mipmaps, opens JPEGs over the memory limit at reduced size (marked "Opened at reduced size"), runs the HEIC worker in an AppContainer where the install folder allows it, keeps local crash records, and has an opt-in update check (the only network use). M5 measurements on one laptop: 12 MP JPEG first pixel about 290 ms (target 200 ms, not met) and about 294 MB memory (target 300 MB); see "현재 수치". Since M6 it resizes photos for upload: a resize screen (Explorer right-click "Resize with light-view" in the installed copy, the in-app menu, or several photos dropped on the window) with resolution, file-size and scale targets, JPEG/PNG/WebP output, location removal on by default, and "Replace original" with an undo that keeps the original until the toast is gone. M6 measurement: ten 12 MP JPEGs to 1920 px JPEG estimated in about 3.8 s with a peak of about 604 MB (targets 10 s / 600 MB; memory just over). Releases come as an installer and a portable zip. The installer asks on its first page: for you only (the default; no administrator rights, installs to `%LOCALAPPDATA%\Programs\light-view`, and since M7 shows HEIC/HEIF thumbnails in Explorer) or for all users (administrator rights, installs to `C:\Program Files\light-view`, and adds the HEIC preview pane and the size, date taken and camera on the Details tab). Until code signing arrives with v1.0, the all-users UAC prompt names an unknown publisher. M7 measurement on one laptop (battery): a 256 px Explorer thumbnail takes about 50–115 ms when the HEIC has an embedded thumbnail; a 12 MP HEIC without one takes a median of about 330–380 ms through the Windows thumbnail API (over the 300 ms target; 220–284 ms when the handler is called directly); see "현재 수치". Explorer's own thumbnail call was not observed during development (its folder view was Details), only the same handler through the Windows thumbnail API. The portable zip keeps its settings in a `data` folder next to the exe and registers nothing. Check downloads against `SHA256SUMS.txt`. To build from source, run `scripts/setup-deps.ps1` once, then `cargo build --release`; `scripts/package.ps1 -Version x.y.z` makes the release files. Dual-licensed MIT OR Apache-2.0; libheif and libde265 are LGPL-3.0-or-later DLLs (see `THIRD_PARTY_NOTICES.md`). HEVC is covered by patent pools; see the license section (not legal advice).
 
 ## 소개
 
@@ -10,9 +10,30 @@
 
 [GitHub Releases](https://github.com/hyunwook-kim-goodflow/light-view/releases)에서 둘 중 하나를 받아요. 대상은 Windows 10 22H2 이상, Windows 11(x64)이에요.
 
-- **설치판** `light-view-x.y.z-setup.exe`: 관리자 권한 없이 지금 사용자에게만 설치해요(`%LOCALAPPDATA%\Programs\light-view`). 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록, 작업자의 AppContainer 프로필은 지우고 설정과 크래시 기록(미니덤프 포함)은 남겨요. 필요 없으면 두 폴더를 직접 지워도 돼요.
+- **설치판** `light-view-x.y.z-setup.exe`: 첫 화면에서 **나만 사용**(기본, 관리자 권한 없음, `%LOCALAPPDATA%\Programs\light-view`)과 **모든 사용자**(관리자 권한, `C:\Program Files\light-view`) 중 하나를 골라요. 두 방식의 차이는 아래 표에 있어요. 시작 메뉴 바로가기, "연결 프로그램" 등록(JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF), 제거 프로그램 등록을 해요. 윈도우 10/11은 프로그램이 스스로 기본 앱이 될 수 없어서, 설치 마지막 화면의 **기본 앱 설정 열기**(앱의 메뉴와 설정 창에도 있어요)에서 light-view를 골라요. 설정은 `%APPDATA%\light-view\settings.toml`, 크래시 기록은 `%LOCALAPPDATA%\light-view\crashes`에 있어요. 제거하면 프로그램 파일과 등록, 작업자의 AppContainer 프로필은 지우고 설정과 크래시 기록(미니덤프 포함)은 남겨요. 필요 없으면 두 폴더를 직접 지워도 돼요.
 - **탐색기 우클릭 "light-view로 크기 조정"(설치판만):** 설치하면 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 파일의 우클릭 메뉴에 "light-view로 크기 조정"(영어 윈도우는 "Resize with light-view")이 생겨요. 윈도우 11은 "더 많은 옵션 표시" 안에 있어요. 여러 장을 고르고 누르면 한 크기 조정 화면에 모여요(파일마다 `light-view.exe --resize "<경로>"`를 실행해 이미 열린 창으로 보내요). 제거하면 이 메뉴도 지워져요. 포터블판은 레지스트리를 건드리지 않아서 메뉴가 없어요. 사진 여러 장을 light-view **창에** 끌어 놓고 [크기 조정]을 고르거나, 보는 사진에서 오른쪽 클릭 메뉴 → 크기 조정을 열어요(`light-view.exe` 아이콘에 끌어 놓으면 첫 사진이 보기로만 열려요).
 - **포터블판** `light-view-x.y.z-portable.zip`: 아무 폴더에 풀고 `light-view.exe`를 실행해요. 같은 폴더의 `portable.txt`가 포터블 표시라서, 설정과 크래시 기록을 exe 옆 `data` 폴더에 저장하고 `%APPDATA%`는 건드리지 않아요. 레지스트리도 보통은 건드리지 않아요(예외는 아래 AppContainer 프로필). 폴더째 옮기거나 지우면 돼요. `portable.txt`를 지우면 설치판처럼 `%APPDATA%`를 써요. 포터블판은 보통 작업자 프로세스를 AppContainer 없이 낮은 무결성 샌드박스에서만 돌려요(압축을 푼 폴더에는 AppContainer가 읽을 권한이 없어요). 다만 폴더에 `ALL APPLICATION PACKAGES` 읽기 권한이 있으면(예: `C:\Program Files` 아래에 풀었거나 아래처럼 `icacls`로 권한을 줬을 때) AppContainer를 쓰고, 그때 윈도우가 AppContainer 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`와 HKCU의 등록)을 만들어요. 포터블판에는 제거 프로그램이 없으니, 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`을 한 번 실행해 그 프로필을 지워 주세요(아무것도 띄우지 않고 끝나요. 설치판도 함께 쓰고 있으면 설치판이 다음에 다시 만들어요). 포터블판은 설치판이나 다른 폴더의 포터블판과 따로 한 창을 써요(한쪽이 열려 있어도 다른 쪽 사진이 그 창으로 넘어가지 않아요).
+
+**설치판의 두 가지 방식 (M7):** 설치 첫 화면에서 골라요. 기본 선택은 나만 사용이에요. 명령줄에서는 `/CURRENTUSER`나 `/ALLUSERS`로 고를 수 있어요.
+
+| | 나만 사용 (기본) | 모든 사용자 (관리자) |
+|---|---|---|
+| 권한 | 없음, UAC 창 없음 | 관리자, UAC 창 |
+| 폴더 | `%LOCALAPPDATA%\Programs\light-view` | `C:\Program Files\light-view` |
+| 등록 | HKCU (이 사용자만) | HKLM (PC의 모든 사용자) |
+| 탐색기 HEIC/HEIF 썸네일 | 있음, 탐색기(와 HEIC 폴더의 썸네일을 셸에 묻는 다른 프로그램) 프로세스 안에서 실행(`DisableProcessIsolation`) | 있음, Windows 기본 격리 호스트에서 실행 |
+| 탐색기 미리 보기 창 | 없음 (Windows 미리 보기 호스트가 사용자별 등록을 읽지 않아요) | 있음 |
+| 자세히 탭·자세히 보기(해상도, 찍은 날짜, 카메라 제조사·모델) | 없음 (Windows가 HKLM 등록만 읽어요) | 있음 (위치 정보는 내보내지 않아요) |
+| AppContainer 폴더 권한(icacls) | 설치 때 부여 | 필요 없음 (Program Files는 이미 읽을 수 있어요) |
+
+- 두 방식 모두 사진 해석(C 코드, libheif·libde265)은 샌드박스 작업자(`lv-worker.exe`)에서만 해요. 탐색기가 부르는 확장 DLL(`lv-shell-<버전>.dll`)은 Rust 코드만 있고, 사진 바이트를 작업자에 넘겨 픽셀만 받아요. 자세히 처리기는 작업자를 띄우지 않고 파일 전체(64 MiB까지)를 읽어 HEIF 구조와 EXIF만 해석해요(Rust 코드). 이 처리기는 탐색기뿐 아니라 SYSTEM 권한으로 도는 Windows 검색 색인기 안에서도 돌아요.
+- 설정은 두 방식 모두 사용자마다 `%APPDATA%\light-view\settings.toml`이에요.
+- 한 번 설치하면 업데이트는 같은 방식으로 이어져요(첫 화면을 다시 묻지 않아요). 방식을 바꾸려면 먼저 제거하고 다시 설치해요. 두 방식이 함께 깔려 있으면 그 사용자에게는 나만 사용 설치의 썸네일이 우선하고, 설치 프로그램이 그 사실을 한 번 알려 줘요(아무것도 지우지 않아요).
+- 업데이트·제거 때 탐색기를 닫거나 다시 시작하지 않아요(업데이트 때 light-view 창이 열려 있으면 그 창만 닫을지 물어요). 확장 DLL은 버전마다 이름이 달라서 새 버전은 새 파일로 등록되고, 탐색기가 아직 붙잡고 있는 옛 DLL은 다음 로그인 때 지워져요(`RunOnce`, 이때 명령 창이 잠깐 보일 수 있어요). 모든 사용자 설치의 옛 DLL은 관리자 계정이 다음에 로그인할 때 지워져요.
+- `.heic`·`.heif`의 썸네일 처리기(두 방식), 미리 보기·자세히 처리기(모든 사용자) 자리에 다른 프로그램(예: 다른 HEIC 도구, Windows의 원래 자세히 처리기)이 등록해 둔 값이 있으면 설치 때 저장해 두었다가 제거할 때 되돌려요. 그 사이 다른 프로그램이 값을 바꿨으면 건드리지 않아요. 설치가 실패하거나 취소돼도 되돌려요.
+- 모든 사용자 설치를 제거하면 제거한 사용자의 작업자 AppContainer 프로필만 지워져요. 다른 사용자 계정의 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`)은 남으니, 필요하면 그 계정에서 지워 주세요.
+- 탐색기 썸네일 캐시는 지우지 않아요. 설치 전에 빈 아이콘으로 기억된 HEIC는 디스크 정리에서 썸네일(Thumbnails) 항목을 지우면 다시 그려져요.
+- 코드 서명은 v1.0 릴리스 때 받아요. 그전에는 모든 사용자 설치의 UAC 창에 "알 수 없는 게시자"가 나오고, 처음 실행할 때 아래 SmartScreen 경고가 뜰 수 있어요.
 
 **SmartScreen 경고:** 코드 서명이 없는 릴리스는 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있어요. 아래처럼 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 누르면 돼요. zip에서 푼 파일에 경고가 뜨면 zip 파일의 속성에서 **차단 해제**를 체크하고 다시 풀어도 돼요.
 
@@ -26,6 +47,31 @@ Get-FileHash .\light-view-x.y.z-portable.zip -Algorithm SHA256
 출력의 `Hash`가 `SHA256SUMS.txt`의 같은 이름 줄과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.
 
 **Visual C++ 런타임:** 설치판과 포터블판은 HEIC 디코더 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`)을 `lv-worker.exe` 옆에 함께 넣어요. 이렇게 앱 폴더에 둔 런타임은 Windows Update가 고쳐 주지 않아요. 런타임의 보안 수정은 light-view의 새 릴리스로 받아요.
+
+## 현재 상태 (M7)
+
+M7(탐색기 HEIC)까지 끝났어요. 아직 GitHub에 올리거나 릴리스를 게시하지 않았어요. M7에서 더한 것: 설치판이 탐색기에 HEIC/HEIF **썸네일**을 보여 주고, 모든 사용자 설치는 **미리 보기 창**과 **자세히 탭**(해상도, 찍은 날짜, 카메라 제조사·모델)도 채워요. 설치 프로그램은 첫 화면에서 나만 사용(기본)과 모든 사용자(관리자) 중 하나를 골라요. 포터블판은 아무것도 등록하지 않고, zip에 확장 DLL도 넣지 않아요.
+
+| 탐색기 기능 | 나만 사용 (기본, 관리자 권한 없음) | 모든 사용자 (관리자) |
+|---|---|---|
+| HEIC/HEIF 썸네일 | 있음. 확장 DLL이 `explorer.exe`와, 파일 열기·저장 대화 상자나 셸 썸네일 API로 HEIC 폴더를 보여 주는 다른 프로그램 안에서 돌아요(`DisableProcessIsolation`, Windows의 격리 호스트는 사용자별 등록을 읽지 않아요) | 있음. Windows 기본 격리 호스트(`dllhost.exe`)에서 돌아요 |
+| 미리 보기 창 | 없음 (`prevhost.exe`가 사용자별 등록을 읽지 않아요) | 있음 |
+| 자세히 탭·자세히 보기 열 | 없음 (Windows가 HKLM 등록만 읽어요) | 있음 (GPS는 내보내지 않아요). 제거하면 원래 처리기로 되돌려요 |
+| 사진 해석 | 두 방식 모두 샌드박스 작업자(`lv-worker.exe`, 요청 하나에 하나씩 띄우고 끝냄, 10초 상한) | 같음. 자세히 처리기만은 작업자 없이 파일 전체(64 MiB까지)를 읽어 구조와 EXIF만 해석해요(탐색기와 SYSTEM 권한의 검색 색인기 안에서) |
+
+- **썸네일 고르기:** 탐색기가 요청한 크기 이상인 내장 썸네일 중 가장 작은 것을 쓰고, 없으면 본 이미지를 줄여요(긴 변 최대 1024). 방향은 앱과 같게 HEIF의 `irot`·`imir`만 따라요(EXIF 방향은 보지 않아요).
+- **실패하면 아이콘:** 깨진 파일, 64 MiB 넘는 파일, 64 MP(2^26 화소) 넘는 사진, 작업자 실패·시간 초과는 모두 썸네일 없이 아이콘으로 남아요. 오류를 기록하지 않아요(확장 DLL은 작업자의 진단 출력도 버려요).
+- **한 번에 작업자 둘:** 사진이 많은 폴더를 열어도 한 프로세스에서 썸네일 작업자는 동시에 2개까지만 돌고, 나머지 요청은 자리가 날 때까지 기다려요. 기다리는 시간도 10초 상한에 들어가서, 그 안에 차례가 오지 않으면 그 사진은 아이콘으로 남아요. 썸네일 작업자는 64 MP까지만 풀어서 작업자 하나가 쓰는 메모리 상한(Job)이 앱의 작업자보다 작아요(앱과 미리 보기 창은 앱의 상한 그대로).
+- 수치는 아래 "현재 수치"의 M7, 사람이 확인할 것은 "확인할 것"의 (M7) 항목을 보세요.
+
+### 알려진 문제 (M7)
+
+- **썸네일 속도:** 내장 썸네일이 있으면 한 장 약 50–115 ms예요. 내장 썸네일이 없는 12 MP HEIC는 COM 객체에 바로 물으면 220–284 ms로 300 ms 안이지만, 윈도우 썸네일 API를 거치고 작업자를 AppContainer에서 띄우면 중앙값 329–383 ms(배터리 전원)로 **목표 300 ms를 넘어요**. 원인으로 보이는 것(구간별로 나눠 재지는 않았어요): 썸네일만 필요해도 본 이미지(타일 63개)를 모두 HEVC로 풀고 나서 줄이고(COM 바로 220–284 ms가 이 몫), 썸네일마다 작업자를 새로 띄우며, 띄울 때마다 작업자 폴더의 AppContainer 읽기 권한 확인과 프로필 조회를 다시 해요(캐시하지 않아요). 배터리 전원에서만 쟀으니 AC 전원에서는 이 판정이 달라질 수 있어요. 아이폰 HEIC에는 보통 작은 내장 썸네일이 있어 작은 보기에서는 빠른 쪽을 타지만, 실제 아이폰 파일의 내장 썸네일을 받아들이는지는 아직 확인하지 않았어요(아래 확인할 것).
+- **나만 사용 설치는 확장 DLL이 탐색기(와 HEIC 폴더의 썸네일을 셸에 묻는 다른 프로그램, 예: 파일 열기 대화 상자를 띄운 프로그램) 안에서 돌아요.** 사진 해석은 작업자에 있지만, 확장 DLL 자체에 문제(멈춤·충돌)가 생기면 그 프로그램의 창이 영향을 받아요. 썸네일 한 장은 작업자를 최대 10초까지 기다리고, 그동안 메시지를 처리하지 않아요.
+- **탐색기 자신의 호출은 개발 중에 보지 못했어요.** 개발 PC의 탐색기는 새 폴더를 자세히 보기로 열어 썸네일을 묻지 않았고, 보기 설정은 바꾸지 않았어요. 같은 처리기를 윈도우 썸네일 API(`IShellItemImageFactory`, `IThumbnailCache`)로 불러 확인했어요(아래 M7 smoke).
+- **미리 보기 창:** 창 크기를 바꿔도 다시 그리지 않아요(처음 크기 기준, 최소 256). 미리 보기 처리기는 한 프로세스에 한 번에 하나만 그리고, 빠르게 넘기면 마지막 사진만 그려요. 탐색기가 다음 파일 전에 옛 처리기의 `Unload`를 부른다고 가정했어요(확인 안 함).
+- **업데이트 뒤 옛 DLL:** 나만 사용은 다음 로그인 때(`RunOnce`), 모든 사용자는 **관리자 계정이** 다음에 로그인할 때 지워요(일반 사용자 로그인으로는 지워지지 않아요). 설치 경로에 `%`가 있으면 이 삭제가 실패해요.
+- 나만 사용 설치를 제거한 뒤 HKCU에 빈 `.heic\ShellEx` 키가 남을 수 있어요(값은 없어요).
 
 ## 현재 상태 (M6)
 
@@ -76,7 +122,7 @@ M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub�
 
 - 열 수 있는 형식: JPEG, PNG, GIF, WebP, BMP, **HEIC/HEIF**(아이폰 사진)
 - HEIC는 앱과 분리된 작업자 프로세스(`lv-worker.exe`)가 libheif·libde265로 디코딩해요. JPEG 무손실 회전과 크기 조정의 WebP 인코딩(libwebp)도 작업자가 해요. WebP는 사진마다 작업자를 새로 띄워 한 장만 맡기고 끝내요. 작업자는 낮은 무결성 수준과 Job Object 안에서 돌고(Job 안에서 만들어지므로 앱이 갑자기 끝나도 작업자가 남지 않아요), 작업자 폴더(exe와 DLL)에 `ALL APPLICATION PACKAGES` 읽기·실행 권한이 있으면 권한(capability)이 하나도 없는 AppContainer(`goodflow.LightView.Worker`) 안에서도 돌아요. 작업자는 설계상 파일과 네트워크를 쓰지 않고(파일 내용은 앱이 읽어서 넘겨요), 낮은 무결성 수준이라 사용자 파일을 고칠 수 없어요. AppContainer 안에서는 악성 파일이 작업자를 장악해도 사용자 파일을 읽을 수 없어요(테스트로 확인해요). 권한이 없는 AppContainer는 설계상 네트워크에도 연결할 수 없지만, 이 부분은 따로 테스트하지 않았어요. 설치판은 설치할 때 그 폴더에 이 권한을 줘요. 직접 빌드한 폴더(`target\`)나 압축을 푼 포터블 폴더처럼 권한이 없으면 앱은 AppContainer 프로필도 만들지 않고, 로그를 한 번 남긴 뒤 낮은 무결성 수준 샌드박스만으로 작업자를 띄워요. AppContainer로 띄우기가 실패해도 마찬가지로 AppContainer만 빼고 띄워요. 이때는 장악된 작업자가 사용자 파일을 읽거나 네트워크에 연결하는 것까지는 막지 못해요(포터블 폴더에서는 `icacls <폴더> /grant *S-1-15-2-1:(OI)(CI)(RX)`로 권한을 줄 수 있어요. 그러면 AppContainer 프로필이 생기니 폴더를 지우기 전에 `light-view.exe --uninstall-cleanup`으로 지워 주세요). 설치 파일은 정해진 설치 폴더(`%LOCALAPPDATA%\Programs\light-view`)에만 이 권한을 주고, `/DIR=`로 다른 폴더에 설치하면 권한을 주지 않아 낮은 무결성 샌드박스로 돌아요. 작업자가 멈추거나 죽어도 앱은 계속 동작하고, 다음 사진에서 작업자를 새로 띄워요.
-- HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 무시). AVIF는 아직 열 수 없어요.
+- HEIC는 주 이미지만 보여 줘요(알파 지원, 깊이 맵·게인 맵·썸네일은 앱에서 무시. M7의 탐색기 썸네일은 내장 썸네일을 써요). AVIF는 아직 열 수 없어요.
 - `lv-worker.exe`가 앱 옆에 없으면 HEIC만 "이 사진은 열 수 없어요"로 나오고 다른 형식은 그대로 열려요.
 - 같은 폴더의 사진 넘기기, 확대/축소, 끌어서 이동, 전체 화면, 90° 회전, 다크 모드를 지원해요.
 - 사진을 넘기는 순서는 그 폴더를 보여 주는 탐색기 창(앞에 있는 창)의 정렬을 따라요. 이름·수정한 날짜·크기·유형(확장자로 비교) 순만 따르고, 그 밖의 정렬이거나 그 폴더를 연 탐색기 창이 없으면 이름의 자연 순서(`img2` 다음 `img10`)예요. 순서는 폴더를 열 때 한 번 정하고, 폴더가 바뀌어 목록을 다시 읽을 때도 그대로 써요. 이미 목록에 있던 사진은 회전 저장 등으로 날짜나 크기가 바뀌어도 자리를 지켜요. 탐색기에 묻는 일은 따로 돌아서 첫 화면을 늦추지 않고, 답이 오면 보던 사진을 그대로 둔 채 순서만 바꿔요.
@@ -141,13 +187,13 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version 0.1.0
 
 `-Version`은 `Cargo.toml`의 버전과 같아야 해요. 스크립트가 하는 일:
 
-- `light-view.exe`(= `lv-app`)와 `lv-worker.exe`를 C 런타임 정적 링크(`+crt-static`)로 릴리스 빌드해요. `light-view.exe`는 DLL을 System32에서만 찾으므로 Visual C++ 런타임 DLL에 기대지 않아야 해요.
+- `light-view.exe`(= `lv-app`), `lv-worker.exe`, 탐색기 확장 `lv_shell.dll`(= `lv-shell`)을 C 런타임 정적 링크(`+crt-static`)로 릴리스 빌드해요. `light-view.exe`는 DLL을 System32에서만 찾으므로 Visual C++ 런타임 DLL에 기대지 않아야 해요. 확장 DLL은 탐색기와 검색 색인기 안에서 돌기 때문에 Windows DLL(System32·API set)만 가져와야 하고, C 라이브러리(vcpkg DLL)나 C 런타임 DLL을 가져오면 실패해요.
 - `THIRD_PARTY_NOTICES.md`를 만들어요: `notices/native.md`(C 라이브러리 고지), `cargo about generate`(`about.toml`, `about.hbs`)이 모은 모든 크레이트의 라이선스, `notices/`의 라이선스 전문(LGPL-3.0, GPL-3.0, libjpeg-turbo, IJG, libspng, libpng, zlib). 저장소의 `THIRD_PARTY_NOTICES.md`는 `-NoticesOnly`로 다시 만들어요.
-- `dist\stage`(설치 파일 입력)에 실행 파일, vcpkg DLL, 그 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`; Visual Studio의 재배포 폴더에서 복사), 고지, 라이선스 두 개, `README.txt`를 넣어요.
-- `dist\light-view-x.y.z-portable.zip`(stage + `portable.txt`)을 만들고, 다시 풀어서 30 MB를 넘으면 실패해요. 지금은 약 7.6 MB(zip 3.1 MB)예요.
+- `dist\stage`(설치 파일 입력)에 실행 파일, vcpkg DLL, 그 DLL이 쓰는 Visual C++ 런타임 DLL(`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`; Visual Studio의 재배포 폴더에서 복사), 고지, 라이선스 두 개, `README.txt`, 그리고 확장 DLL을 버전이 붙은 이름 `lv-shell-x.y.z.dll`로 넣어요. stage(설치 크기)가 30 MB를 넘어도 실패해요.
+- `dist\light-view-x.y.z-portable.zip`(stage에서 확장 DLL을 뺀 것 + `portable.txt`; 포터블판은 아무것도 등록하지 않아요)을 만들고, zip에 확장 DLL이 들어가면 실패하고, 다시 풀어서 30 MB를 넘으면 실패해요. 지금은 약 7.6 MB(zip 3.1 MB)예요.
 - `dist\SHA256SUMS.txt`를 써요.
 
-설치 파일은 `installer/light-view.iss`(Inno Setup 6 사용자별 모드)를 릴리스 워크플로(`.github/workflows/release.yml`)가 컴파일해요. 로컬에서는 컴파일하지 않고, `cargo test -p lv-app --test installer_script`가 필요한 지시문이 있는지만 확인해요. 워크플로는 `v*` 태그에서 빌드 → 패키징 → Inno Setup → (`SIGNPATH_API_TOKEN` 시크릿이 있으면) SignPath 서명 → 체크섬 → **초안** 릴리스까지 하고, 게시는 사람이 해요.
+설치 파일은 `installer/light-view.iss`(Inno Setup 6, 나만 사용·모든 사용자 두 방식, 레지스트리 루트 `HKA`)를 릴리스 워크플로(`.github/workflows/release.yml`)가 컴파일해요. 로컬에서는 컴파일하지 않고, `cargo test -p lv-app --test installer_script`가 필요한 지시문이 있는지만 확인해요. 워크플로는 `v*` 태그에서 빌드 → 패키징 → Inno Setup → (`SIGNPATH_API_TOKEN` 시크릿이 있으면) SignPath 서명 → 체크섬 → **초안** 릴리스까지 하고, 게시는 사람이 해요.
 
 ## 사용법
 
@@ -179,6 +225,38 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1 -Version 0.1.0
 개발용 옵션: `lv-app.exe --timing <파일>`은 프로세스 시작부터 첫 사진이 그려질 때까지의 시간을 `first-present-ms=<n>`으로 시작하는 한 줄(뒤에 개인 메모리와 구간별 시간이 이어져요)로 stderr에 찍고, `%TEMP%\light-view-timing.log`에도 덧붙여요. 옵션은 파일 경로보다 앞에 써야 해요. 크기 조정 화면(`--timing --resize <파일>…`)에서는 모든 사진의 예상이 나오면 `estimates-done-ms=<n> photos=<n> first-estimate-ms=<n> private-mb=<n> peak-private-mb=<n>` 한 줄을 더 찍어요. `--bench-webp`는 lv-bench용으로, `--bench`에 크기 조정 형식 WebP를 더한 것이에요.
 
 ## 현재 수치
+
+### M7 (탐색기 썸네일 한 장)
+
+256 px 썸네일 한 장을 끝까지(스트림 읽기 → 작업자 하나 띄우기 → 디코딩·줄이기 → 비트맵) 잰 시간이에요. 첫 호출과, 이어서 10번 더 부른 값의 중앙값(10개를 정렬한 6번째)이에요.
+
+- **COM 객체에 바로:** `cargo test --release -p lv-shell thumbnail_timing -- --ignored --nocapture`(`CARGO_TARGET_DIR`의 release 폴더에 `lv-worker.exe`와 작업자 DLL이 있어야 해요). 빌드 폴더에는 AppContainer 읽기 권한이 없어서 작업자는 낮은 무결성 샌드박스에서만 돌아요.
+- **윈도우 썸네일 API로:** 아래 M7 smoke의 임시 폴더(설치판처럼 `ALL APPLICATION PACKAGES` 읽기 권한, 작업자는 AppContainer)에서 `IThumbnailCache::GetThumbnail(256, WTS_FORCEEXTRACTION)`을 11번씩 불렀어요. 처리기는 `DisableProcessIsolation`으로 부른 프로세스 안에서 돌아요(나만 사용 설치의 탐색기와 같은 경로).
+
+측정 환경: i7-1360P, Windows 11, release 빌드, **배터리 전원**, 2026-10-29. 범위는 여러 번 돌린 값이에요(나중 회차가 더 느렸어요). 아래 M5·M6 표는 AC 전원에서 잰 값이라 이 표와 바로 비교할 수 없어요. M7은 AC에서 다시 재지 않았고 AC에서는 더 빠를 수 있으니, 12 MP(내장 썸네일 없음)의 300 ms 판정은 AC에서 다시 확인해야 해요(확인할 것).
+
+| 파일 | 썸네일을 만든 곳 | COM 바로: 첫 호출 / 중앙값(ms) | 썸네일 API(AppContainer): 첫 호출 / 중앙값(ms) | 목표 | 판정 |
+|---|---|---|---|---|---|
+| `grid-4032x3024-thumbs.heic` (12 MP, 내장 썸네일 451×461·512×512) | 내장 451×461 → 250×256 | 69–181 / 47–68 | 305–321 / 75–115 | 약 100 ms | 달성(이어서 부른 값 기준. 프로세스의 첫 썸네일은 약 300 ms) |
+| `grid-4032x3024.heic` (12 MP, 내장 썸네일 없음, 타일 63개) | 본 이미지 → 256×192 | 199–279 / 220–284 | 217–378 / 329–383 | 300 ms | COM 바로는 달성, 썸네일 API로는 **넘음** |
+| `rainbow-451x461.heic` | 본 이미지 → 250×256 | 42–97 / 44–99 | 180–193 / 228–229 | 300 ms | 달성 |
+| `with-alpha-512x512.heic` | 본 이미지 → 256×256 | — | 183–195 / 186–229 | 300 ms | 달성 |
+| HEIC가 아닌 파일 | 실패(`WTS_E_FAILEDEXTRACTION`) → 아이콘 | — | 122–161 / 173–203 | — | 참고 |
+
+- 썸네일 API 쪽이 대략 30–180 ms 더 걸렸어요(같은 순간에 잰 값은 아니에요). 작업자를 AppContainer에서 띄울 때마다 폴더의 모든 파일 권한 확인과 프로필 조회를 다시 하고, 셸의 썸네일 캐시 처리가 더해지는 탓으로 보여요(구간별로 나눠 재지는 않았어요).
+- 그 프로세스의 맨 첫 호출(DLL 로드, 처음 복사한 작업자 DLL을 처음 읽기)은 1090 ms였어요. 같은 파일을 캐시에서 다시 받으면 1–24 ms예요(작업자를 띄우지 않아요).
+
+### M7 smoke (가짜 확장자)
+
+2026-10-29, 위 release 빌드의 `lv_shell.dll`·`lv-worker.exe`·작업자 DLL을 `%TEMP%\lv-m7-smoke-*\bin`에 두고(`ALL APPLICATION PACKAGES` 읽기·실행 권한) HKCU에 **가짜 확장자 `.lvthumbtest`**의 썸네일 처리기로만 등록했어요(나만 사용 설치와 같은 `DisableProcessIsolation=1`). 실제 `.heic`·`.heif` 등록은 개발 PC에서 하지 않아요. 끝난 뒤 키와 폴더를 모두 지웠어요.
+
+| 확인 | 결과 |
+|---|---|
+| `explorer.exe <폴더>`로 연 창의 썸네일(창만 캡처) | **보지 못함**: 이 PC의 탐색기가 새 폴더를 자세히 보기로 열어 썸네일을 묻지 않았고(탐색기에 DLL이 올라오지 않음), 보기 설정은 바꾸지 않았어요 |
+| 같은 등록으로 `IShellItemImageFactory::GetImage(256, 썸네일만)` (내 프로세스, 탐색기와 같은 셸 경로) | 통과: 내장 썸네일 파일 → 250×256(내장 451×461을 고름), 12 MP 본 이미지 → 256×192(타일 9×7이 보임), rainbow → 250×256, 알파 → 256×256. DLL이 부른 프로세스에 올라오고 작업자는 AppContainer에서 돌았어요 |
+| `IThumbnailCache` 강제 추출 11번씩 | 통과(위 표의 시간) |
+| HEIC가 아닌 `.lvthumbtest` | 통과: `0x8004B200`(추출 실패) → 아이콘 |
+| 미리 보기 창, 자세히 탭, 실제 `.heic` | 실행 안 함: HKLM 등록(모든 사용자 설치)이 필요하거나 실제 형식 등록이라 개발 PC에서 하지 않아요. 아래 확인할 것 |
 
 ### M6 (lv-bench, 크기 조정)
 
@@ -332,6 +410,16 @@ M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU
 - (M6) **아이폰 15/16 HEIC:** 아이폰 15·16으로 찍은 HEIC(24 MP·48 MP, HDR 사진, 세로 사진)를 `testdata/private/iphone/`에 넣고 `cargo test -p lv-app -- --ignored --nocapture iphone_heic_samples_open`이 모두 통과하나요. 실패하면 파일별 이유가 찍혀요(개발 PC에는 샘플이 없어 확인하지 못했어요)
 - (M6) **탐색기 정렬 따르기:** 탐색기에서 폴더를 수정한 날짜 내림차순(또는 크기순)으로 정렬해 두고 사진을 더블클릭하면, light-view에서 →로 넘기는 순서가 탐색기와 같나요. 같은 폴더를 연 탐색기 창이 없거나 "찍은 날짜"처럼 다른 열로 정렬했으면 이름 순서인가요. 열자마자 순서가 바뀌어도 보던 사진은 그대로인가요(개발 중에는 탐색기 창이 없는 경우만 확인했어요)
 - (M6) **짧은 이름으로 넘겨받은 긴 경로:** 260자 넘는 경로의 사진을 탐색기에서 더블클릭하거나 "light-view로 크기 조정"으로 열면, 위치 표시(예: 2 / 5)에 같은 사진이 두 번 세어지지 않고 새 파일 이름이 실제 이름을 따르나요
+- (M7) **나만 사용 설치의 썸네일:** 기본(나만 사용)으로 설치하고 아이폰 사진 폴더를 큰 아이콘·아주 큰 아이콘으로 보면 HEIC/HEIF가 아이콘이 아니라 사진으로 나오나요(세로 사진이 바로 서는지, 알파 HEIF, 갤럭시 HEIF도). 폴더를 스크롤하는 동안 탐색기가 멈추거나 느려지지 않나요. 미리 보기 창(Alt+P)은 나만 사용 설치에서는 비어 있는 것이 정상이에요
+- (M7) **모든 사용자 설치의 썸네일·미리 보기 창:** 관리자로 설치(`/ALLUSERS` 또는 첫 화면에서 모든 사용자)하고 같은 폴더에서 썸네일이 나오나요. 미리 보기 창을 켜고 HEIC를 하나씩 고르면 사진이 나오나요. 화살표 키로 빠르게 넘길 때 앞 사진이 남거나 빈 창이 되지 않고 마지막 사진이 나오나요(탐색기가 다음 파일 전에 옛 처리기를 내린다고 가정했어요). 창 크기를 바꾸면 사진이 다시 그려지지 않는 것은 알려진 문제예요
+- (M7) **자세히 탭(모든 사용자 설치):** HEIC의 속성 → 자세히 탭과 자세히 보기의 열에 해상도(가로·세로·크기), 찍은 날짜, 카메라 제조사·모델이 나오고 GPS는 나오지 않나요. 제거한 뒤에는 Windows의 원래 자세히 처리기(또는 설치 전에 있던 다른 HEIC 도구의 처리기)로 돌아가 자세히 탭이 설치 전과 같나요(`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PropertySystem\PropertyHandlers\.heic`의 기본값이 설치 전 값과 같은지)
+- (M7) **HEVC 확장 없는 계정:** Microsoft Store의 HEVC 비디오 확장이 없는 사용자 계정(또는 PC)에서 두 방식 모두 썸네일(그리고 모든 사용자 설치의 미리 보기)이 나오나요
+- (M7) **실제 아이폰 내장 썸네일:** 아이폰 HEIC 폴더를 중간 아이콘으로 볼 때 썸네일이 빨리(이어서 그릴 때 한 장 약 100 ms 안팎, 탐색기가 처음 그리는 한 장은 약 300 ms까지) 나오나요. 개발 중에는 합성 파일로만 내장 썸네일을 확인했어요. `lv-shell`의 `thumbnail_timing` 테스트(위 "M7")의 파일 목록에 아이폰 파일을 잠깐 넣어 재 봐도 돼요
+- (M7) **업데이트 뒤 옛 DLL:** 버전을 올려 업데이트 설치하면 새 `lv-shell-<새 버전>.dll`로 등록이 바뀌고, 옛 `lv-shell-<옛 버전>.dll`은 다음 로그인 때(모든 사용자 설치는 관리자 계정의 다음 로그인 때) 설치 폴더에서 사라지나요. 업데이트 중에 탐색기가 닫히지 않았나요
+- (M7) **제거 후 등록 사라짐:** 제거한 뒤 `.heic`·`.heif`의 `ShellEx\{e357fccd-…}`(그리고 모든 사용자의 `{8895b1c6-…}`)에 light-view CLSID가 남지 않고, 설치 전에 다른 프로그램의 값이 있었다면 그 값으로 돌아오나요. `CLSID\{6A77F04F-…}`, `{663472B2-…}`, `{0EA2AA38-…}`와 `PreviewHandlers`의 light-view 값이 없어지고, 설치 폴더가 (다음 로그인 뒤) 비나요
+- (M7) **썸네일 캐시 비우기:** 설치 전에 아이콘으로 기억된 HEIC가 계속 아이콘으로 나오면, 디스크 정리(`cleanmgr`) → 드라이브 C: → 썸네일(Thumbnails) 항목만 체크 → 확인으로 캐시를 지운 뒤 폴더를 다시 열면 썸네일이 나오나요. 제거 뒤에 남은 HEIC 썸네일도 같은 방법으로 지워져요
+- (M7) **설치 프로그램 확인(CI·실제 설치에서만 볼 수 있음):** Inno Setup이 `[Code]`를 컴파일하나요, `PreviewHandlers` 값 이름(`{{663472B2-…}`)이 중괄호 하나로 들어가나요, 첫 화면의 선택이 `IsAdminInstallMode`에 맞게 반영되나요, light-view 창이 열린 채 업데이트하면 그 창만 닫을지 묻고 탐색기는 묻지 않나요, 두 방식을 함께 설치하면 안내가 한 번 나오나요, 업그레이드가 실패하거나 취소되면 저장해 둔 원래 값이 그대로 남나요
+- (M7) **AC·배터리에서 다시 재기:** AC 전원과 배터리 전원에서 각각 `cargo test --release -p lv-shell thumbnail_timing -- --ignored --nocapture`를 돌리고(위 "M7"), 12 MP 내장 썸네일 없는 파일(`grid-4032x3024.heic`)의 중앙값이 300 ms 안인지 표에 적어 주세요. 개발 중 값은 배터리에서만 쟀어요
 - (M5) **설치 파일 실제 설치·제거:** CI가 만든 `light-view-x.y.z-setup.exe`로 관리자 권한 없이 `%LOCALAPPDATA%\Programs\light-view`에 설치되고, 시작 메뉴 바로가기가 생기고, 제거하면 프로그램 파일과 등록이 지워지고 `%APPDATA%\light-view\settings.toml`은 남나요(`.iss`는 로컬에서 컴파일·실행하지 않았어요)
 - (M5) **연결 프로그램 등록:** 설치 뒤 탐색기의 "연결 프로그램"에 JPEG, PNG, GIF, WebP, BMP, HEIC, HEIF 모두 light-view가 나오고, 설치 마지막 화면의 **기본 앱 설정 열기**가 윈도우 설정의 light-view 페이지를 여나요. 제거하면 목록에서 사라지나요
 - (M5) **설치판 AppContainer:** 설치판으로 HEIC를 열었을 때 작업자가 AppContainer(`goodflow.LightView.Worker`) 안에서 도나요(Process Explorer 등으로 확인). 설치 폴더에 `ALL APPLICATION PACKAGES` 권한이 들어갔나요
@@ -341,7 +429,7 @@ M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU
 - (M5) **NAS/UNC:** 네트워크 공유의 사진 열기, 넘기기, 회전 저장, 삭제(영구 삭제 확인)가 되나요
 - (M5) **실제 아이폰 샘플:** 12 MP 아이폰 HEIC로 `lv-bench --heic <파일>`을 돌려 첫 사진 시간(목표 400 ms)과 메모리를 재고, 위 표의 "heic12mp" 줄을 채워 주세요. 큰 파노라마 JPEG이 축소해서 열리는지도 봐 주세요
 - (M5) **CI 첫 실행:** GitHub에 올린 뒤 `ci.yml`(빌드·테스트·clippy·fmt·deny·audit·bench), `fuzz.yml`(주 2회 nightly 퍼징, 말뭉치 캐시(이어받기는 최선 노력)·아티팩트), `release.yml`(`v*` 태그 → 패키징 → Inno Setup 컴파일 → 체크섬 → 초안 릴리스)이 처음으로 통과하나요. `baseline.json`은 이 노트북 한 대의 값이라 CI 러너에서 다시 만들어야 해요
-- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요. 서명을 붙일 때 설치 파일만이 아니라 Inno Setup이 만드는 제거 프로그램(`unins000.exe`)도 서명되게 해 주세요(지금은 `setup.exe`만 SignPath로 보내요)
+- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요. 서명을 붙일 때 설치 파일만이 아니라 Inno Setup이 만드는 제거 프로그램(`unins000.exe`)도 서명되게 해 주세요(지금은 `setup.exe`만 SignPath로 보내요). (M7) SignPath의 `executables` 설정에는 `lv-app.exe`, `lv-worker.exe`와 함께 탐색기 확장 `lv_shell.dll`도 넣어 주세요(워크플로가 셋을 함께 보내요)
 - (M5) **릴리스 노트:** "세그먼트 사이에 잘못된 바이트가 끼거나 SOI·SOF가 두 번 나오는 JPEG은 이제 열지 않아요(안전을 위해)" 한 줄을 넣어 주세요
 - (M5) **업데이트 확인 실제 응답:** 첫 릴리스를 게시한 뒤 "업데이트 확인"을 켜고 낮은 버전으로 실행하면 "새 버전(X)이 나왔어요 [보기]"가 나오고 [보기]가 그 릴리스 페이지를 여나요(지금은 저장소가 없어 404 → 조용히 넘어가요)
 - (M5) **개발 PC 정리:** 이 PC의 `%USERPROFILE%\.cargo\bin\rustup.exe`가 사라져 `cargo`·`rustc` 바로 가기가 동작하지 않아요(M5 중 rustup 자체 업데이트 때문). [rustup.rs](https://rustup.rs)의 `rustup-init.exe`로 다시 설치해 주세요(도구 체인은 그대로 있어요). 또 M5 Task 1 테스트에서 남은 `lv-worker.exe` 프로세스(PID 21140)가 `target\debug\lv-worker.exe`를 잠그고 있어서 M5는 `CARGO_TARGET_DIR=target\m5`로 빌드했어요. 그 프로세스를 끝내 주세요
