@@ -3,7 +3,12 @@
 //! Only the worker process links this crate: libheif and libde265 are C/C++ code and are
 //! loaded as DLLs (`heif.dll`, `libde265.dll`) next to the executable.
 
+use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
+
+mod thumb;
+
+pub use thumb::thumbnail_heif;
 
 use libheif_rs::{
     color_profile_types, ColorProfile, ColorSpace, DecodingOptions, HeifContext, ImageHandle,
@@ -56,7 +61,12 @@ const MEMORY_BLOCK_HEADROOM: u64 = 1024 * 1024;
 /// against `max_pixels` before any pixel is decoded. Never panics: libheif errors and
 /// panics inside the bindings become [`HeifError::Corrupt`].
 pub fn decode_heif(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
-    match panic::catch_unwind(AssertUnwindSafe(|| decode_inner(bytes, max_pixels))) {
+    guarded(|| decode_inner(bytes, max_pixels))
+}
+
+/// Runs `f`, turning a panic into [`HeifError::Corrupt`].
+fn guarded(f: impl FnOnce() -> Result<HeifImage, HeifError>) -> Result<HeifImage, HeifError> {
+    match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(payload) => {
             let what = payload
@@ -118,29 +128,68 @@ fn decoding_threads() -> u32 {
 
 fn decode_inner(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
     let lib = LibHeif::new();
-    let mut ctx = HeifContext::new().map_err(corrupt("context"))?;
-    ctx.set_security_limits(&security_limits(max_pixels))
-        .map_err(corrupt("security limits"))?;
-    // libheif's threads decode grid tiles in parallel; libde265's (below) split one HEVC
-    // image. Both are capped because two workers decode at the same time.
-    let threads = decoding_threads();
-    ctx.set_max_decoding_threads(threads);
-    ctx.read_bytes(bytes).map_err(corrupt("read"))?;
+    let ctx = open(bytes, max_pixels)?;
     let handle = ctx
         .primary_image_handle()
         .map_err(corrupt("primary image"))?;
+    decode_handle(&lib, &handle, max_pixels)
+}
 
-    let (width, height) = (handle.width(), handle.height());
-    // `ispe` is the coded size libheif allocates before `clap` crops it (-1 when absent).
+/// A libheif context reading `bytes` under [`security_limits`] for `max_pixels`.
+fn open(bytes: &[u8], max_pixels: u64) -> Result<HeifContext<'_>, HeifError> {
+    let mut ctx = HeifContext::new().map_err(corrupt("context"))?;
+    ctx.set_security_limits(&security_limits(max_pixels))
+        .map_err(corrupt("security limits"))?;
+    // libheif's threads decode grid tiles in parallel; libde265's (see `decode_handle`)
+    // split one HEVC image. Both are capped because two workers decode at the same time.
+    ctx.set_max_decoding_threads(decoding_threads());
+    ctx.read_bytes(bytes).map_err(corrupt("read"))?;
+    Ok(ctx)
+}
+
+/// Whether the image of `handle` is within `max_pixels`, both as displayed and as coded
+/// (`ispe`, the size libheif allocates before `clap` crops it; -1 when absent).
+fn fits(handle: &ImageHandle, max_pixels: u64) -> bool {
     let coded = u64::try_from(handle.ispe_width()).unwrap_or(0)
         * u64::try_from(handle.ispe_height()).unwrap_or(0);
-    if u64::from(width) * u64::from(height) > max_pixels || coded > max_pixels {
+    u64::from(handle.width()) * u64::from(handle.height()) <= max_pixels && coded <= max_pixels
+}
+
+thread_local! {
+    /// The items this thread asked libheif to decode, latest last (at most 16).
+    static DECODED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Test hook, not part of the API: the ids of the items (primary image, thumbnail) this
+/// thread asked libheif to decode since the last call, in order; at most the last 16.
+#[doc(hidden)]
+pub fn take_decoded_items() -> Vec<u32> {
+    DECODED.with(|d| d.take())
+}
+
+/// Decodes the image of `handle` (with its own transformations) to straight RGBA8. Sizes
+/// are checked against `max_pixels` before anything is decoded.
+fn decode_handle(
+    lib: &LibHeif,
+    handle: &ImageHandle,
+    max_pixels: u64,
+) -> Result<HeifImage, HeifError> {
+    let (width, height) = (handle.width(), handle.height());
+    if !fits(handle, max_pixels) {
         return Err(HeifError::TooLarge { width, height });
     }
     if width == 0 || height == 0 {
         return Err(HeifError::Corrupt("image has no pixels".to_string()));
     }
+    DECODED.with(|d| {
+        let mut d = d.borrow_mut();
+        if d.len() >= 16 {
+            d.remove(0);
+        }
+        d.push(handle.item_id());
+    });
 
+    let threads = decoding_threads();
     let has_alpha = handle.has_alpha_channel();
     let chroma = if has_alpha {
         RgbChroma::Rgba
@@ -152,7 +201,7 @@ fn decode_inner(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
     options.set_convert_hdr_to_8bit(true);
     options.set_num_codec_threads(threads);
     let image = lib
-        .decode(&handle, ColorSpace::Rgb(chroma), Some(options))
+        .decode(handle, ColorSpace::Rgb(chroma), Some(options))
         .map_err(corrupt("decode"))?;
 
     if image.width() != width || image.height() != height {
@@ -182,7 +231,7 @@ fn decode_inner(bytes: &[u8], max_pixels: u64) -> Result<HeifImage, HeifError> {
         width,
         height,
         rgba,
-        color: color_info(&handle),
+        color: color_info(handle),
     })
 }
 

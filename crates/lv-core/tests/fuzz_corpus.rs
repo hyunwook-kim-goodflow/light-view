@@ -146,7 +146,7 @@ fn seeds_reach_the_parsers() {
             count += 1;
         }
         assert!(
-            count >= if name == "requests.bin" { 4 } else { 3 },
+            count >= if name == "requests.bin" { 5 } else { 3 },
             "{name}"
         );
     }
@@ -786,6 +786,12 @@ fn ipc_frame_seeds() -> Seeds {
                 long_edge: Some(1),
             },
             rgba: vec![1, 2, 3, 255, 4, 5, 6, 128],
+        },
+        Request::ThumbnailHeif {
+            id: 4,
+            max_side: 256,
+            max_pixels: 1 << 20,
+            data: b"heif-bytes".to_vec(),
         },
         Request::Shutdown,
     ];

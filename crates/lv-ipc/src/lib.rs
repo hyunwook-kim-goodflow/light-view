@@ -29,11 +29,14 @@
 //!   (`value` a side of at least 1 that fits a u32, `long_edge` 0), `3` max bytes (`value`
 //!   the budget, at least 1; `long_edge` the optional long-edge limit, 0 for none), `4`
 //!   percent (`value` `1..=100`, `long_edge` 0). See [`FitTarget`].
+//! - `0x05` `ThumbnailHeif`: `id: u64 | max_pixels: u64 | max_side: u32 | data` (`data` is
+//!   the rest of the payload). `max_side`, the longest side of the answer, is
+//!   `1..=`[`MAX_THUMBNAIL_SIDE`].
 //!
 //! Responses (worker to app):
 //! - `0x81` `Image`: `id: u64 | width: u32 | height: u32 | bgra` (the rest of the payload).
 //!   `width` and `height` must be non-zero and `width * height * 4` (checked u64) must equal
-//!   `bgra.len()`.
+//!   `bgra.len()`. The answer to `DecodeHeif` and `ThumbnailHeif`.
 //! - `0x82` `Failed`: `id: u64 | tag: u8 | fields`, with tag `0` `TooLarge`
 //!   (`width: u32 | height: u32`; `0 x 0` when the worker does not report the size), tag `1`
 //!   `Corrupt` (string), tag `2` `Unsupported` (none), tag `3` `NotPerfect` (none: the JPEG
@@ -79,18 +82,19 @@ mod frame;
 #[doc(hidden)]
 pub mod fuzzing;
 mod limits;
+mod request;
 
 pub use fit::FitTarget;
 pub use limits::{
     decoder_memory, max_bytes_response, max_request_data, max_response_pixels, webp_fit_fits,
     webp_fit_memory, worker_memory_limit, WEBP_MAX_DIMENSION,
 };
+pub use request::{read_request, write_request};
 
 use std::io::{self, Read, Write};
 
 use frame::{
-    expect_consumed, invalid, pixel_bytes, read_exact_vec, read_header, read_u32, read_u64,
-    read_u8, write_frame,
+    expect_consumed, invalid, read_exact_vec, read_header, read_u32, read_u64, read_u8, write_frame,
 };
 
 pub const MAGIC: [u8; 4] = *b"LVW1";
@@ -98,10 +102,16 @@ pub const MAX_PAYLOAD: u64 = 1 << 30;
 /// Maximum byte length of a `Corrupt` message on the wire.
 pub const MAX_CORRUPT_LEN: usize = 4096;
 /// The most fixed bytes in front of a request's file bytes or pixels: `FitWebp`'s `id`,
-/// `width`, `height`, `start_quality` and target (`RotateJpeg` has 17, `DecodeHeif` 16).
+/// `width`, `height`, `start_quality` and target (`ThumbnailHeif` has 20,
+/// `RotateJpeg` 17, `DecodeHeif` 16).
 pub const REQUEST_FIXED_LEN: u64 = 17 + fit::TARGET_LEN;
 /// Fixed fields in front of a `DecodeHeif` request's file bytes (`id`, `max_pixels`).
 const DECODE_FIXED_LEN: u64 = 16;
+/// Fixed fields in front of a `ThumbnailHeif` request's file bytes (`id`, `max_pixels`,
+/// `max_side`).
+const THUMBNAIL_FIXED_LEN: u64 = 20;
+/// The largest `max_side` a `ThumbnailHeif` request may ask for.
+pub const MAX_THUMBNAIL_SIDE: u32 = 4096;
 /// Fixed fields in front of a `RotateJpeg` request's file bytes (`id`, `max_pixels`,
 /// `quarters`).
 const ROTATE_FIXED_LEN: u64 = 17;
@@ -121,6 +131,7 @@ const KIND_DECODE_HEIF: u8 = 0x01;
 const KIND_SHUTDOWN: u8 = 0x02;
 const KIND_ROTATE_JPEG: u8 = 0x03;
 const KIND_FIT_WEBP: u8 = 0x04;
+const KIND_THUMBNAIL_HEIF: u8 = 0x05;
 const KIND_IMAGE: u8 = 0x81;
 const KIND_FAILED: u8 = 0x82;
 const KIND_BYTES: u8 = 0x83;
@@ -158,6 +169,15 @@ pub enum Request {
         target: FitTarget,
         rgba: Vec<u8>,
     },
+    /// A thumbnail of a HEIF file, its longer side at most `max_side`
+    /// (`1..=MAX_THUMBNAIL_SIDE`): the smallest embedded thumbnail that is big enough, else
+    /// the primary image scaled down (`lv_heif::thumbnail_heif`); answered by `Image`.
+    ThumbnailHeif {
+        id: u64,
+        max_side: u32,
+        max_pixels: u64,
+        data: Vec<u8>,
+    },
     Shutdown,
 }
 
@@ -167,7 +187,8 @@ impl Request {
         match self {
             Request::DecodeHeif { id, .. }
             | Request::RotateJpeg { id, .. }
-            | Request::FitWebp { id, .. } => *id,
+            | Request::FitWebp { id, .. }
+            | Request::ThumbnailHeif { id, .. } => *id,
             Request::Shutdown => 0,
         }
     }
@@ -252,144 +273,6 @@ impl std::error::Error for IpcError {
 impl From<io::Error> for IpcError {
     fn from(e: io::Error) -> Self {
         IpcError::Io(e)
-    }
-}
-
-pub fn write_request(w: &mut impl Write, r: &Request) -> io::Result<()> {
-    match r {
-        Request::DecodeHeif {
-            id,
-            max_pixels,
-            data,
-        } => {
-            let len = DECODE_FIXED_LEN
-                .checked_add(data.len() as u64)
-                .ok_or_else(|| invalid("too long"))?;
-            write_frame(w, KIND_DECODE_HEIF, len)?;
-            w.write_all(&id.to_le_bytes())?;
-            w.write_all(&max_pixels.to_le_bytes())?;
-            w.write_all(data)
-        }
-        Request::RotateJpeg {
-            id,
-            quarters,
-            max_pixels,
-            data,
-        } => {
-            if !(1..=3).contains(quarters) {
-                return Err(invalid("quarters must be 1..=3"));
-            }
-            let len = ROTATE_FIXED_LEN
-                .checked_add(data.len() as u64)
-                .ok_or_else(|| invalid("too long"))?;
-            write_frame(w, KIND_ROTATE_JPEG, len)?;
-            w.write_all(&id.to_le_bytes())?;
-            w.write_all(&max_pixels.to_le_bytes())?;
-            w.write_all(&[*quarters])?;
-            w.write_all(data)
-        }
-        Request::FitWebp {
-            id,
-            width,
-            height,
-            start_quality,
-            target,
-            rgba,
-        } => {
-            if !(1..=100).contains(start_quality) {
-                return Err(invalid("start quality must be 1..=100"));
-            }
-            let (tag, value, long_edge) = target.to_wire().ok_or_else(|| invalid("bad target"))?;
-            if pixel_bytes(*width, *height) != Some(rgba.len() as u64) {
-                return Err(invalid("rgba length does not match width*height*4"));
-            }
-            let len = REQUEST_FIXED_LEN
-                .checked_add(rgba.len() as u64)
-                .ok_or_else(|| invalid("too long"))?;
-            write_frame(w, KIND_FIT_WEBP, len)?;
-            w.write_all(&id.to_le_bytes())?;
-            w.write_all(&width.to_le_bytes())?;
-            w.write_all(&height.to_le_bytes())?;
-            w.write_all(&[*start_quality, tag])?;
-            w.write_all(&value.to_le_bytes())?;
-            w.write_all(&long_edge.to_le_bytes())?;
-            w.write_all(rgba)
-        }
-        Request::Shutdown => write_frame(w, KIND_SHUTDOWN, 0),
-    }
-}
-
-/// Reads one request; `Ok(None)` means clean EOF at a frame boundary.
-pub fn read_request(r: &mut impl Read, max_payload: u64) -> Result<Option<Request>, IpcError> {
-    let Some((kind, len)) = read_header(r, max_payload)? else {
-        return Ok(None);
-    };
-    let mut p = r.by_ref().take(len);
-    match kind {
-        KIND_DECODE_HEIF => {
-            let id = read_u64(&mut p)?;
-            let max_pixels = read_u64(&mut p)?;
-            let rest = p.limit();
-            let data = read_exact_vec(&mut p, rest)?;
-            Ok(Some(Request::DecodeHeif {
-                id,
-                max_pixels,
-                data,
-            }))
-        }
-        KIND_ROTATE_JPEG => {
-            let id = read_u64(&mut p)?;
-            let max_pixels = read_u64(&mut p)?;
-            let quarters = read_u8(&mut p)?;
-            if !(1..=3).contains(&quarters) {
-                return Err(IpcError::Malformed("quarters out of range"));
-            }
-            let rest = p.limit();
-            let data = read_exact_vec(&mut p, rest)?;
-            Ok(Some(Request::RotateJpeg {
-                id,
-                quarters,
-                max_pixels,
-                data,
-            }))
-        }
-        KIND_FIT_WEBP => {
-            let id = read_u64(&mut p)?;
-            let width = read_u32(&mut p)?;
-            let height = read_u32(&mut p)?;
-            let start_quality = read_u8(&mut p)?;
-            if !(1..=100).contains(&start_quality) {
-                return Err(IpcError::Malformed("start quality out of range"));
-            }
-            let (tag, value, long_edge) = (read_u8(&mut p)?, read_u64(&mut p)?, read_u32(&mut p)?);
-            let target = FitTarget::from_wire(tag, value, long_edge)
-                .ok_or(IpcError::Malformed("bad fit target"))?;
-            // `p.limit()` is bounded by the validated frame length, so a match bounds the
-            // allocation below.
-            if pixel_bytes(width, height) != Some(p.limit()) {
-                return Err(IpcError::Malformed(
-                    "rgba length does not match width*height*4",
-                ));
-            }
-            let rest = p.limit();
-            let rgba = read_exact_vec(&mut p, rest)?;
-            Ok(Some(Request::FitWebp {
-                id,
-                width,
-                height,
-                start_quality,
-                target,
-                rgba,
-            }))
-        }
-        KIND_SHUTDOWN => {
-            expect_consumed(&p)?;
-            Ok(Some(Request::Shutdown))
-        }
-        KIND_IMAGE | KIND_FAILED | KIND_BYTES | KIND_FITTED | KIND_CANT_FIT => {
-            Err(IpcError::Malformed("response kind where request expected"))
-        }
-        _ => Err(IpcError::Malformed("unknown kind")),
     }
 }
 
@@ -578,9 +461,8 @@ pub fn read_response(r: &mut impl Read, max_payload: u64) -> Result<Option<Respo
             expect_consumed(&p)?;
             Ok(Some(Response::CantFit { id, smallest }))
         }
-        KIND_DECODE_HEIF | KIND_SHUTDOWN | KIND_ROTATE_JPEG | KIND_FIT_WEBP => {
-            Err(IpcError::Malformed("request kind where response expected"))
-        }
+        KIND_DECODE_HEIF | KIND_SHUTDOWN | KIND_ROTATE_JPEG | KIND_FIT_WEBP
+        | KIND_THUMBNAIL_HEIF => Err(IpcError::Malformed("request kind where response expected")),
         _ => Err(IpcError::Malformed("unknown kind")),
     }
 }
@@ -825,6 +707,88 @@ mod tests {
             read_request(&mut Cursor::new(bytes)),
             Err(IpcError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn thumbnail_round_trips() {
+        for (max_side, data) in [
+            (1, vec![]),
+            (256, b"heif-bytes".to_vec()),
+            (MAX_THUMBNAIL_SIDE, vec![0xAB; 70_000]),
+        ] {
+            let r = Request::ThumbnailHeif {
+                id: 21,
+                max_side,
+                max_pixels: 1 << 28,
+                data,
+            };
+            assert_eq!(read_request(&mut Cursor::new(req_bytes(&r))).unwrap(), r);
+            assert_eq!(r.id(), 21);
+        }
+        // Layout: id | max_pixels | max_side | data.
+        let bytes = req_bytes(&Request::ThumbnailHeif {
+            id: 0x0102,
+            max_side: 0x0506,
+            max_pixels: 0x0304,
+            data: vec![0xEE; 3],
+        });
+        let mut expected = frame(0x05, THUMBNAIL_FIXED_LEN + 3, &[]);
+        expected.extend_from_slice(&0x0102u64.to_le_bytes());
+        expected.extend_from_slice(&0x0304u64.to_le_bytes());
+        expected.extend_from_slice(&0x0506u32.to_le_bytes());
+        expected.extend_from_slice(&[0xEE; 3]);
+        assert_eq!(bytes, expected);
+        const { assert!(THUMBNAIL_FIXED_LEN <= REQUEST_FIXED_LEN) }
+        // A response kind is not a request, and the other way round.
+        assert!(matches!(
+            read_response(&mut Cursor::new(bytes)),
+            Err(IpcError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn thumbnail_side_out_of_range_is_rejected() {
+        assert_eq!(MAX_THUMBNAIL_SIDE, 4096);
+        for max_side in [0, MAX_THUMBNAIL_SIDE + 1, u32::MAX] {
+            let r = Request::ThumbnailHeif {
+                id: 1,
+                max_side,
+                max_pixels: 1,
+                data: vec![1],
+            };
+            let mut out = Vec::new();
+            let err = write_request(&mut out, &r).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(out.is_empty(), "nothing may be written before the error");
+
+            let mut p = 1u64.to_le_bytes().to_vec();
+            p.extend_from_slice(&1u64.to_le_bytes());
+            p.extend_from_slice(&max_side.to_le_bytes());
+            let bytes = frame(0x05, p.len() as u64, &p);
+            assert!(matches!(
+                read_request(&mut Cursor::new(bytes)),
+                Err(IpcError::Malformed(_))
+            ));
+        }
+        // Shorter than its fixed fields.
+        let bytes = frame(0x05, 19, &[0; 19]);
+        assert!(matches!(
+            read_request(&mut Cursor::new(bytes)),
+            Err(IpcError::Malformed(_))
+        ));
+        // Too long to encode: nothing is written.
+        let big = Request::ThumbnailHeif {
+            id: 1,
+            max_side: 1,
+            max_pixels: 1,
+            data: vec![0u8; (MAX_PAYLOAD - THUMBNAIL_FIXED_LEN + 1) as usize],
+        };
+        let mut out = Vec::new();
+        assert_eq!(
+            write_request(&mut out, &big).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(out.is_empty());
     }
 
     fn fit_request(
