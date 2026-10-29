@@ -457,9 +457,9 @@ impl WorkerPool {
         };
         let id = request.id();
         let bytes = match &request {
-            Request::DecodeHeif { data, .. } | Request::RotateJpeg { data, .. } => {
-                data.len() as u64
-            }
+            Request::DecodeHeif { data, .. }
+            | Request::RotateJpeg { data, .. }
+            | Request::ThumbnailHeif { data, .. } => data.len() as u64,
             Request::FitWebp { rgba, .. } => rgba.len() as u64,
             Request::Shutdown => 0,
         };

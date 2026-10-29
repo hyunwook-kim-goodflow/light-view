@@ -130,7 +130,11 @@ impl Drop for Worker {
 
 /// What the worker should send for `bytes`: the same decode and color pipeline, in process.
 fn expected_bgra(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
-    let img = lv_heif::decode_heif(bytes, MAX_PIXELS).expect("sample decodes");
+    to_srgb_bgra(lv_heif::decode_heif(bytes, MAX_PIXELS).expect("sample decodes"))
+}
+
+/// The worker's colour pipeline: sRGB, premultiplied BGRA8.
+fn to_srgb_bgra(img: lv_heif::HeifImage) -> (u32, u32, Vec<u8>) {
     let mut rgba = img.rgba;
     let src = match &img.color {
         lv_heif::ColorInfo::None => lv_core::color::ColorSource::Srgb,
@@ -205,6 +209,77 @@ fn stdout_is_binary_exact() {
         }
         other => panic!("expected Image, got {other:?}"),
     }
+}
+
+impl Worker {
+    fn thumbnail(&mut self, id: u64, max_side: u32, max_pixels: u64, data: Vec<u8>) -> Response {
+        self.send(&Request::ThumbnailHeif {
+            id,
+            max_side,
+            max_pixels,
+            data,
+        });
+        read_response(&mut self.stdout, RESPONSE_CAP)
+            .expect("valid response")
+            .expect("a response, not EOF")
+    }
+}
+
+#[test]
+fn thumbnail_heif_answers_image() {
+    let mut w = Worker::start();
+    // (file, max side, size): the embedded 451 x 461 thumbnail (the 4032 x 3024 grid would
+    // give 256 x 192), the scaled grid, a rotated image, an alpha image.
+    for (id, name, max_side, size) in [
+        (1, "grid-4032x3024-thumbs.heic", 256, (250, 256)),
+        (2, "grid-4032x3024.heic", 256, (256, 192)),
+        (3, "rainbow-451x461-irot90.heic", 100, (100, 98)),
+        (4, "with-alpha-512x512.heic", 64, (64, 64)),
+    ] {
+        let bytes = sample(name);
+        let expected = to_srgb_bgra(
+            lv_heif::thumbnail_heif(&bytes, max_side, MAX_PIXELS).expect("sample thumbnail"),
+        );
+        match w.thumbnail(id, max_side, MAX_PIXELS, bytes) {
+            Response::Image {
+                id: got,
+                width,
+                height,
+                bgra,
+            } => {
+                assert_eq!((got, (width, height)), (id, size), "{name}");
+                assert!(
+                    bgra == expected.2,
+                    "{name}: differs from the in-process pipeline"
+                );
+            }
+            other => panic!("{name}: expected Image, got {other:?}"),
+        }
+    }
+    // Failures are answered, and the worker keeps serving.
+    match w.thumbnail(5, 256, MAX_PIXELS, b"not a heif file".to_vec()) {
+        Response::Failed {
+            id: 5,
+            kind: FailKind::Corrupt(msg),
+        } => assert!(!msg.is_empty()),
+        other => panic!("expected Failed(Corrupt), got {other:?}"),
+    }
+    match w.thumbnail(6, 256, 1_000_000, sample("grid-4032x3024.heic")) {
+        Response::Failed {
+            id: 6,
+            kind: FailKind::TooLarge { width, height },
+        } => assert_eq!((width, height), (4032, 3024)),
+        other => panic!("expected Failed(TooLarge), got {other:?}"),
+    }
+    assert!(matches!(
+        w.thumbnail(7, 32, MAX_PIXELS, sample("rainbow-451x461.heic")),
+        Response::Image {
+            id: 7,
+            width: 31,
+            height: 32,
+            ..
+        }
+    ));
 }
 
 #[test]
