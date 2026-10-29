@@ -1,18 +1,21 @@
 //! light-view's Explorer extension: a COM in-process server (pure Rust, no C code) with the
-//! HEIC thumbnail handler (`IThumbnailProvider` + `IInitializeWithStream`).
+//! HEIC thumbnail handler (`IThumbnailProvider` + `IInitializeWithStream`) and, for all-users
+//! installs, the HEIC preview handler (`IPreviewHandler` and friends, in `prevhost.exe`).
 //!
-//! The handler never decodes: it reads the file's bytes from Explorer's stream (up to the
-//! app's HEIC file size cap), has one sandboxed `lv-worker.exe` from this DLL's folder make
-//! the thumbnail ([`lv_sandbox::run_once`], ruling R3) and answers it as a 32 bpp bitmap. Any
-//! failure is an error HRESULT (Explorer then shows the file's icon) and is not logged.
+//! The handlers never decode: they read the file's bytes from Explorer's stream (up to the
+//! shell's 64 MiB cap), have one sandboxed `lv-worker.exe` from this DLL's folder make the
+//! image ([`lv_sandbox::run_once`], ruling R3) and show it as a 32 bpp bitmap. Any failure is
+//! an error HRESULT (Explorer then shows the file's icon) or an empty preview, and is not
+//! logged.
 //!
 //! Per-user installs load this DLL into `explorer.exe` itself (`DisableProcessIsolation`), so
 //! no panic may cross a COM boundary ([`guarded`]) and `DllCanUnloadNow` refuses while any
-//! object, server lock or worker helper thread is alive ([`can_unload`]).
+//! object, server lock, preview window or helper thread is alive ([`can_unload`]).
 
 mod bitmap;
 mod dll;
 mod factory;
+mod preview;
 mod stream;
 mod thumbnail;
 
@@ -31,8 +34,11 @@ use windows::Win32::System::LibraryLoader::{
 
 /// Thumbnail handler CLSID (Global Constraints).
 pub const CLSID_THUMBNAIL: GUID = GUID::from_u128(0x6A77F04F_33D3_40F0_885E_AA8CC5CC403C);
+/// Preview handler CLSID (Global Constraints).
+pub const CLSID_PREVIEW: GUID = GUID::from_u128(0x663472B2_A0DD_43AA_B3F1_97CEB0598154);
 
-/// Live COM objects of this DLL (class factories and thumbnail providers).
+/// Live COM objects of this DLL (class factories, handlers, and the state a preview window
+/// and its background thread share).
 static OBJECTS: AtomicUsize = AtomicUsize::new(0);
 /// `IClassFactory::LockServer(TRUE)` calls not yet undone.
 static LOCKS: AtomicUsize = AtomicUsize::new(0);
@@ -62,8 +68,9 @@ pub(crate) fn lock_server(lock: bool) {
     }
 }
 
-/// Whether nothing of this DLL is in use: no object, no server lock and no worker helper
-/// thread (those of [`lv_sandbox::run_once`] may outlive a `GetThumbnail` by a moment).
+/// Whether nothing of this DLL is in use: no object, no server lock and no helper thread
+/// (those of [`lv_sandbox::run_once`] may outlive a `GetThumbnail` by a moment, and a
+/// preview's background thread outlives `DoPreview`; both are counted by lv-sandbox).
 pub(crate) fn can_unload() -> bool {
     OBJECTS.load(Ordering::SeqCst) == 0
         && LOCKS.load(Ordering::SeqCst) == 0
@@ -75,8 +82,8 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(E_FAIL.into()))
 }
 
-/// `lv-worker.exe` in the folder of the module holding this code (the DLL, or a test exe).
-pub(crate) fn worker_exe() -> Result<PathBuf> {
+/// The module holding this code (the DLL, or a test exe).
+pub(crate) fn this_module() -> Result<HMODULE> {
     static ANCHOR: u8 = 0;
     let mut module = HMODULE::default();
     // SAFETY: FROM_ADDRESS takes any address inside the module (a static of ours);
@@ -88,6 +95,12 @@ pub(crate) fn worker_exe() -> Result<PathBuf> {
             &mut module,
         )?
     };
+    Ok(module)
+}
+
+/// `lv-worker.exe` in the folder of the module holding this code (the DLL, or a test exe).
+pub(crate) fn worker_exe() -> Result<PathBuf> {
+    let module = this_module()?;
     let mut buf = vec![0u16; 1024];
     loop {
         // SAFETY: a valid module handle of this process and a writable buffer.

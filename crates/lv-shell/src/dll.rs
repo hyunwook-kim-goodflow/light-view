@@ -8,9 +8,9 @@ use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_FAIL, E_POINTER, S
 use windows::Win32::System::Com::IClassFactory;
 
 use crate::factory::Factory;
-use crate::{can_unload, CLSID_THUMBNAIL};
+use crate::{can_unload, CLSID_PREVIEW, CLSID_THUMBNAIL};
 
-/// Hands out the class factory for [`CLSID_THUMBNAIL`].
+/// Hands out the class factory for [`CLSID_THUMBNAIL`] or [`CLSID_PREVIEW`].
 ///
 /// # Safety
 /// COM contract: `clsid` and `iid` point to GUIDs and `out` is writable (null pointers are
@@ -32,10 +32,10 @@ pub unsafe extern "system" fn DllGetClassObject(
         }
         // SAFETY: checked non-null; the caller guarantees they are valid.
         unsafe {
-            if *clsid != CLSID_THUMBNAIL {
+            if *clsid != CLSID_THUMBNAIL && *clsid != CLSID_PREVIEW {
                 return CLASS_E_CLASSNOTAVAILABLE;
             }
-            let factory: IClassFactory = Factory::new().into();
+            let factory: IClassFactory = Factory::new(*clsid).into();
             factory.query(iid, out)
         }
     }))
