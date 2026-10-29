@@ -118,11 +118,31 @@ impl StdinMonitor {
     }
 }
 
-/// Writes `msg` to stderr. Never panics: a failed write is ignored (in Explorer, where the
-/// shell extension runs, there may be no stderr or a broken one).
+/// Whether [`log`] writes anything: off until the host calls [`enable_logging`].
+static LOGGING: AtomicBool = AtomicBool::new(false);
+
+/// Turns [`log`] (and so the copy of the workers' stderr) on for this process. The app does
+/// so at its start; the Explorer extension never does, so nothing of light-view's reaches
+/// the console of a process that merely uses the shell's thumbnails.
+pub fn enable_logging() {
+    LOGGING.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`enable_logging`] was called in this process.
+pub fn logging_enabled() -> bool {
+    LOGGING.load(Ordering::Relaxed)
+}
+
+/// Writes `msg` to stderr once [`enable_logging`] was called, else nothing. Never panics: a
+/// failed write is ignored (there may be no stderr or a broken one).
 pub fn log(msg: &str) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "light-view: worker: {msg}");
+    log_to(logging_enabled(), &mut std::io::stderr(), msg);
+}
+
+fn log_to(enabled: bool, out: &mut impl std::io::Write, msg: &str) {
+    if enabled {
+        let _ = writeln!(out, "light-view: worker: {msg}");
+    }
 }
 
 /// Whether CreateProcessAsUserW refused PROC_THREAD_ATTRIBUTE_JOB_LIST once (before
@@ -412,6 +432,23 @@ fn create_job(max_pixels: u64) -> windows::core::Result<OwnedHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_writes_only_when_enabled() {
+        let mut out = Vec::new();
+        log_to(false, &mut out, "quiet");
+        assert!(out.is_empty());
+        log_to(true, &mut out, "heard");
+        assert_eq!(out, b"light-view: worker: heard\n");
+    }
+
+    /// The only test that turns logging on: before it, nothing in this crate did.
+    #[test]
+    fn logging_is_off_until_the_host_enables_it() {
+        assert!(!logging_enabled(), "on before anyone asked");
+        enable_logging();
+        assert!(logging_enabled());
+    }
 
     use std::time::Duration;
 

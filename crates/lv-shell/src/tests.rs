@@ -318,6 +318,29 @@ fn a_third_thumbnail_waits_for_one_of_two_workers() {
     drop(unhook);
 }
 
+/// lv-sandbox stays silent in the shell: nothing of ours goes to the stderr of a process that
+/// uses the shell's thumbnails, and no code of this crate turns it on.
+#[test]
+fn worker_logging_stays_off() {
+    let _serial = serial();
+    let (bitmap, _) = thumbnail(&provider_with(&sample()), 32).expect("GetThumbnail");
+    take(bitmap);
+    assert!(!lv_sandbox::sandbox::logging_enabled());
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut dirs = vec![src];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("tests.rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(!text.contains("enable_logging"), "{}", path.display());
+            }
+        }
+    }
+}
+
 #[test]
 fn a_panic_is_an_error_not_an_unwind() {
     let result: Result<()> = guarded(|| panic!("expected in this test"));
