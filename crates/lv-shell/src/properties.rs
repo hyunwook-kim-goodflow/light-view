@@ -5,7 +5,8 @@
 //! `SearchProtocolHost.exe`, which runs as SYSTEM. So it only parses bytes in Rust: it reads
 //! the stream it is given (up to the shell's 64 MiB cap) and the HEIF boxes and EXIF in them.
 //! It never starts a process or a thread, never opens a path, and has no C code; the test
-//! `the_details_code_has_no_way_to_a_worker` holds this module (and `stream`) to that.
+//! `property_store_never_starts_worker` holds this module (and `stream`) to that, with the
+//! path allowlist in `boundary.rs`.
 //!
 //! Exported: `System.Image.HorizontalSize`, `VerticalSize` and `Dimensions` (the displayed
 //! size, after `clap` and `irot`), `System.Photo.DateTaken` (EXIF `DateTimeOriginal`, in
@@ -102,8 +103,8 @@ fn values_of(props: &HeifProps) -> Vec<(PROPERTYKEY, Value)> {
     out
 }
 
-/// The UTC ticks of `date`; a local time goes through this machine's time zone rules (for
-/// that date). `None` when Windows cannot convert it.
+/// The UTC ticks of `date`; a local time goes through this machine's current time zone and
+/// its current DST rule (not the rules of past years). `None` when Windows cannot convert it.
 fn utc_ticks(date: DateTaken) -> Option<u64> {
     let local = match date {
         DateTaken::Utc(ticks) => return Some(ticks),
@@ -231,5 +232,7 @@ impl IPropertyStoreCapabilities_Impl for Store_Impl {
     }
 }
 
+#[cfg(test)]
+mod boundary;
 #[cfg(test)]
 mod tests;
