@@ -227,6 +227,14 @@ Test 'plain_text_keeps_block_boundaries' {
     Assert-Equal 'one two three.' (ConvertTo-PlainText '<p>one</p><p>two <a href="x">three</a>.</p>')
 }
 
+Test 'published_at_as_datetime_gives_iso_date' {
+    # pwsh 7's ConvertFrom-Json and Invoke-RestMethod turn ISO dates into [datetime].
+    $api = @(Get-FixtureApi | Where-Object { -not $_.draft -and -not $_.prerelease })[0]
+    $api.published_at = [datetime]::new(2026, 10, 31, 12, 10, 20, [DateTimeKind]::Utc)
+    $site = ConvertTo-SiteReleases -ApiReleases @($api) -GetSums $FixtureSums -NotesDir $Fixtures
+    Assert-Equal '2026-10-31' $site.releases[0].date 'date'
+}
+
 # --- Task 4: release notes pages ------------------------------------------------------
 
 Test 'notes_split_by_language' {
@@ -345,6 +353,14 @@ Test 'ads_off_leaves_no_trace' {
     Assert-Equal 1 @(Test-NoAds $script).Count 'adsense script'
     $slot = @{ 'faq/index.html' = (Page $Ad) }
     Assert-Equal 1 @(Test-NoAds $slot).Count 'slot'
+}
+
+Test 'ad_slot_not_right_before_download_section' {
+    $files = '<section><h2>Files</h2><a href="https://github.com/a" data-download>a.exe</a></section>'
+    $before = @{ 'releases/0.2.0/index.html' = (Page "$Features$Ad$files") }
+    Assert-Equal 1 @(Test-AdSlots $before).Count 'ad just before the files section'
+    $after = @{ 'releases/0.2.0/index.html' = (Page "$files$Features$Ad") }
+    Assert-Equal 0 @(Test-AdSlots $after).Count 'files first, then notes, then the ad'
 }
 
 Test 'ads_txt_follows_config' {

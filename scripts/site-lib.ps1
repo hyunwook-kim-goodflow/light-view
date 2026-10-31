@@ -115,10 +115,17 @@ function ConvertTo-SiteReleases($ApiReleases, [scriptblock]$GetSums, [string]$No
             $summaryEn = [string]$notes.front['summary_en']
             $notesFile = $notesPath
         }
+        # pwsh 7 reads ISO dates in JSON as [datetime]; Windows PowerShell 5.1 keeps the string.
+        $published = $r.published_at
+        if ($published -is [datetime]) {
+            $date = $published.ToUniversalTime().ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+        } else {
+            $date = ([string]$published).Substring(0, 10)
+        }
         $out += [pscustomobject][ordered]@{
             version    = $version
             tag        = $r.tag_name
-            date       = ([string]$r.published_at).Substring(0, 10)
+            date       = $date
             url        = $r.html_url
             notes_file = $notesFile
             summary_ko = $summaryKo
@@ -367,9 +374,10 @@ function Get-ReleaseNotesBody([string]$NotesDir, [string]$Version) {
 $script:AdFreePages = '^(en/)?(download|code-signing|privacy)/index\.html$|^404\.html$'
 
 # Ad slots (data-site-ad) must stay off ad-free pages, one per page, never in the same
-# <section> chunk as a download link (so a headed section always stands between them)
-# and never next to the highlighter (the download button or a <mark>). A chunk runs from
-# one <section to the next, so a slot placed right after a section counts with it.
+# <section> chunk as a download link nor in the chunk just before one (so a headed section
+# without downloads always stands between them), and never next to the highlighter (the
+# download button or a <mark>). A chunk runs from one <section to the next, so a slot
+# placed right after a section counts with it.
 function Test-AdSlots($Pages) {
     $problems = @()
     foreach ($path in $Pages.Keys) {
@@ -378,9 +386,12 @@ function Test-AdSlots($Pages) {
         if ($count -eq 0) { continue }
         if ($path -match $script:AdFreePages) { $problems += "${path}: ad slot on a page that must have none"; continue }
         if ($count -gt 1) { $problems += "${path}: $count ad slots (one per page)" }
-        foreach ($chunk in ($html -split '(?=<section\b)')) {
+        $chunks = @($html -split '(?=<section\b)')
+        for ($i = 0; $i -lt $chunks.Count; $i++) {
+            $chunk = $chunks[$i]
             if ($chunk -notmatch '\bdata-site-ad=') { continue }
-            if ($chunk -match '\bdata-download\b') { $problems += "${path}: ad slot next to a download link (no section between them)" }
+            $nextHasDownload = ($i + 1 -lt $chunks.Count) -and ($chunks[$i + 1] -match '\bdata-download\b')
+            if ($chunk -match '\bdata-download\b' -or $nextHasDownload) { $problems += "${path}: ad slot next to a download link (no section between them)" }
             elseif ($chunk -match 'class="[^"]*\bbtn-download\b|<mark\b') { $problems += "${path}: highlighter next to an ad slot" }
         }
     }

@@ -45,8 +45,11 @@ on:
 permissions:
   contents: read
 
+# Runs that can deploy (main, releases, manual) share one group, so they run one after
+# another and the last one to deploy has read the newest release data; pull requests
+# only build and check, each in its own group.
 concurrency:
-  group: site-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('site-pr-{0}', github.ref) || 'site-publish' }}
   cancel-in-progress: false
 
 env:
@@ -63,8 +66,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # A release event's ref is the tag; the site comes from main's newest pages, with the
+      # new release read from the API.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || '' }}
           persist-credentials: false
 
       - name: Zola
