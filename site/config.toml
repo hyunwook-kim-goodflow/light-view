@@ -1,0 +1,94 @@
+# light-view website (Zola). Build: zola --root site build. See site/README.md.
+base_url = "https://lightview.goodflow.dev"
+title = "light-view"
+description = "아이폰 사진(HEIC)도 바로 여는 가벼운 무료 Windows 사진 뷰어"
+default_language = "ko"
+compile_sass = true
+minify_html = false
+build_search_index = false
+# Feeds are turned on per section (releases only).
+generate_feeds = false
+feed_filenames = ["atom.xml"]
+taxonomies = []
+
+[markdown]
+smart_punctuation = false
+external_links_target_blank = false
+external_links_no_follow = false
+external_links_no_referrer = true
+
+[languages.en]
+title = "light-view"
+description = "A light, free Windows photo viewer that opens iPhone photos (HEIC) too"
+generate_feeds = false
+build_search_index = false
+taxonomies = []
+
+[extra]
+repo = "hyunwook-kim-goodflow/light-view"
+# GitHub Sponsors page; empty until the Sponsors profile is approved (no link is built).
+sponsor_url = ""
+
+# Ads are off: with enabled = false no ad script, slot or ads.txt is built.
+[extra.ads]
+enabled = false
+client = ""
+
+# Cloudflare Web Analytics token; empty = no analytics script.
+[extra.analytics]
+token = ""
+
+# Interface strings. Korean is the default language.
+[translations]
+site_description = "아이폰 사진(HEIC)도 바로 여는 가벼운 무료 Windows 사진 뷰어"
+skip = "본문으로 건너뛰기"
+nav_label = "주 메뉴"
+nav_download = "내려받기"
+nav_releases = "릴리스 노트"
+nav_faq = "자주 묻는 질문"
+lang_name = "한국어"
+other_lang_name = "English"
+footer_privacy = "개인정보 처리방침"
+footer_license = "라이선스: MIT 또는 Apache-2.0"
+footer_sponsor = "후원하기"
+footer_made_by = "goodflow가 만들어요"
+home = "홈"
+not_found_title = "페이지를 찾을 수 없어요"
+not_found_body = "주소가 바뀌었거나 없는 페이지예요."
+download = "내려받기"
+setup_label = "설치판"
+portable_label = "포터블 zip"
+all_versions = "모든 버전"
+checksums = "체크섬"
+from_github = "github.com에서 받아요"
+requirements = "Windows 10 22H2 이상 / Windows 11 (x64)"
+not_windows = "Windows용 프로그램이에요. Windows PC에서 받아 주세요."
+ad_label = "광고"
+ad_report = "이상한 광고 신고"
+
+[languages.en.translations]
+site_description = "A light, free Windows photo viewer that opens iPhone photos (HEIC) too"
+skip = "Skip to content"
+nav_label = "Main menu"
+nav_download = "Download"
+nav_releases = "Release notes"
+nav_faq = "FAQ"
+lang_name = "English"
+other_lang_name = "한국어"
+footer_privacy = "Privacy policy"
+footer_license = "License: MIT or Apache-2.0"
+footer_sponsor = "Sponsor"
+footer_made_by = "Made by goodflow"
+home = "Home"
+not_found_title = "Page not found"
+not_found_body = "The address has changed or the page does not exist."
+download = "Download"
+setup_label = "Installer"
+portable_label = "Portable zip"
+all_versions = "All versions"
+checksums = "Checksums"
+from_github = "Downloads from github.com"
+requirements = "Windows 10 22H2 or later / Windows 11 (x64)"
+not_windows = "This is a Windows program. Download it on a Windows PC."
+ad_label = "Advertisement"
+ad_report = "Report a bad ad"

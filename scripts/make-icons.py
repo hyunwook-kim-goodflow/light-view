@@ -73,7 +73,8 @@ def save_ico(draw, path):
     frames[-1].save(path.with_suffix(".png"))
 
 
-root = Path(__file__).resolve().parent.parent
-save_ico(app_icon, root / "crates/lv-app/res/light-view.ico")
-save_ico(file_icon, root / "crates/lv-app/res/photo-file.ico")
-print("wrote", root / "crates/lv-app/res")
+if __name__ == "__main__":
+    root = Path(__file__).resolve().parent.parent
+    save_ico(app_icon, root / "crates/lv-app/res/light-view.ico")
+    save_ico(file_icon, root / "crates/lv-app/res/photo-file.ico")
+    print("wrote", root / "crates/lv-app/res")

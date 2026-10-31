@@ -4,3 +4,8 @@ testdata/private/
 /.vcpkg/
 /vcpkg_installed/
 /dist/
+
+# Website build output and generated data
+/site/public/
+/site/data/releases.json
+/site/content/_generated/

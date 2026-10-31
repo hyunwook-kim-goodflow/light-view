@@ -1,0 +1,46 @@
+<!doctype html>
+{%- set lang = lang | default(value=config.default_language) -%}
+{%- if page -%}{%- set current = page -%}{%- elif section -%}{%- set current = section -%}{%- endif -%}
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {%- block head_title %}
+  <title>{% if current and current.title and current.path != "/" and current.path != "/en/" %}{{ current.title }} · {% endif %}light-view</title>
+  {%- endblock %}
+  {%- if current and current.description %}{% set desc = current.description %}{% else %}{% set desc = trans(key="site_description", lang=lang) %}{% endif %}
+  <meta name="description" content="{{ desc }}">
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="{{ get_url(path='site.css', cachebust=true) }}">
+  <link rel="icon" href="{{ get_url(path='favicon.ico') }}" sizes="32x32">
+  <link rel="icon" href="{{ get_url(path='img/icon-192.png') }}" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="{{ get_url(path='img/icon-180.png') }}">
+  {%- if current %}
+  <link rel="canonical" href="{{ current.permalink }}">
+  {%- for t in current.translations %}
+  <link rel="alternate" hreflang="{{ t.lang }}" href="{{ t.permalink }}">
+  {%- endfor %}
+  {%- endif %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="light-view">
+  <meta property="og:title" content="{% if current and current.title %}{{ current.title }}{% else %}light-view{% endif %}">
+  <meta property="og:description" content="{{ desc }}">
+  <meta property="og:image" content="{{ get_url(path='img/og.png') }}">
+  {%- if current %}<meta property="og:url" content="{{ current.permalink }}">{% endif %}
+  {%- block extra_head %}{% endblock %}
+  {%- if config.extra.analytics.token %}
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ config.extra.analytics.token }}"}'></script>
+  {%- endif %}
+</head>
+<body>
+  <a class="skip" href="#main">{{ trans(key="skip", lang=lang) }}</a>
+  {% include "partials/header.html" %}
+  <main id="main">
+    <div class="wrap">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+  {% include "partials/footer.html" %}
+  {%- block scripts %}{% endblock %}
+</body>
+</html>
