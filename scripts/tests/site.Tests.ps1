@@ -90,6 +90,7 @@ Test 'checksums_match_sums_file' {
     Assert-Equal 'a773cfb94d889140b176345155196c1f1495ed75cd717fc0f654100bc6d39feb' $setup.sha256 'setup'
     Assert-Equal '11abe1a9d727daaec9f577d6f34e568d3ed7d476bf64ede294a0ff9a9bdc0426' $portable.sha256 'portable'
     Assert-Equal 4702391 $setup.size 'setup size'
+    Assert-Equal '4.5' $setup.size_mb 'setup size in MB'
     Assert-Equal 'https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.0/light-view-0.2.0-setup.exe' $setup.url 'url'
 }
 
@@ -180,6 +181,46 @@ Test 'site_data_script_writes_json_from_fixture' {
     } finally {
         if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
     }
+}
+
+# --- Task 3: built pages -------------------------------------------------------------
+
+$Repo = 'hyunwook-kim-goodflow/light-view'
+$Base = 'https://lightview.goodflow.dev'
+
+function Page([string]$Body) { "<!doctype html><html><head></head><body>$Body</body></html>" }
+
+Test 'download_button_points_to_github_asset' {
+    $good = @{ 'index.html' = (Page "<a class=`"btn-download`" href=`"https://github.com/$Repo/releases/download/v0.2.0/light-view-0.2.0-setup.exe`" data-download>x</a>") }
+    Assert-Equal 0 @(Test-DownloadLinks $good $Repo).Count 'good page'
+    $bad = @{ 'index.html' = (Page '<a href="https://downloads.example/light-view.exe" data-download>x</a>') }
+    Assert-Equal 1 @(Test-DownloadLinks $bad $Repo).Count 'bad page'
+    $none = @{ 'download/index.html' = (Page '<p>no button</p>') }
+    Assert-Equal 1 @(Test-DownloadLinks $none $Repo -Required @('download/index.html')).Count 'missing button'
+}
+
+Test 'no_external_requests_when_ads_off' {
+    $ok = @{ 'index.html' = (Page "<link rel=`"stylesheet`" href=`"$Base/site.css`"><img src=`"/img/a.png`"><script defer src=`"https://static.cloudflareinsights.com/beacon.min.js`"></script><a href=`"https://github.com/x`">link</a>") }
+    Assert-Equal 0 @(Test-ExternalRequests $ok $Base).Count 'allowed'
+    $font = @{ 'index.html' = (Page '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=X">') }
+    Assert-Equal 1 @(Test-ExternalRequests $font $Base).Count 'font'
+    $script = @{ 'a/index.html' = (Page '<script src="https://cdn.example/x.js"></script><img src="https://img.example/a.png">') }
+    Assert-Equal 2 @(Test-ExternalRequests $script $Base).Count 'script and image'
+}
+
+Test 'privacy_page_contains_privacy_md' {
+    $md = "light-view does not collect, store or send personal data. It has no analytics.`n`n**The one network feature** is the update check."
+    $good = @{ 'en/privacy/index.html' = (Page '<p>light-view does not collect, store or send personal data. It has no analytics.</p><p><strong>The one network feature</strong> is the update check.</p>') }
+    Assert-Equal 0 @(Test-CopiedText $good 'en/privacy/index.html' $md).Count 'copied'
+    $bad = @{ 'en/privacy/index.html' = (Page '<p>We collect nothing.</p>') }
+    Assert-Equal 1 @(Test-CopiedText $bad 'en/privacy/index.html' $md).Count 'not copied'
+}
+
+Test 'code_signing_page_matches_readme_section' {
+    $md = 'Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).'
+    $good = @{ 'code-signing/index.html' = (Page '<p>Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.</p>') }
+    Assert-Equal 0 @(Test-CopiedText $good 'code-signing/index.html' $md).Count 'copied'
+    Assert-Equal 1 @(Test-CopiedText @{} 'code-signing/index.html' $md).Count 'page missing'
 }
 
 Write-Host ''

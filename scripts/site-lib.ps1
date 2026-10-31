@@ -90,6 +90,8 @@ function ConvertTo-SiteReleases($ApiReleases, [scriptblock]$GetSums, [string]$No
                 kind   = $kind
                 name   = $a.name
                 size   = [int64]$a.size
+                # Megabytes with one decimal, invariant culture ('4.5'), for the page text.
+                size_mb = ([math]::Round([double]$a.size / 1MB, 1)).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture)
                 url    = $a.browser_download_url
                 sha256 = $sha
             }
@@ -167,4 +169,97 @@ function Write-Utf8File([string]$Path, [string]$Text) {
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding $false))
+}
+
+# --- Checks over the built site (scripts/site-check.ps1) ------------------------------
+# Each Test-* takes $Pages (hashtable: path under site/public, forward slashes -> HTML) and
+# returns a list of problems (strings); none means the check passed.
+
+# Every index.html under $PublicDir -> hashtable of relative path -> HTML.
+function Get-SitePages([string]$PublicDir) {
+    $pages = @{}
+    $rootPath = (Resolve-Path -LiteralPath $PublicDir).Path.TrimEnd('\', '/')
+    foreach ($f in Get-ChildItem -LiteralPath $rootPath -Recurse -File -Filter '*.html') {
+        $rel = $f.FullName.Substring($rootPath.Length + 1).Replace([char]92, [char]47)
+        $pages[$rel] = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8)
+    }
+    return $pages
+}
+
+# HTML -> text without tags, entities decoded, whitespace collapsed.
+function ConvertTo-PlainText([string]$Html) {
+    $t = $Html -replace '(?s)<(script|style)\b.*?</\1>', ' '
+    # Block tags separate words; inline tags (a, strong, code...) do not.
+    $t = $t -replace '</?(p|div|section|li|ul|ol|h[1-6]|td|th|tr|table|br|pre|details|summary|header|footer|main|nav)[^>]*>', ' '
+    $t = $t -replace '<[^>]+>', ''
+    $t = [Net.WebUtility]::HtmlDecode($t)
+    return ($t -replace '\s+', ' ').Trim()
+}
+
+# Markdown -> its text lines (links reduced to their text, emphasis and list marks dropped).
+function ConvertFrom-MarkdownToLines([string]$Markdown) {
+    $lines = @()
+    foreach ($line in ($Markdown -split "`r?`n")) {
+        $l = $line -replace '\[([^\]]*)\]\([^)]*\)', '$1'
+        $l = $l -replace '\*\*|__|`', ''
+        $l = $l -replace '^\s*(#+|[-*]|\d+\.)\s+', ''
+        $l = ($l -replace '\s+', ' ').Trim()
+        if ($l) { $lines += $l }
+    }
+    return $lines
+}
+
+# Download links (data-download) must be GitHub release assets of $Repo; each page in
+# $Required must have at least one.
+function Test-DownloadLinks($Pages, [string]$Repo, [string[]]$Required = @()) {
+    $problems = @()
+    $prefix = "https://github.com/$Repo/releases/download/"
+    foreach ($path in $Pages.Keys) {
+        $links = [regex]::Matches($Pages[$path], '<a\b[^>]*\bdata-download\b[^>]*>')
+        foreach ($m in $links) {
+            $href = [regex]::Match($m.Value, '\bhref="([^"]*)"').Groups[1].Value
+            if (-not $href.StartsWith($prefix)) { $problems += "${path}: download link $href is not a GitHub release asset of $Repo" }
+        }
+    }
+    foreach ($path in $Required) {
+        if (-not $Pages.ContainsKey($path)) { $problems += "${path}: page missing"; continue }
+        if ($Pages[$path] -notmatch '\bdata-download\b') { $problems += "${path}: no download link" }
+    }
+    return $problems
+}
+
+# Nothing the browser loads by itself (scripts, images, frames, stylesheets, icons) may come
+# from another site, except the Cloudflare Web Analytics beacon (design §8). Plain links
+# (<a href>) and <link rel="canonical|alternate"> are not requests.
+function Test-ExternalRequests($Pages, [string]$BaseUrl, [string[]]$Allowed = @('https://static.cloudflareinsights.com/')) {
+    $problems = @()
+    $base = $BaseUrl.TrimEnd('/') + '/'
+    foreach ($path in $Pages.Keys) {
+        $html = $Pages[$path]
+        $urls = @()
+        foreach ($m in [regex]::Matches($html, '<(script|img|iframe|source|video|audio|embed)\b[^>]*\bsrc="([^"]*)"')) { $urls += $m.Groups[2].Value }
+        foreach ($m in [regex]::Matches($html, '<link\b[^>]*>')) {
+            $rel = [regex]::Match($m.Value, '\brel="([^"]*)"').Groups[1].Value
+            if ($rel -match '^(canonical|alternate)$') { continue }
+            $urls += [regex]::Match($m.Value, '\bhref="([^"]*)"').Groups[1].Value
+        }
+        foreach ($u in $urls) {
+            if ($u -notmatch '^(https?:)?//') { continue }
+            if ($u.StartsWith($base) -or $u -eq $base.TrimEnd('/')) { continue }
+            if (@($Allowed | Where-Object { $u.StartsWith($_) }).Count) { continue }
+            $problems += "${path}: loads $u from another site"
+        }
+    }
+    return $problems
+}
+
+# Every text line of $Markdown appears in page $Path (text copied at build time, such as
+# PRIVACY.md or README's Code signing policy, must not drift or go missing).
+function Test-CopiedText($Pages, [string]$Path, [string]$Markdown) {
+    if (-not $Pages.ContainsKey($Path)) { return @("${Path}: page missing") }
+    $text = ConvertTo-PlainText $Pages[$Path]
+    foreach ($line in (ConvertFrom-MarkdownToLines $Markdown)) {
+        if (-not $text.Contains($line)) { return @("${Path}: missing text '$line'") }
+    }
+    return @()
 }

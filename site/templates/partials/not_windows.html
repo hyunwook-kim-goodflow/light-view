@@ -1,0 +1,9 @@
+{#- Shows the "this is a Windows program" line on phones and Macs. The links stay the same;
+    without this script the page is complete. -#}
+<script>
+  (function () {
+    if (!/Windows/.test(navigator.userAgent)) {
+      document.querySelectorAll("[data-not-windows]").forEach(function (el) { el.hidden = false; });
+    }
+  })();
+</script>

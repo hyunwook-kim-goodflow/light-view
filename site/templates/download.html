@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{%- block content %}
+{%- set data = load_data(path="data/releases.json") %}
+{%- set rel = [x for x in data.releases if x.version == data.latest][0] %}
+{%- set setup = [x for x in rel.assets if x.kind == "setup"][0] %}
+{%- set notes_url = get_url(path="@/releases/_index.md", lang=lang) %}
+<section class="hero">
+  <h1>{{ section.title }} <span class="muted version">{{ rel.version }}</span></h1>
+  <p class="lede">{{ section.extra.intro }}</p>
+  <p class="muted">{{ rel.date }} · <a href="{{ notes_url }}">{{ trans(key="nav_releases", lang=lang) }}</a></p>
+  {% include "partials/download_button.html" %}
+</section>
+
+<section class="prose">
+{{ section.content | safe }}
+</section>
+
+<section aria-labelledby="checksums">
+  <h2 id="checksums">{% if lang == "en" %}Check the download (SHA-256){% else %}받은 파일 확인 (SHA-256){% endif %}</h2>
+  {% include "partials/checksums.html" %}
+  <p>{% if lang == "en" %}In PowerShell, the <code>Hash</code> must equal the value above (case does not matter). If it differs, do not run the file; download it again.{% else %}PowerShell에서 아래 명령의 <code>Hash</code>가 위 값과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.{% endif %}</p>
+  <pre><code>Get-FileHash .\{{ setup.name }} -Algorithm SHA256</code></pre>
+</section>
+
+<section aria-labelledby="code-signing">
+  <h2 id="code-signing">Code signing policy</h2>
+  {%- if rel.signed %}
+  <p>{% if lang == "en" %}This release is signed. In the file's Properties → Digital Signatures, the signer is "SignPath Foundation".{% else %}이 릴리스는 서명돼 있어요. 파일 속성 → 디지털 서명에서 서명자가 "SignPath Foundation"인지 확인할 수 있어요.{% endif %}</p>
+  {%- else %}
+  <p>{% if lang == "en" %}Code signing has been applied for with SignPath Foundation and starts with the 1.0 release. Until then releases are unsigned and come with SHA-256 checksums.{% else %}SignPath Foundation에 코드 서명을 신청 중이고, 1.0 릴리스부터 서명해요. 그전 릴리스는 서명 없이 SHA-256 체크섬만 있어요.{% endif %}</p>
+  {%- endif %}
+  <p>Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>. <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+</section>
+
+<section aria-labelledby="older">
+  <h2 id="older">{% if lang == "en" %}Older versions{% else %}이전 버전{% endif %}</h2>
+  <p><a href="{{ notes_url }}">{{ trans(key="nav_releases", lang=lang) }}</a> · <a href="https://github.com/{{ config.extra.repo }}/releases">GitHub Releases</a></p>
+</section>
+{%- endblock %}
+{%- block scripts %}{% include "partials/not_windows.html" %}{% endblock %}

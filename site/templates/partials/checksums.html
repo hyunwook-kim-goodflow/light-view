@@ -1,0 +1,19 @@
+{#- Files of release `rel` with size and SHA-256 (from that release's SHA256SUMS.txt). -#}
+{%- set sums = [x for x in rel.assets if x.kind == "sums"][0] -%}
+<div class="table-wrap">
+  <table class="checksums">
+    <thead>
+      <tr><th>{% if lang == "en" %}File{% else %}파일{% endif %}</th><th>{% if lang == "en" %}Size{% else %}크기{% endif %}</th><th>SHA-256</th></tr>
+    </thead>
+    <tbody>
+      {%- for a in rel.assets %}{% if a.kind != "sums" %}
+      <tr>
+        <td><a href="{{ a.url }}" data-download>{{ a.name }}</a></td>
+        <td>{{ a.size_mb }} MB</td>
+        <td><code class="hash">{{ a.sha256 }}</code></td>
+      </tr>
+      {%- endif %}{% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="muted">{% if lang == "en" %}The same values as <a href="{{ sums.url }}">SHA256SUMS.txt</a> in the GitHub release.{% else %}GitHub 릴리스의 <a href="{{ sums.url }}">SHA256SUMS.txt</a>와 같은 값이에요.{% endif %}</p>

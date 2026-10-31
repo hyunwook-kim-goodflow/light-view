@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{%- block content %}
+<h1>{{ section.title }}</h1>
+<section aria-labelledby="program">
+  <h2 id="program">{{ section.extra.program_title }}</h2>
+  <div class="prose">
+  {#- PRIVACY.md (the same text the installer shows), copied at build time. #}
+  {{ load_data(path="data/privacy." ~ lang ~ ".md", format="plain") | markdown | safe }}
+  </div>
+</section>
+<section aria-labelledby="site">
+  <h2 id="site">{{ section.extra.site_title }}</h2>
+  <div class="prose">
+  {{ section.content | safe }}
+  </div>
+</section>
+{%- endblock %}

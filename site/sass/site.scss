@@ -142,7 +142,7 @@ h3 { font-size: 1.15rem; margin: 1.5rem 0 .5rem; }
 p, ul, ol { margin: 0 0 1rem; }
 
 .muted { color: var(--ink2); }
-.version { font-family: var(--serif); }
+.version { font-variant-numeric: tabular-nums; }
 
 section + section { margin-top: 3rem; }
 
@@ -228,3 +228,48 @@ th { font-weight: 600; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+
+// Page sections
+.hero {
+  padding: 1.5rem 0 1rem;
+}
+.lede { font-size: 1.15rem; max-width: 44rem; color: var(--ink2); }
+.download { margin-top: 1.5rem; }
+.download-meta { margin: .6rem 0 0; font-size: .95rem; }
+
+.features {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 1rem;
+  h3 { margin: 0 0 .4rem; }
+  p { margin: 0; color: var(--ink2); }
+}
+
+.checks {
+  padding-left: 1.2rem;
+  li { margin-bottom: .5rem; max-width: 44rem; }
+}
+
+details {
+  border-bottom: 1px solid var(--hairline);
+  padding: .25rem 0;
+  max-width: 44rem;
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+  p { color: var(--ink2); }
+}
+
+.prose {
+  max-width: 48rem;
+  table { margin: 0 0 1rem; }
+}
+
+code.hash { word-break: break-all; font-size: .82em; }

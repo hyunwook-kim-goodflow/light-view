@@ -1,0 +1,18 @@
+{#- The one highlighter button on a screen: the latest installer, straight from GitHub
+    Releases (no intermediate page). Needs `rel` (a release from data/releases.json). -#}
+{%- set setup = [x for x in rel.assets if x.kind == "setup"][0] -%}
+{%- set portable = [x for x in rel.assets if x.kind == "portable"][0] -%}
+<div class="download">
+  <a class="btn-download" href="{{ setup.url }}" data-download>
+    <span>{{ trans(key="download", lang=lang) }}</span>
+    <span class="btn-sub">{{ trans(key="setup_label", lang=lang) }} <span class="version">{{ rel.version }}</span> · {{ setup.size_mb }} MB</span>
+  </a>
+  <p class="muted download-meta">{{ trans(key="from_github", lang=lang) }} · {{ trans(key="requirements", lang=lang) }}</p>
+  <p class="muted download-meta" data-not-windows hidden>{{ trans(key="not_windows", lang=lang) }}</p>
+  <div class="download-links">
+    <a href="{{ portable.url }}" data-download>{{ trans(key="portable_label", lang=lang) }}</a>
+    <a href="{{ get_url(path='@/download/_index.md', lang=lang) }}#checksums">{{ trans(key="checksums", lang=lang) }}</a>
+    <a href="{{ get_url(path='@/releases/_index.md', lang=lang) }}">{{ trans(key="all_versions", lang=lang) }}</a>
+    <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a>
+  </div>
+</div>

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{%- block content %}
+<h1>Code signing policy</h1>
+<p class="lede">{{ section.extra.intro }}</p>
+<section class="prose">
+{#- README's "Code signing policy" section, copied at build time (scripts/site-data.ps1). #}
+{{ load_data(path="data/code-signing.md", format="plain") | markdown | safe }}
+</section>
+{%- endblock %}
