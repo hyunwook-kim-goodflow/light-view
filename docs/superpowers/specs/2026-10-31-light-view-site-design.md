@@ -235,7 +235,7 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 | 무엇 | 언제 |
 |---|---|
 | ~~호스팅 선택~~ → Cloudflare Pages로 정함(2026-10-31). Cloudflare 계정은 사용자가 만든다 | 배포 전 |
-| 도메인: `goodflow.dev` 하위 주소로 정함(2026-10-31). 이름 확정(`lightview.goodflow.dev` 제안), DNS에 CNAME 추가 | 배포 전 |
+| 도메인: `goodflow.dev` 하위 주소로 정함(2026-10-31). 이름은 `lightview.goodflow.dev`로 확정. DNS에 CNAME 추가 | 배포 전 |
 | Cloudflare 계정·API 토큰을 저장소 시크릿에 넣기(또는 GitHub Pages 켜기) | 배포 전 |
 | 사이트 공개(첫 배포) 승인 | 배포 때 |
 | 분석: Cloudflare Web Analytics로 정함. 대시보드에서 사이트를 더하고 토큰을 받는다 | 배포 전 |
@@ -249,11 +249,11 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 
 - 2026-10-31: 랜딩·다운로드·릴리스 노트 사이트, 광고 자리 포함, goodflow 형광펜 디자인, 한국어+영어. (작업 지시)
 - 2026-10-31: 호스팅은 Cloudflare Pages + 사용자 도메인. 빌드는 이 저장소의 GitHub Actions, 배포는 `wrangler pages deploy`.
-- 2026-10-31: 도메인은 `goodflow.dev`의 하위 주소. 이름은 `lightview.goodflow.dev`를 제안(확정 대기). `.dev`는 브라우저가 HTTPS만 허용하는 도메인이라 Cloudflare 인증서로 충분하다. `goodflow.dev`의 DNS가 Cloudflare에 없어도 하위 주소는 `<프로젝트>.pages.dev`로의 CNAME 하나로 Pages 사용자 도메인에 붙일 수 있다. 광고를 켤 때 AdSense에는 `goodflow.dev`를 사이트로 등록해 승인받는다(하위 주소는 그 아래에서 같은 게시자 코드).
+- 2026-10-31: 도메인은 `goodflow.dev`의 하위 주소. 이름은 `lightview.goodflow.dev`(확정). `.dev`는 브라우저가 HTTPS만 허용하는 도메인이라 Cloudflare 인증서로 충분하다. `goodflow.dev`의 DNS가 Cloudflare에 없어도 하위 주소는 `<프로젝트>.pages.dev`로의 CNAME 하나로 Pages 사용자 도메인에 붙일 수 있다. 광고를 켤 때 AdSense에는 `goodflow.dev`를 사이트로 등록해 승인받는다(하위 주소는 그 아래에서 같은 게시자 코드).
 - 2026-10-31: 분석은 Cloudflare Web Analytics(쿠키 없음).
 - 2026-10-31: 후원 링크 하나(GitHub Sponsors), 바닥글·FAQ에만.
 - 2026-10-31: 광고는 서명 승인(1.0.0) 뒤에 켠다. 켤 때 AdSense 계정·심사, Privacy & messaging 동의 메시지(인증 CMP), 소재 차단, 사이트 개인정보 문구(한국 맞춤형 광고 고지 포함) 확인을 추천대로 한다.
-- (대기) 하위 주소 이름 확정(`lightview.goodflow.dev` 제안).
+- 2026-10-31: 하위 주소는 `lightview.goodflow.dev`.
 
 ## 14. 빌더 재량
 

@@ -71,11 +71,9 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 **Files:** 없음(설계서 §13에 기록).
 
 - [x] 호스팅: Cloudflare Pages(2026-10-31 사용자 결정). Task 8 Step 3은 Cloudflare 경로만 만든다.
-- [x] 도메인: `goodflow.dev` 하위 주소(2026-10-31 사용자 결정). `config.toml`의 `base_url`은 `https://lightview.goodflow.dev`로 두고, 이름이 바뀌면 이 한 줄과 FAQ·README의 공식 주소만 고친다.
+- [x] 도메인: `lightview.goodflow.dev`(2026-10-31 사용자 결정). `config.toml`의 `base_url = "https://lightview.goodflow.dev"`, FAQ·README의 공식 주소도 이것.
 - [x] 분석: Cloudflare Web Analytics. 후원: GitHub Sponsors 링크 하나. 광고: 서명 승인 뒤(Task 10). (2026-10-31 사용자 결정)
-- [ ] **Step 1:** 사용자에게 묻는다: 하위 주소 이름 확정. 답을 설계서 §13에 날짜와 함께 적는다.
-- [ ] **Step 2:** 결정이 없어도 Task 1–7은 진행할 수 있다(배포 단계만 비활성). Task 8은 결정이 있어야 한다.
-- [ ] **Step 3: Commit** — `docs: site decisions`
+- 결정은 모두 받았다(설계서 §13). Task 1부터 시작한다.
 
 ### Task 1: Zola 골격, 토큰, 머리글·바닥글
 
