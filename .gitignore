@@ -9,3 +9,4 @@ testdata/private/
 /site/public/
 /site/data/
 /site/content/releases/[0-9]*.md
+/site/static/ads.txt

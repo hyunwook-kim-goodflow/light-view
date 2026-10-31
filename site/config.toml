@@ -38,6 +38,14 @@ sponsor_url = ""
 enabled = false
 client = ""
 
+# Manual ad unit IDs per slot (no Auto ads). Slots: home (after the features), releases
+# (after the list), release (after the notes), faq (at the end).
+[extra.ads.slots]
+home = ""
+releases = ""
+release = ""
+faq = ""
+
 # Cloudflare Web Analytics token; empty = no analytics script.
 [extra.analytics]
 token = ""

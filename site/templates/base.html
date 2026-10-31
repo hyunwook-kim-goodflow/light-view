@@ -28,6 +28,9 @@
   <meta property="og:image" content="{{ get_url(path='img/og.png') }}">
   {%- if current %}<meta property="og:url" content="{{ current.permalink }}">{% endif %}
   {%- block extra_head %}{% endblock %}
+  {%- if config.extra.ads.enabled %}
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ config.extra.ads.client }}" crossorigin="anonymous"></script>
+  {%- endif %}
   {%- if config.extra.analytics.token %}
   <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ config.extra.analytics.token }}"}'></script>
   {%- endif %}

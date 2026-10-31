@@ -11,7 +11,23 @@
 <section aria-labelledby="site">
   <h2 id="site">{{ section.extra.site_title }}</h2>
   <div class="prose">
+  {%- if config.extra.ads.enabled %}
+  <p>{% if lang == "en" %}This website sets no cookies of its own; the ads below use Google's.{% else %}이 웹사이트는 자체 쿠키를 쓰지 않아요. 아래 광고만 Google의 쿠키를 써요.{% endif %}</p>
+  {%- else %}
+  <p>{% if lang == "en" %}This website uses no cookies and loads no scripts from other sites except the analytics script below.{% else %}이 웹사이트는 쿠키를 쓰지 않고, 아래 통계 스크립트 말고는 다른 곳의 스크립트를 불러오지 않아요.{% endif %}</p>
+  {%- endif %}
   {{ section.content | safe }}
+  {%- if config.extra.ads.enabled %}
+  {%- if lang == "en" %}
+  <h3>Advertising</h3>
+  <p>Some pages show Google AdSense ads, marked "Advertisement". Third-party vendors, including Google, use cookies to serve ads based on your earlier visits to this and other websites. Google's advertising cookies let Google and its partners serve ads based on your visits here and elsewhere on the internet. You can turn off personalised advertising in <a href="https://www.google.com/settings/ads">Google's Ads Settings</a> (or, for some other vendors, at <a href="https://www.aboutads.info/choices/">aboutads.info</a>). Visitors in the EEA, the UK and Switzerland are asked for consent first. No other ad networks are used.</p>
+  <p>Ads are never placed on the download page. If an ad looks like a download button or leads somewhere harmful, please <a href="https://github.com/{{ config.extra.repo }}/issues/new?title=Bad%20ad%20on%20the%20website">tell us</a>.</p>
+  {%- else %}
+  <h3>광고</h3>
+  <p>일부 페이지에 "광고" 표시와 함께 Google AdSense 광고가 나와요. Google을 비롯한 제3자 광고 업체는 쿠키를 써서 이 사이트와 다른 사이트에 대한 이전 방문을 바탕으로 광고를 보여 줘요. Google의 광고 쿠키 덕분에 Google과 파트너는 이 사이트와 인터넷의 다른 사이트 방문을 바탕으로 광고를 보여 줄 수 있어요. 맞춤 광고는 <a href="https://www.google.com/settings/ads">Google 광고 설정</a>에서 끌 수 있어요(일부 다른 업체는 <a href="https://www.aboutads.info/choices/">aboutads.info</a>). 유럽 경제 지역·영국·스위스 방문자에게는 먼저 동의를 물어요. 다른 광고 네트워크는 쓰지 않아요.</p>
+  <p>내려받기 페이지에는 광고를 두지 않아요. 내려받기 버튼처럼 보이거나 해로운 곳으로 가는 광고가 보이면 <a href="https://github.com/{{ config.extra.repo }}/issues/new?title=Bad%20ad%20on%20the%20website">알려 주세요</a>.</p>
+  {%- endif %}
+  {%- endif %}
   </div>
 </section>
 {%- endblock %}

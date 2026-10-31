@@ -16,7 +16,9 @@
     2. Writes site/data/releases.json (newest version first; see ConvertTo-SiteReleases).
     3. Writes one page per release and language into site/content/releases
        (<version>.md, <version>.en.md; git-ignored) from docs/releases/<version>.md.
-    4. Writes site/data/privacy.ko.md and privacy.en.md (PRIVACY.md by language) and
+    4. Writes site/static/ads.txt when site/config.toml turns ads on with a publisher ID,
+       and removes it otherwise (git-ignored; design §9).
+    5. Writes site/data/privacy.ko.md and privacy.en.md (PRIVACY.md by language) and
        site/data/code-signing.md (README's "Code signing policy" section).
 
     -FromFile and -SumsDir read a saved API response and SHA256SUMS-<version>.txt files
@@ -68,6 +70,10 @@ foreach ($r in @($site.releases)) {
 }
 Write-Utf8File (Join-Path $DataDir 'releases.json') ($site | ConvertTo-Json -Depth 6)
 if (-not $FromFile) { Write-ReleasePages -Site $site -ContentDir (Join-Path $root 'site/content/releases') }
+
+$adsTxt = Get-AdsTxt ([IO.File]::ReadAllText((Join-Path $root 'site/config.toml'), [Text.Encoding]::UTF8))
+$adsPath = Join-Path $root 'site/static/ads.txt'
+if ($adsTxt) { Write-Utf8File $adsPath ($adsTxt + "`n") } elseif (Test-Path -LiteralPath $adsPath) { Remove-Item -LiteralPath $adsPath }
 
 $privacy = Split-PrivacyPolicy (Get-Content -Raw -Encoding UTF8 (Join-Path $root 'PRIVACY.md'))
 Write-Utf8File (Join-Path $DataDir 'privacy.ko.md') $privacy.ko

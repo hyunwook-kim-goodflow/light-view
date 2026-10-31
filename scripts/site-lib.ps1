@@ -190,7 +190,7 @@ function Get-SitePages([string]$PublicDir) {
 function ConvertTo-PlainText([string]$Html) {
     $t = $Html -replace '(?s)<(script|style)\b.*?</\1>', ' '
     # Block tags separate words; inline tags (a, strong, code...) do not.
-    $t = $t -replace '</?(p|div|section|li|ul|ol|h[1-6]|td|th|tr|table|br|pre|details|summary|header|footer|main|nav)[^>]*>', ' '
+    $t = $t -replace '</?(p|div|section|li|ul|ol|h[1-6]|td|th|tr|table|br|pre|details|summary|header|footer|main|nav)\b[^>]*>', ' '
     $t = $t -replace '<[^>]+>', ''
     $t = [Net.WebUtility]::HtmlDecode($t)
     return ($t -replace '\s+', ' ').Trim()
@@ -360,3 +360,51 @@ function Get-ReleaseNotesBody([string]$NotesDir, [string]$Version) {
     if ($notes.front['version'] -ne $Version) { throw "docs/releases/$Version.md says version '$($notes.front['version'])', expected $Version" }
     return "## 한국어`n`n$($notes.ko)`n`n## English`n`n$($notes.en)"
 }
+
+# --- Ads (design §9) -------------------------------------------------------------------
+
+# Pages that never carry an ad: the download page, the Code signing policy, privacy, 404.
+$script:AdFreePages = '^(en/)?(download|code-signing|privacy)/index\.html$|^404\.html$'
+
+# Ad slots (data-site-ad) must stay off ad-free pages, one per page, never in the same
+# <section> chunk as a download link (so a headed section always stands between them)
+# and never next to the highlighter (the download button or a <mark>). A chunk runs from
+# one <section to the next, so a slot placed right after a section counts with it.
+function Test-AdSlots($Pages) {
+    $problems = @()
+    foreach ($path in $Pages.Keys) {
+        $html = $Pages[$path]
+        $count = [regex]::Matches($html, '\bdata-site-ad=').Count
+        if ($count -eq 0) { continue }
+        if ($path -match $script:AdFreePages) { $problems += "${path}: ad slot on a page that must have none"; continue }
+        if ($count -gt 1) { $problems += "${path}: $count ad slots (one per page)" }
+        foreach ($chunk in ($html -split '(?=<section\b)')) {
+            if ($chunk -notmatch '\bdata-site-ad=') { continue }
+            if ($chunk -match '\bdata-download\b') { $problems += "${path}: ad slot next to a download link (no section between them)" }
+            elseif ($chunk -match 'class="[^"]*\bbtn-download\b|<mark\b') { $problems += "${path}: highlighter next to an ad slot" }
+        }
+    }
+    return $problems
+}
+
+# With ads off, no page has a slot or AdSense code.
+function Test-NoAds($Pages) {
+    $problems = @()
+    foreach ($path in $Pages.Keys) {
+        if ($Pages[$path] -match 'data-site-ad=|adsbygoogle|googlesyndication') { $problems += "${path}: ad code while ads are off" }
+    }
+    return $problems
+}
+
+# The ads.txt line for site/config.toml's [extra.ads], or $null when ads are off or no
+# publisher ID is set. f08c47fec0942fa0 is Google's certification authority ID.
+function Get-AdsTxt([string]$ConfigText) {
+    $t = $ConfigText -replace "`r`n", "`n"
+    if ($t -notmatch '(?s)\[extra\.ads\]\n(.*?)(\n\[|\z)') { return $null }
+    $block = $Matches[1]
+    if ($block -notmatch '(?m)^enabled\s*=\s*true\s*$') { return $null }
+    if ($block -notmatch '(?m)^client\s*=\s*"ca-(pub-\d+)"') { return $null }
+    return "google.com, $($Matches[1]), DIRECT, f08c47fec0942fa0"
+}
+
+function Test-AdsEnabled([string]$ConfigText) { return [bool](Get-AdsTxt $ConfigText) }

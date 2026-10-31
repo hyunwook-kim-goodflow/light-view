@@ -223,6 +223,10 @@ Test 'code_signing_page_matches_readme_section' {
     Assert-Equal 1 @(Test-CopiedText @{} 'code-signing/index.html' $md).Count 'page missing'
 }
 
+Test 'plain_text_keeps_block_boundaries' {
+    Assert-Equal 'one two three.' (ConvertTo-PlainText '<p>one</p><p>two <a href="x">three</a>.</p>')
+}
+
 # --- Task 4: release notes pages ------------------------------------------------------
 
 Test 'notes_split_by_language' {
@@ -304,6 +308,49 @@ Test 'repository_release_notes_are_valid' {
     foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.md' | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.md$' }) {
         $null = Get-ReleaseNotesBody -NotesDir $dir -Version ($f.BaseName)
     }
+}
+
+# --- Task 7: ad slots -----------------------------------------------------------------
+
+$Ad = '<aside class="ad-slot" data-site-ad="home"><span class="ad-label">광고</span><ins class="adsbygoogle"></ins></aside>'
+$Hero = '<section class="hero"><h1>x</h1><a class="btn-download" href="https://github.com/a" data-download>Download</a></section>'
+$Features = '<section><h2>Features</h2><p>text</p></section>'
+
+Test 'ad_slot_never_on_download_page' {
+    $pages = @{ 'download/index.html' = (Page "$Hero$Features$Ad"); 'en/privacy/index.html' = (Page "$Features$Ad") }
+    Assert-Equal 2 @(Test-AdSlots $pages).Count 'download and privacy'
+}
+
+Test 'ad_slot_not_in_download_section' {
+    $next = @{ 'index.html' = (Page "$Hero$Ad$Features") }
+    Assert-Equal 1 @(Test-AdSlots $next).Count 'ad right after the download section'
+    $apart = @{ 'index.html' = (Page "$Hero$Features$Ad<section><h2>FAQ</h2></section>") }
+    Assert-Equal 0 @(Test-AdSlots $apart).Count 'a headed section in between'
+}
+
+Test 'one_ad_slot_per_page' {
+    $two = @{ 'faq/index.html' = (Page "$Features$Ad$Features$Ad") }
+    Assert-Equal 1 @(Test-AdSlots $two).Count 'two slots'
+}
+
+Test 'no_highlighter_near_ad' {
+    $marked = @{ 'releases/index.html' = (Page "$Features<section><h2>y</h2><p><mark>free</mark></p>$Ad</section>") }
+    Assert-Equal 1 @(Test-AdSlots $marked).Count 'mark next to the ad'
+}
+
+Test 'ads_off_leaves_no_trace' {
+    $clean = @{ 'index.html' = (Page $Features) }
+    Assert-Equal 0 @(Test-NoAds $clean).Count 'clean'
+    $script = @{ 'index.html' = (Page '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>') }
+    Assert-Equal 1 @(Test-NoAds $script).Count 'adsense script'
+    $slot = @{ 'faq/index.html' = (Page $Ad) }
+    Assert-Equal 1 @(Test-NoAds $slot).Count 'slot'
+}
+
+Test 'ads_txt_follows_config' {
+    Assert-Equal 'google.com, pub-1234567890123456, DIRECT, f08c47fec0942fa0' (Get-AdsTxt "[extra.ads]`nenabled = true`nclient = `"ca-pub-1234567890123456`"`n")
+    Assert-Equal $null (Get-AdsTxt "[extra.ads]`nenabled = false`nclient = `"ca-pub-1234567890123456`"`n")
+    Assert-Equal $null (Get-AdsTxt "[extra.ads]`nenabled = true`nclient = `"`"`n")
 }
 
 Write-Host ''
