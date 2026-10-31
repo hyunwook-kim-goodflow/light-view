@@ -31,8 +31,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'site-lib.ps1')
 
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $PublicDir) { $PublicDir = Join-Path $root 'site\public' }
-if (-not $DataDir) { $DataDir = Join-Path $root 'site\data' }
+if (-not $PublicDir) { $PublicDir = Join-Path $root 'site/public' }
+if (-not $DataDir) { $DataDir = Join-Path $root 'site/data' }
 
 function Read-Data([string]$Name) { [IO.File]::ReadAllText((Join-Path $DataDir $Name), [Text.Encoding]::UTF8) }
 

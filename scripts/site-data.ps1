@@ -35,8 +35,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'site-lib.ps1')
 
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $DataDir) { $DataDir = Join-Path $root 'site\data' }
-$notesDir = Join-Path $root 'docs\releases'
+if (-not $DataDir) { $DataDir = Join-Path $root 'site/data' }
+$notesDir = Join-Path $root 'docs/releases'
 
 if ($FromFile) {
     $api = Get-Content -Raw -Encoding UTF8 $FromFile | ConvertFrom-Json

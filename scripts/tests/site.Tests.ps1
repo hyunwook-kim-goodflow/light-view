@@ -8,9 +8,9 @@
     Prints one line per test and exits 1 if any failed.
 #>
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot '..\site-lib.ps1')
+. (Join-Path $PSScriptRoot '../site-lib.ps1')
 
-$Fixtures = Join-Path $PSScriptRoot '..\..\testdata\site'
+$Fixtures = Join-Path $PSScriptRoot '../../testdata/site'
 $script:Passed = 0
 $script:Failed = 0
 
@@ -151,14 +151,14 @@ Test 'release_without_notes_has_no_notes_file' {
 }
 
 Test 'privacy_md_splits_by_language' {
-    $parts = Split-PrivacyPolicy (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot '..\..\PRIVACY.md'))
+    $parts = Split-PrivacyPolicy (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot '../../PRIVACY.md'))
     Assert-True ($parts.en -like '*does not collect, store or send personal data*') 'english part'
     Assert-True ($parts.ko -like '*개인정보를 모으거나 저장하거나 보내지 않아요*') 'korean part'
     Assert-True ($parts.en -notlike '*개인정보를*') 'english part has no korean'
 }
 
 Test 'code_signing_section_is_extracted' {
-    $text = Get-ReadmeSection (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot '..\..\README.md')) 'Code signing policy'
+    $text = Get-ReadmeSection (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot '../../README.md')) 'Code signing policy'
     Assert-True ($text -like '*Free code signing provided by*SignPath Foundation*') 'signpath sentence'
     Assert-True ($text -notlike '*## HEVC*') 'stops at the next section'
 }
@@ -170,7 +170,7 @@ Test 'missing_readme_section_fails' {
 Test 'site_data_script_writes_json_from_fixture' {
     $dir = Join-Path ([IO.Path]::GetTempPath()) ("lv-site-test-" + [guid]::NewGuid())
     try {
-        $script = Join-Path $PSScriptRoot '..\site-data.ps1'
+        $script = Join-Path $PSScriptRoot '../site-data.ps1'
         # The same PowerShell that runs the tests (powershell.exe locally, pwsh on CI).
         $null = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $script -FromFile (Join-Path $Fixtures 'releases-api.json') -DataDir $dir
         Assert-Equal 0 $LASTEXITCODE 'exit code'
@@ -304,7 +304,7 @@ Test 'release_notes_version_must_match_tag' {
 }
 
 Test 'repository_release_notes_are_valid' {
-    $dir = Join-Path $PSScriptRoot '..\..\docs\releases'
+    $dir = Join-Path $PSScriptRoot '../../docs/releases'
     foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.md' | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.md$' }) {
         $null = Get-ReleaseNotesBody -NotesDir $dir -Version ($f.BaseName)
     }
