@@ -102,7 +102,7 @@ README와 설계서에서 사용자에게 의미 있는 것만, 각 한 줄 + �
 - 체크섬은 `SHA256SUMS.txt`에 적힌 이름과 자산 이름이 모두 맞을 때만 표시하고, 하나라도 없으면 빌드 실패.
 - 사이트의 체크섬은 편의 표시다. 문구로 "GitHub 릴리스의 SHA256SUMS.txt와 같아요"라고 원본을 가리킨다.
 
-## 5. 호스팅 **[설계자 판단 — 사용자 결정 필요]**
+## 5. 호스팅 **[사용자 결정: Cloudflare Pages, 2026-10-31]**
 
 | | GitHub Pages + 사용자 도메인 | Cloudflare Pages(정적) + 사용자 도메인 **(추천)** |
 |---|---|---|
@@ -234,8 +234,8 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 
 | 무엇 | 언제 |
 |---|---|
-| 호스팅 선택(Cloudflare Pages 추천 / GitHub Pages) | 계획 Task 1 전 |
-| 도메인: goodflow 하위 주소 또는 새 도메인 구입, DNS 설정 | 배포 전 |
+| ~~호스팅 선택~~ → Cloudflare Pages로 정함(2026-10-31). Cloudflare 계정은 사용자가 만든다 | 배포 전 |
+| 도메인: `goodflow.dev` 하위 주소로 정함(2026-10-31). 이름 확정(`lightview.goodflow.dev` 제안), DNS에 CNAME 추가 | 배포 전 |
 | Cloudflare 계정·API 토큰을 저장소 시크릿에 넣기(또는 GitHub Pages 켜기) | 배포 전 |
 | 사이트 공개(첫 배포) 승인 | 배포 때 |
 | 분석 쓸지(없음 / 쿠키 없는 Cloudflare Web Analytics) | 배포 전 |
@@ -248,7 +248,9 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 ## 13. 사용자 결정 기록
 
 - 2026-10-31: 랜딩·다운로드·릴리스 노트 사이트, 광고 자리 포함, goodflow 형광펜 디자인, 한국어+영어. (작업 지시)
-- (대기) 호스팅, 도메인, 분석, 후원, 광고 켜는 시점.
+- 2026-10-31: 호스팅은 Cloudflare Pages + 사용자 도메인. 빌드는 이 저장소의 GitHub Actions, 배포는 `wrangler pages deploy`.
+- 2026-10-31: 도메인은 `goodflow.dev`의 하위 주소. 이름은 `lightview.goodflow.dev`를 제안(확정 대기). `.dev`는 브라우저가 HTTPS만 허용하는 도메인이라 Cloudflare 인증서로 충분하다. `goodflow.dev`의 DNS가 Cloudflare에 없어도 하위 주소는 `<프로젝트>.pages.dev`로의 CNAME 하나로 Pages 사용자 도메인에 붙일 수 있다. 광고를 켤 때 AdSense에는 `goodflow.dev`를 사이트로 등록해 승인받는다(하위 주소는 그 아래에서 같은 게시자 코드).
+- (대기) 하위 주소 이름 확정, 분석, 후원, 광고 켜는 시점.
 
 ## 14. 빌더 재량
 

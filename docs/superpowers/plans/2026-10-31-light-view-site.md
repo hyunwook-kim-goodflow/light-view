@@ -70,7 +70,9 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 **Files:** 없음(설계서 §13에 기록).
 
-- [ ] **Step 1:** 사용자에게 묻는다: 호스팅(Cloudflare Pages 추천 / GitHub Pages), 도메인(goodflow 하위 주소 / 새 도메인), 분석(없음 추천 / Cloudflare Web Analytics), 후원 링크(넣음/안 넣음), 광고 켜는 시점(서명 승인 뒤 추천). 답을 설계서 §13에 날짜와 함께 적는다.
+- [x] 호스팅: Cloudflare Pages(2026-10-31 사용자 결정). Task 8 Step 3은 Cloudflare 경로만 만든다.
+- [x] 도메인: `goodflow.dev` 하위 주소(2026-10-31 사용자 결정). `config.toml`의 `base_url`은 `https://lightview.goodflow.dev`로 두고, 이름이 바뀌면 이 한 줄과 FAQ·README의 공식 주소만 고친다.
+- [ ] **Step 1:** 사용자에게 묻는다: 하위 주소 이름 확정, 분석(없음 추천 / Cloudflare Web Analytics), 후원 링크(넣음/안 넣음), 광고 켜는 시점(서명 승인 뒤 추천). 답을 설계서 §13에 날짜와 함께 적는다.
 - [ ] **Step 2:** 결정이 없어도 Task 1–7은 진행할 수 있다(배포 단계만 비활성). Task 8은 결정이 있어야 한다.
 - [ ] **Step 3: Commit** — `docs: site decisions`
 
@@ -154,7 +156,7 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 - [ ] **Step 1:** 트리거: `push`(main, 경로 `site/**`, `docs/releases/**`, `PRIVACY.md`, `README.md`, `scripts/site-*.ps1`), `release: types: [published]`, `workflow_dispatch`. 권한 `contents: read`. 동시 실행 그룹 `site`.
 - [ ] **Step 2: build 작업** — 체크아웃(`persist-credentials: false`), Zola 바이너리를 고정 버전·SHA-256 검사로 받기, `pwsh scripts/site-data.ps1`(`GITHUB_TOKEN` 읽기 전용), `zola build`, `pwsh scripts/site-check.ps1`, Pester, `site/public`을 아티팩트로.
-- [ ] **Step 3: deploy 작업(Task 0 결정에 따라 하나)** — `needs: build`, `environment: site`, 시크릿이 없으면 경고만 남기고 건너뜀. Cloudflare: `cloudflare/wrangler-action`(SHA 고정) `pages deploy site/public --project-name …`, 시크릿 `CLOUDFLARE_API_TOKEN`, 변수 `CLOUDFLARE_ACCOUNT_ID`. GitHub Pages: `actions/upload-pages-artifact` + `actions/deploy-pages`(권한 `pages: write`, `id-token: write`는 이 작업에만).
+- [ ] **Step 3: deploy 작업(Cloudflare Pages)** — `needs: build`, `environment: site`, 시크릿이 없으면 경고만 남기고 건너뜀. `cloudflare/wrangler-action`(SHA 고정) `pages deploy site/public --project-name light-view`(프로젝트 이름은 사용자가 만든 것으로), 시크릿 `CLOUDFLARE_API_TOKEN`(Pages 편집 권한만), 변수 `CLOUDFLARE_ACCOUNT_ID`. Cloudflare의 Git 연동 빌드는 쓰지 않는다(데이터 받기·검사가 Actions에 있으므로 직접 업로드).
 - [ ] **Step 4: 확인** — 이 브랜치에서는 `workflow_dispatch`를 돌리지 않는다(푸시 금지). `actionlint`로 문법만. PR에서 build 작업이 도는지는 사용자가 푸시를 허락한 뒤.
 - [ ] **Step 5: Commit** — `ci: build and check the site; deploy only when configured`
 
