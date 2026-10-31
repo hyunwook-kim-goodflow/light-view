@@ -440,6 +440,19 @@ light-view의 코드는 [MIT](LICENSE-MIT) 또는 [Apache-2.0](LICENSE-APACHE) �
 
 서드파티 구성 요소의 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)에 있어요. libheif·libde265(LGPL-3.0-or-later)는 `lv-worker.exe`만 DLL로 동적 링크하고, 같은 이름의 DLL로 바꿔 쓸 수 있어요. 실행 파일에 들어가는 모든 크레이트의 라이선스(`cargo about`으로 모아요)와 라이선스 전문도 이 파일에 있고, 설치판과 포터블판에 함께 들어가요.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). (신청 중이에요. 승인 전 릴리스는 서명 없이 SHA-256 체크섬만 있어요.)
+
+- **Committers and reviewers:** [Hyunwook Kim](https://github.com/hyunwook-kim-goodflow) (maintainer)
+- **Approvers:** [Hyunwook Kim](https://github.com/hyunwook-kim-goodflow) (maintainer)
+
+Every release is built by the GitHub Actions workflow `.github/workflows/release.yml` from a tagged commit of this repository; only those artifacts are submitted for signing, and each signing request is approved by hand.
+
+**Privacy policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. The only such feature is the optional update check, which is off until you turn it on. See [`PRIVACY.md`](PRIVACY.md) (also shown by the installer).
+
+## HEVC 특허
+
 **HEVC 특허:** HEIC 사진은 HEVC로 압축돼 있고, HEVC에는 특허 풀이 있어요. 비상업 무료 배포에서 문제가 된 사례는 드물지만 위험이 0은 아니에요. light-view는 HEVC 디코더(libde265)만 넣고 인코더는 넣지 않아요. (법률 자문 아님)
 
 ## 로드맵

@@ -90,8 +90,8 @@ UninstallDisplayIcon={app}\{#AppExe}
 SetupLogging=yes
 
 [Languages]
-Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"; InfoBeforeFile: "privacy-ko.txt"
+Name: "english"; MessagesFile: "compiler:Default.isl"; InfoBeforeFile: "privacy-en.txt"
 
 [Messages]
 korean.FinishedLabel=light-view 설치가 끝났어요. 아래 첫 항목을 켜 두면 Windows 설정의 light-view 페이지가 열려요. 맨 위의 [기본값 설정]을 한 번 누르면 지원하는 사진 형식이 모두 light-view로 열려요. (Windows는 프로그램이 스스로 기본 앱이 되는 것을 막아서 이 한 번은 직접 눌러야 해요.)

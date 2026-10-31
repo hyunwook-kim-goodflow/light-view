@@ -800,3 +800,35 @@ fn release_builds_and_signs_shell_dll() {
     assert!(yml.contains("target/release/lv_shell.dll"));
     assert!(yml.contains("signed-exes/lv_shell.dll"));
 }
+
+/// The installer shows the privacy notice (SignPath Foundation's terms ask for it when a
+/// program can send data, here the opt-in update check) in the chosen language.
+#[test]
+fn installer_shows_the_privacy_notice() {
+    let s = script();
+    let languages = section(&s, "Languages");
+    for (lang, file) in [("korean", "privacy-ko.txt"), ("english", "privacy-en.txt")] {
+        assert!(
+            has_line(
+                &languages,
+                &[
+                    &format!("Name: \"{lang}\""),
+                    &format!("InfoBeforeFile: \"{file}\"")
+                ]
+            ),
+            "{lang} shows {file}"
+        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../installer")
+            .join(file);
+        let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(
+            text.starts_with(b"\xEF\xBB\xBF"),
+            "{file} is UTF-8 with a BOM"
+        );
+        assert!(
+            String::from_utf8_lossy(&text).contains("api.github.com"),
+            "{file} names the update check"
+        );
+    }
+}

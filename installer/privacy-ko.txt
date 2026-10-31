@@ -1,0 +1,14 @@
+﻿light-view 개인정보 안내
+
+light-view는 개인정보를 모으거나 보내지 않아요. 분석·원격 측정·광고·계정이 없어요.
+
+네트워크를 쓰는 기능은 선택 사항인 "업데이트 확인" 하나예요.
+- 켜기 전에는 꺼져 있어요. 첫 사진을 연 뒤 한 번 묻고, [알려 주세요]를 골라야만 켜져요.
+- 켜면 하루 한 번까지 HTTPS로 GitHub(api.github.com)에 최신 버전을 물어봐요. 이 요청에는 IP 주소와 light-view 버전이 담기고, 사진·파일 정보는 담기지 않아요.
+- 설정의 "업데이트 확인"에서 언제든 끌 수 있어요.
+
+크래시 기록은 이 PC(%LOCALAPPDATA%\light-view\crashes)에만 남고 어디로도 보내지 않아요.
+
+탐색기 확장(HEIC 썸네일·미리 보기·자세히)은 보고 있는 사진을 읽기만 하고 아무것도 보내거나 쓰지 않아요.
+
+전체 내용: https://github.com/hyunwook-kim-goodflow/light-view/blob/main/PRIVACY.md

@@ -1,0 +1,14 @@
+﻿light-view privacy notice
+
+light-view does not collect or send personal data. It has no analytics, telemetry, ads or accounts.
+
+The one network feature is the optional "Update check".
+- It is off until you turn it on. After the first photo light-view asks once; only [Tell me] turns it on.
+- When on, it asks GitHub (api.github.com) over HTTPS at most once a day for the latest version. The request carries your IP address and the light-view version, nothing about your photos or files.
+- Turn it off at any time in Settings > Update check.
+
+Crash records stay on this PC (%LOCALAPPDATA%\light-view\crashes) and are never sent.
+
+The Explorer extension (HEIC thumbnails, preview, details) only reads the photo you are looking at; it sends and writes nothing.
+
+Full policy: https://github.com/hyunwook-kim-goodflow/light-view/blob/main/PRIVACY.md
