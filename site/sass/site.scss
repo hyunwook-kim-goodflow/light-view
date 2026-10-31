@@ -273,3 +273,20 @@ details {
 }
 
 code.hash { word-break: break-all; font-size: .82em; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.release-list {
+  list-style: none;
+  padding: 0;
+  li { padding: 1rem 0; border-bottom: 1px solid var(--hairline); }
+  .version { font-weight: 700; font-size: 1.1rem; }
+  p { margin: .3rem 0 0; color: var(--ink2); }
+}

@@ -11,6 +11,10 @@ generate_feeds = false
 feed_filenames = ["atom.xml"]
 taxonomies = []
 
+# Keep dots in addresses (/releases/0.2.0/); only characters unsafe in paths are changed.
+[slugify]
+paths = "safe"
+
 [markdown]
 smart_punctuation = false
 external_links_target_blank = false

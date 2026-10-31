@@ -223,6 +223,59 @@ Test 'code_signing_page_matches_readme_section' {
     Assert-Equal 1 @(Test-CopiedText @{} 'code-signing/index.html' $md).Count 'page missing'
 }
 
+# --- Task 4: release notes pages ------------------------------------------------------
+
+Test 'notes_split_by_language' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("lv-site-test-" + [guid]::NewGuid())
+    try {
+        Write-ReleasePages -Site (New-FixtureSite) -ContentDir $dir
+        $ko = [IO.File]::ReadAllText((Join-Path $dir '0-2-0.md'), [Text.Encoding]::UTF8)
+        $en = [IO.File]::ReadAllText((Join-Path $dir '0-2-0.en.md'), [Text.Encoding]::UTF8)
+        Assert-True ($ko -like '*한국어 노트*') 'korean notes'
+        Assert-True ($ko -notlike '*English note*') 'no english in korean page'
+        Assert-True ($en -like '*English note*') 'english notes'
+        Assert-True ($en -notlike '*한국어 노트*') 'no korean in english page'
+        Assert-True ($ko -like '*version = "0.2.0"*') 'front matter version'
+        Assert-True ($ko -like '*slug = "0.2.0"*') 'slug keeps the dotted address'
+        Assert-True ($ko -like '*date = 2026-10-31*') 'front matter date'
+    } finally {
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    }
+}
+
+Test 'release_without_notes_gets_a_page' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("lv-site-test-" + [guid]::NewGuid())
+    try {
+        $site = ConvertTo-SiteReleases -ApiReleases (Get-FixtureApi) -GetSums $FixtureSums -NotesDir (Join-Path $Fixtures 'none')
+        Write-ReleasePages -Site $site -ContentDir $dir
+        Assert-True (Test-Path (Join-Path $dir '0-2-0.md')) 'korean page'
+        Assert-True (Test-Path (Join-Path $dir '0-2-0.en.md')) 'english page'
+    } finally {
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    }
+}
+
+Test 'code_signing_policy_on_required_pages' {
+    $link = '<a href="https://lightview.goodflow.dev/code-signing/">Code signing policy</a>'
+    $pages = @{ 'index.html' = (Page $link); 'download/index.html' = (Page '<p>Code signing policy</p>') }
+    $problems = @(Test-CodeSigningLinks $pages @('index.html', 'download/index.html', 'releases/index.html'))
+    Assert-Equal 2 $problems.Count 'download has the words but no link; releases missing'
+    $en = @{ 'en/index.html' = (Page '<a href="https://lightview.goodflow.dev/en/code-signing/">Code signing policy</a>') }
+    Assert-Equal 0 @(Test-CodeSigningLinks $en @('en/index.html')).Count 'english link'
+}
+
+Test 'release_page_lists_every_published_version' {
+    $site = New-FixtureSite
+    $list = Page '<a href="https://lightview.goodflow.dev/releases/0.2.0/">0.2.0</a>'
+    $pages = @{ 'releases/index.html' = $list; 'releases/0.2.0/index.html' = (Page 'x') }
+    Assert-Equal 1 @(Test-ReleasePages $pages $site).Count 'english page missing'
+    $pages['en/releases/index.html'] = (Page '<a href="https://lightview.goodflow.dev/en/releases/0.2.0/">0.2.0</a>')
+    $pages['en/releases/0.2.0/index.html'] = (Page 'x')
+    Assert-Equal 0 @(Test-ReleasePages $pages $site).Count 'complete'
+    $pages['releases/index.html'] = (Page '<p>empty</p>')
+    Assert-Equal 1 @(Test-ReleasePages $pages $site).Count 'list without the version'
+}
+
 Write-Host ''
 Write-Host "$script:Passed passed, $script:Failed failed"
 if ($script:Failed -gt 0) { exit 1 }

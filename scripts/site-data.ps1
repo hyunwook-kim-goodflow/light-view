@@ -14,7 +14,9 @@
        Any mismatch, or a draft left in the result, fails the run: the site is never built
        from data it cannot vouch for (design §4).
     2. Writes site/data/releases.json (newest version first; see ConvertTo-SiteReleases).
-    3. Writes site/data/privacy.ko.md and privacy.en.md (PRIVACY.md by language) and
+    3. Writes one page per release and language into site/content/releases
+       (<version>.md, <version>.en.md; git-ignored) from docs/releases/<version>.md.
+    4. Writes site/data/privacy.ko.md and privacy.en.md (PRIVACY.md by language) and
        site/data/code-signing.md (README's "Code signing policy" section).
 
     -FromFile and -SumsDir read a saved API response and SHA256SUMS-<version>.txt files
@@ -65,6 +67,7 @@ foreach ($r in @($site.releases)) {
     if ($r.notes_file) { $r.notes_file = 'docs/releases/' + (Split-Path -Leaf $r.notes_file) }
 }
 Write-Utf8File (Join-Path $DataDir 'releases.json') ($site | ConvertTo-Json -Depth 6)
+if (-not $FromFile) { Write-ReleasePages -Site $site -ContentDir (Join-Path $root 'site/content/releases') }
 
 $privacy = Split-PrivacyPolicy (Get-Content -Raw -Encoding UTF8 (Join-Path $root 'PRIVACY.md'))
 Write-Utf8File (Join-Path $DataDir 'privacy.ko.md') $privacy.ko

@@ -8,3 +8,4 @@ testdata/private/
 # Website build output and generated data
 /site/public/
 /site/data/
+/site/content/releases/[0-9]*.md

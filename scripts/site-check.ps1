@@ -2,7 +2,8 @@
 .SYNOPSIS
     Checks the built website (site/public) against the rules in the design: downloads only
     from GitHub Releases, nothing loaded from other sites, copied text (PRIVACY.md, the
-    Code signing policy) present and unchanged.
+    Code signing policy) present and unchanged, a page for every published release, and a
+    "Code signing policy" link on every page (SignPath's terms; design §7).
 
 .DESCRIPTION
     Runs under Windows PowerShell 5.1 and pwsh 7, after scripts/site-data.ps1 and
@@ -34,6 +35,18 @@ $problems += Test-CopiedText $pages 'privacy/index.html' (Read-Data 'privacy.ko.
 $problems += Test-CopiedText $pages 'en/privacy/index.html' (Read-Data 'privacy.en.md')
 $problems += Test-CopiedText $pages 'code-signing/index.html' (Read-Data 'code-signing.md')
 $problems += Test-CopiedText $pages 'en/code-signing/index.html' (Read-Data 'code-signing.md')
+
+$site = [IO.File]::ReadAllText((Join-Path $DataDir 'releases.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json
+$problems += Test-ReleasePages $pages $site
+# SignPath's terms: "Code signing policy" on the home, download and release pages.
+$required = @()
+foreach ($prefix in '', 'en/') {
+    $required += "${prefix}index.html", "${prefix}download/index.html", "${prefix}releases/index.html"
+    foreach ($r in @($site.releases)) { $required += "${prefix}releases/$($r.version)/index.html" }
+}
+$problems += Test-CodeSigningLinks $pages $required
+# The footer of every page links it too.
+$problems += Test-CodeSigningLinks $pages @($pages.Keys)
 
 if ($problems.Count) {
     $problems | ForEach-Object { Write-Host "problem: $_" }

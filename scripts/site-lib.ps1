@@ -263,3 +263,87 @@ function Test-CopiedText($Pages, [string]$Path, [string]$Markdown) {
     }
     return @()
 }
+
+# --- Release notes pages ---------------------------------------------------------------
+
+function ConvertTo-TomlString([string]$Text) {
+    return '"' + $Text.Replace([string][char]92, [string][char]92 + [char]92).Replace('"', [string][char]92 + '"') + '"'
+}
+
+# Writes one Zola page per release and language into $ContentDir (site/content/releases):
+# <major>-<minor>-<patch>.md (Korean) and .en.md, from docs/releases/<version>.md when it
+# exists. Zola reads a dot in a file name as a language code, so the file name uses dashes
+# and `slug` keeps the address /releases/<version>/.
+# Earlier generated pages are removed first (the folder's _index files stay).
+function Write-ReleasePages($Site, [string]$ContentDir) {
+    if (-not (Test-Path -LiteralPath $ContentDir)) { New-Item -ItemType Directory -Path $ContentDir | Out-Null }
+    Get-ChildItem -LiteralPath $ContentDir -File | Where-Object { $_.Name -match '^\d+-\d+-\d+(\.en)?\.md$' } | Remove-Item
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    foreach ($r in @($Site.releases)) {
+        $notes = $null
+        if ($r.notes_file) {
+            $path = $r.notes_file
+            if (-not [IO.Path]::IsPathRooted($path)) { $path = Join-Path $repoRoot $path }
+            $notes = Read-ReleaseNotes $path
+        }
+        foreach ($lang in 'ko', 'en') {
+            if ($notes) {
+                $body = $notes[$lang]
+            } elseif ($lang -eq 'en') {
+                $body = "There are no separate notes for this version. See the [GitHub release]($($r.url))."
+            } else {
+                $body = "이 버전은 따로 쓴 노트가 없어요. [GitHub 릴리스]($($r.url))를 보세요."
+            }
+            # Notes are written with ### headings under the language part; on the page
+            # they sit under the version title, one level up.
+            $body = $body -replace '(?m)^###\s', '## '
+            $summary = $r.summary_ko
+            if ($lang -eq 'en') { $summary = $r.summary_en }
+            $front = @(
+                '+++'
+                "title = $(ConvertTo-TomlString "light-view $($r.version)")"
+                "date = $($r.date)"
+                "slug = $(ConvertTo-TomlString $r.version)"
+                'template = "release.html"'
+                ''
+                '[extra]'
+                "version = $(ConvertTo-TomlString $r.version)"
+                "summary = $(ConvertTo-TomlString $summary)"
+                '+++'
+            ) -join "`n"
+            $stem = $r.version.Replace('.', '-')
+            $name = "$stem.md"
+            if ($lang -eq 'en') { $name = "$stem.en.md" }
+            Write-Utf8File (Join-Path $ContentDir $name) ($front + "`n`n" + $body + "`n")
+        }
+    }
+}
+
+# Each page in $Paths must link to the Code signing policy page by that name (SignPath's
+# terms: home, download and release pages; design §7).
+function Test-CodeSigningLinks($Pages, [string[]]$Paths) {
+    $problems = @()
+    foreach ($path in $Paths) {
+        if (-not $Pages.ContainsKey($path)) { $problems += "${path}: page missing"; continue }
+        if ($Pages[$path] -notmatch '<a\b[^>]*href="[^"]*/code-signing/"[^>]*>\s*Code signing policy\s*</a>') {
+            $problems += "${path}: no 'Code signing policy' link to /code-signing/"
+        }
+    }
+    return $problems
+}
+
+# Every published release has a page in both languages and is linked from both lists.
+function Test-ReleasePages($Pages, $Site) {
+    $problems = @()
+    foreach ($r in @($Site.releases)) {
+        foreach ($prefix in '', 'en/') {
+            $page = "${prefix}releases/$($r.version)/index.html"
+            if (-not $Pages.ContainsKey($page)) { $problems += "${page}: page missing"; continue }
+            $list = "${prefix}releases/index.html"
+            if (-not $Pages.ContainsKey($list) -or $Pages[$list] -notmatch ('href="[^"]*/' + [regex]::Escape("${prefix}releases/$($r.version)/") + '"')) {
+                $problems += "${list}: no link to $($r.version)"
+            }
+        }
+    }
+    return $problems
+}
