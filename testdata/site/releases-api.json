@@ -1,0 +1,86 @@
+[
+  {
+    "tag_name": "v0.3.0",
+    "name": "light-view 0.3.0",
+    "draft": true,
+    "prerelease": false,
+    "published_at": null,
+    "html_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/untagged-1",
+    "assets": [
+      {
+        "name": "light-view-0.3.0-portable.zip",
+        "size": 3652362,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.3.0/light-view-0.3.0-portable.zip",
+        "digest": "sha256:11abe1a9d727daaec9f577d6f34e568d3ed7d476bf64ede294a0ff9a9bdc0426"
+      },
+      {
+        "name": "light-view-0.3.0-setup.exe",
+        "size": 4702391,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.3.0/light-view-0.3.0-setup.exe",
+        "digest": "sha256:a773cfb94d889140b176345155196c1f1495ed75cd717fc0f654100bc6d39feb"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 189,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.3.0/SHA256SUMS.txt",
+        "digest": "sha256:6c4171a23ab1baae5539f46eeeaaed99eeeda4e532c832cb7a95a103a189d080"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.1",
+    "name": "light-view 0.2.1",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-11-01T00:00:00Z",
+    "html_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.1",
+    "assets": [
+      {
+        "name": "light-view-0.2.1-portable.zip",
+        "size": 3652362,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.1/light-view-0.2.1-portable.zip",
+        "digest": "sha256:11abe1a9d727daaec9f577d6f34e568d3ed7d476bf64ede294a0ff9a9bdc0426"
+      },
+      {
+        "name": "light-view-0.2.1-setup.exe",
+        "size": 4702391,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.1/light-view-0.2.1-setup.exe",
+        "digest": "sha256:a773cfb94d889140b176345155196c1f1495ed75cd717fc0f654100bc6d39feb"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 189,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.1/SHA256SUMS.txt",
+        "digest": "sha256:6c4171a23ab1baae5539f46eeeaaed99eeeda4e532c832cb7a95a103a189d080"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.0",
+    "name": "light-view 0.2.0",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-10-31T12:10:20Z",
+    "html_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/v0.2.0",
+    "assets": [
+      {
+        "name": "light-view-0.2.0-portable.zip",
+        "size": 3652362,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.0/light-view-0.2.0-portable.zip",
+        "digest": "sha256:11abe1a9d727daaec9f577d6f34e568d3ed7d476bf64ede294a0ff9a9bdc0426"
+      },
+      {
+        "name": "light-view-0.2.0-setup.exe",
+        "size": 4702391,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.0/light-view-0.2.0-setup.exe",
+        "digest": "sha256:a773cfb94d889140b176345155196c1f1495ed75cd717fc0f654100bc6d39feb"
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "size": 189,
+        "browser_download_url": "https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v0.2.0/SHA256SUMS.txt",
+        "digest": "sha256:6c4171a23ab1baae5539f46eeeaaed99eeeda4e532c832cb7a95a103a189d080"
+      }
+    ]
+  }
+]

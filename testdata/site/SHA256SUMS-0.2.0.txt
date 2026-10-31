@@ -1,0 +1,2 @@
+11abe1a9d727daaec9f577d6f34e568d3ed7d476bf64ede294a0ff9a9bdc0426  light-view-0.2.0-portable.zip
+a773cfb94d889140b176345155196c1f1495ed75cd717fc0f654100bc6d39feb  light-view-0.2.0-setup.exe

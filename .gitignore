@@ -7,5 +7,4 @@ testdata/private/
 
 # Website build output and generated data
 /site/public/
-/site/data/releases.json
-/site/content/_generated/
+/site/data/
