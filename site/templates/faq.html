@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{%- block content %}
+<h1>{{ section.title }}</h1>
+<section class="prose faq">
+{{ section.content | safe }}
+</section>
+{%- if config.extra.sponsor_url %}
+<section aria-labelledby="sponsor">
+  <h2 id="sponsor">{% if lang == "en" %}Supporting light-view{% else %}light-view 후원{% endif %}</h2>
+  <p>{% if lang == "en" %}If light-view is useful to you, you can support its development on{% else %}light-view가 쓸모 있었다면 개발을 후원할 수 있어요:{% endif %} <a href="{{ config.extra.sponsor_url }}" data-sponsor>GitHub Sponsors</a></p>
+</section>
+{%- endif %}
+{%- if config.extra.ads.enabled %}
+{% set ad_slot = "faq" %}{% include "partials/ad_slot.html" %}
+{%- endif %}
+{%- endblock %}

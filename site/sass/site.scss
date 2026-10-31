@@ -1,6 +1,8 @@
 // goodflow "highlighter" tokens for the web (goodflow-app-design references/tokens.md §7).
 // Highlighter is a fill only, one per screen (the download button); never a text colour.
-// Dark mode follows the app's newer rule: deep teal fill with light ink on it (4.8:1).
+// Dark mode follows the app's newer rule: deep teal fill with light ink on it.
+// Contrast (WCAG): button 13.5:1 light / 4.8:1 dark; ink2 on paper 5.5:1 / 7.4:1;
+// ink on hl-wash (link hover) 15.1:1 / 7.9:1.
 :root {
   --paper: #FBFAF6;
   --surface: #FFFFFF;
