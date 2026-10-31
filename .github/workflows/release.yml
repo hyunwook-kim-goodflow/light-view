@@ -219,7 +219,9 @@ jobs:
           SHA256SUMS.txt:
           \`\`\`
           $(cat SHA256SUMS.txt)
-          \`\`\`"
+          \`\`\`
+
+          Code signing policy: Free code signing provided by SignPath.io, certificate by SignPath Foundation. See the README's \"Code signing policy\" section. Privacy policy: PRIVACY.md."
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --title "light-view $VERSION" --notes "$notes" \
             "light-view-$VERSION-setup.exe" "light-view-$VERSION-portable.zip" SHA256SUMS.txt
