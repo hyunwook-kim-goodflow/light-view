@@ -276,6 +276,36 @@ Test 'release_page_lists_every_published_version' {
     Assert-Equal 1 @(Test-ReleasePages $pages $site).Count 'list without the version'
 }
 
+# --- Task 5: release notes for the release workflow ----------------------------------
+
+Test 'release_needs_notes_file' {
+    $notes = Join-Path $Fixtures 'notes'
+    Assert-Throws { Get-ReleaseNotesBody -NotesDir $notes -Version '9.9.9' } 'docs/releases/9.9.9.md'
+    $body = Get-ReleaseNotesBody -NotesDir $notes -Version '0.2.0'
+    Assert-True ($body -like '## 한국어*한국어 노트*## English*English note*') 'both parts, in order'
+    Assert-True ($body -notlike '*summary_ko*') 'no front matter'
+}
+
+Test 'release_notes_version_must_match_tag' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("lv-site-test-" + [guid]::NewGuid())
+    try {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        Write-Utf8File (Join-Path $dir '1.0.0.md') "---`nversion: 1.0.1`n---`n## 한국어`n`n- a`n`n## English`n`n- b`n"
+        Assert-Throws { Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' } "version '1.0.1'"
+        Write-Utf8File (Join-Path $dir '1.0.0.md') "---`nversion: 1.0.0`n---`n## English`n`n- b`n"
+        Assert-Throws { Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' } '## 한국어'
+    } finally {
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    }
+}
+
+Test 'repository_release_notes_are_valid' {
+    $dir = Join-Path $PSScriptRoot '..\..\docs\releases'
+    foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.md' | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.md$' }) {
+        $null = Get-ReleaseNotesBody -NotesDir $dir -Version ($f.BaseName)
+    }
+}
+
 Write-Host ''
 Write-Host "$script:Passed passed, $script:Failed failed"
 if ($script:Failed -gt 0) { exit 1 }

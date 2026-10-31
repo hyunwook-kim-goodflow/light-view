@@ -347,3 +347,16 @@ function Test-ReleasePages($Pages, $Site) {
     }
     return $problems
 }
+
+# --- Release notes for the release workflow (scripts/release-notes.ps1) -----------------
+
+# The text of docs/releases/<Version>.md without its front matter (the Korean part, then
+# the English part). Throws when the file is missing, names another version, or lacks a
+# language part, so a tag cannot be released without notes (design §6).
+function Get-ReleaseNotesBody([string]$NotesDir, [string]$Version) {
+    $path = Join-Path $NotesDir "$Version.md"
+    $notes = Read-ReleaseNotes $path
+    if (-not $notes) { throw "docs/releases/$Version.md is missing: write the release notes (see docs/releases/README.md) before tagging v$Version" }
+    if ($notes.front['version'] -ne $Version) { throw "docs/releases/$Version.md says version '$($notes.front['version'])', expected $Version" }
+    return "## 한국어`n`n$($notes.ko)`n`n## English`n`n$($notes.en)"
+}
