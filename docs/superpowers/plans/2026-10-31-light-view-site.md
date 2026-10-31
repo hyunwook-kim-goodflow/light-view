@@ -19,7 +19,7 @@
 - **공개 금지(사용자 확인 전):** 배포, GitHub Pages 켜기, Cloudflare 프로젝트 만들기, DNS, AdSense·분석 계정, `git push`는 하지 않는다. 로컬 `zola serve`/`zola build`와 PR용 브랜치 커밋까지만. 배포 단계는 시크릿이 없으면 건너뛰고 경고만 남긴다.
 - **커밋 트레일러:** `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. 600줄(테스트 제외) 넘는 파일은 나눈다.
 - **내려받기 링크:** 늘 `https://github.com/hyunwook-kim-goodflow/light-view/releases/download/v<버전>/<자산 이름>`(API의 `browser_download_url`). 중간 페이지·자동 다운로드·카운트다운 없음.
-- **외부 요청 0(광고 끔일 때):** 외부 글꼴·CDN·분석 없음. 방문자 브라우저는 사이트 도메인 말고 아무 데도 요청하지 않는다(내려받기 버튼을 누를 때 github.com만).
+- **외부 요청은 분석 비컨 하나(광고 끔일 때):** 외부 글꼴·CDN 없음. 방문자 브라우저는 사이트 도메인과 Cloudflare Web Analytics(`static.cloudflareinsights.com`, `cloudflareinsights.com`) 말고 아무 데도 요청하지 않는다(내려받기 버튼을 누를 때 github.com만). 쿠키 없음.
 - **Code signing policy:** 문자열 "Code signing policy"(번역 안 함)와 `/code-signing/`(영어 `/en/code-signing/`) 링크가 모든 페이지 바닥글, 그리고 홈·`/download/`·`/releases/`·`/releases/<버전>/` 본문에 있다.
 - **광고 규칙(설계서 §9):** `/download/`·`/code-signing/`·`/privacy/`·404에는 광고 칸 없음. 페이지당 1칸 이하. 광고 칸은 내려받기 링크(`data-download`)와 같은 `<section>`에 없고, 사이에 머리글 있는 절이 하나 이상. 자동 광고 금지. 표시 "광고"/"Advertisement". 광고 칸 주변에 `--hl` 색 금지. `ads.enabled = false`면 광고 스크립트·칸·`ads.txt`가 결과물에 없다.
 - **디자인:** goodflow 「형광펜」 토큰(설계서 §10). 형광 채움은 화면당 하나(내려받기 버튼). 형광을 글자색으로 쓰지 않는다. 시스템 글꼴만.
@@ -72,7 +72,8 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 - [x] 호스팅: Cloudflare Pages(2026-10-31 사용자 결정). Task 8 Step 3은 Cloudflare 경로만 만든다.
 - [x] 도메인: `goodflow.dev` 하위 주소(2026-10-31 사용자 결정). `config.toml`의 `base_url`은 `https://lightview.goodflow.dev`로 두고, 이름이 바뀌면 이 한 줄과 FAQ·README의 공식 주소만 고친다.
-- [ ] **Step 1:** 사용자에게 묻는다: 하위 주소 이름 확정, 분석(없음 추천 / Cloudflare Web Analytics), 후원 링크(넣음/안 넣음), 광고 켜는 시점(서명 승인 뒤 추천). 답을 설계서 §13에 날짜와 함께 적는다.
+- [x] 분석: Cloudflare Web Analytics. 후원: GitHub Sponsors 링크 하나. 광고: 서명 승인 뒤(Task 10). (2026-10-31 사용자 결정)
+- [ ] **Step 1:** 사용자에게 묻는다: 하위 주소 이름 확정. 답을 설계서 §13에 날짜와 함께 적는다.
 - [ ] **Step 2:** 결정이 없어도 Task 1–7은 진행할 수 있다(배포 단계만 비활성). Task 8은 결정이 있어야 한다.
 - [ ] **Step 3: Commit** — `docs: site decisions`
 
@@ -80,7 +81,7 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 **Files:** Create `site/config.toml`, `site/templates/{base,404}.html`, `site/templates/partials/{header,footer}.html`, `site/sass/site.scss`, `site/content/_index.md`·`_index.en.md`(빈 홈), `site/static/robots.txt`, `.gitignore` 항목; `site/README.md`(로컬 실행법 세 줄).
 
-- [ ] **Step 1:** `config.toml`: `default_language = "ko"`, `[languages.en]`, `compile_sass = true`, `build_search_index = false`, `generate_feeds = true`(릴리스 RSS — Atom 피드는 릴리스 섹션만), `[extra] repo = "hyunwook-kim-goodflow/light-view"`, `[extra.ads] enabled = false, client = "", slots = {}`, `[extra.analytics] provider = ""`.
+- [ ] **Step 1:** `config.toml`: `default_language = "ko"`, `[languages.en]`, `compile_sass = true`, `build_search_index = false`, `generate_feeds = true`(릴리스 RSS — Atom 피드는 릴리스 섹션만), `[extra] repo = "hyunwook-kim-goodflow/light-view"`, `[extra.ads] enabled = false, client = "", slots = {}`, `[extra.analytics] token = ""`(Cloudflare Web Analytics, 비면 스크립트 없음), `[extra] sponsor_url = ""`(GitHub Sponsors 승인 뒤 `https://github.com/sponsors/hyunwook-kim-goodflow`). `base.html`은 토큰이 있을 때만 `<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "…"}'>`. 바닥글에 후원 링크(있을 때만). `.github/FUNDING.yml`도 이 Task에서.
 - [ ] **Step 2:** `site.scss`에 설계서 §10 토큰(라이트·다크), 기본 타이포(시스템 글꼴), `.btn-download`(형광 채움, `--on-hl`, 모서리 18px, 최소 높이 56px, 초점 링), `mark`, 링크(먹+밑줄), `.ad-slot`(hairline 상자, 위 "광고" 표시, 높이 예약), 다크 hairline. `prefers-reduced-motion` 존중.
 - [ ] **Step 3:** `base.html`: `<html lang>`, `hreflang` 대체 링크(ko↔en), 메타 설명, OG, 파비콘, 머리글(로고+이름, 메뉴: 내려받기·릴리스 노트·자주 묻는 질문, 언어 전환), 바닥글(Code signing policy · 개인정보 처리방침 · GitHub · 라이선스 · goodflow). 바닥글의 "Code signing policy"는 두 언어 모두 영어 그대로.
 - [ ] **Step 4:** 로고에서 파비콘(32·180·192·512)과 `og.png`(1200×630)를 만든다 — `scripts/make-icons.py`를 넓히거나 같은 방식의 새 함수. 결과 이미지는 커밋.
@@ -108,8 +109,8 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 - [ ] **Step 1: 내려받기 버튼 부분 템플릿** — `load_data(path="data/releases.json")`의 latest setup 자산: 형광 버튼 "내려받기"(en "Download"), 아래 줄 "설치판 <버전> · <MB> · github.com", `data-download` 속성. 그 아래 먹 텍스트 링크: 포터블 zip · 모든 버전 · 체크섬 · Code signing policy, 요구 사항 줄. Windows가 아닌 사용자 에이전트면 "Windows용 프로그램이에요" 한 줄(작은 인라인 JS, 없어도 동작).
 - [ ] **Step 2: 홈** — 히어로(설계서 §3.1), 스크린샷 2–3장(`testdata` 샘플로 촬영, 앱 화면·크기 조정 화면·탐색기 썸네일), 기능 6개(§3.2), "안전" 절(격리된 작업자, 체크섬, 서명 상태, "앱에는 광고도 추적도 없어요" + 개인정보 링크), FAQ 3개 발췌, 공식 주소 안내 한 줄.
 - [ ] **Step 3: 내려받기** — 머리 두 줄 기능 소개(SignPath 조건), 설치판 두 방식 표(README 표를 사용자 말로), 포터블, 파일·크기·SHA-256 표, `Get-FileHash` 확인법, SmartScreen 안내, "Code signing policy" 절(서명 상태 + 링크), 이전 버전 → GitHub Releases. 광고 없음.
-- [ ] **Step 4: Code signing policy·개인정보** — `_generated` 조각을 넣는다. 개인정보는 "프로그램"(PRIVACY.md) / "이 웹사이트"(광고 끔: "쿠키·분석·외부 요청 없음") 두 절. 광고를 켜면 바뀔 문단은 `extra.ads.enabled` 조건부(Task 7).
-- [ ] **Step 5: 테스트** — Pester로 빌드 결과를 읽는 `privacy_page_contains_privacy_md`(두 언어), `code_signing_page_matches_readme_section`, `download_button_points_to_github_asset`, `no_external_requests_when_ads_off`(`src=`/`href=`의 외부 호스트가 github.com 내려받기 링크·저장소 링크뿐).
+- [ ] **Step 4: Code signing policy·개인정보** — `_generated` 조각을 넣는다. 개인정보는 "프로그램"(PRIVACY.md) / "이 웹사이트"(광고 끔: "쿠키 없음, 집계형 Cloudflare Web Analytics만") 두 절. 광고를 켜면 바뀔 문단은 `extra.ads.enabled` 조건부(Task 7).
+- [ ] **Step 5: 테스트** — Pester로 빌드 결과를 읽는 `privacy_page_contains_privacy_md`(두 언어), `code_signing_page_matches_readme_section`, `download_button_points_to_github_asset`, `no_external_requests_when_ads_off`(자동으로 불러오는 `src=`의 외부 호스트가 `static.cloudflareinsights.com`뿐, 토큰이 비면 0개; `href=` 링크는 github.com·SignPath·Google 광고 설정 등 문서 링크만), `sponsor_link_only_in_footer_and_faq`, `no_sponsor_link_when_url_empty`.
 - [ ] **Step 6: Commit** — `site: home, download, code signing policy and privacy pages`
 
 ### Task 4: 릴리스 노트 페이지
@@ -166,7 +167,7 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 - [ ] **Step 1:** 사용자가 도메인·호스팅 계정·시크릿을 준비했는지 확인(설계서 §12).
 - [ ] **Step 2:** 사용자 승인 뒤 푸시·PR, 병합 뒤 첫 배포를 사용자가 승인(환경 보호 규칙).
-- [ ] **Step 3:** 배포 뒤 확인: HTTPS, 두 언어, 내려받기 링크가 0.2.0 자산, 체크섬이 GitHub `SHA256SUMS.txt`와 같음, Code signing policy 링크, 외부 요청 0(브라우저 네트워크 탭).
+- [ ] **Step 3:** 배포 뒤 확인: HTTPS, 두 언어, 내려받기 링크가 0.2.0 자산, 체크섬이 GitHub `SHA256SUMS.txt`와 같음, Code signing policy 링크, 외부 요청은 Cloudflare 비컨뿐·쿠키 없음(브라우저 네트워크·저장소 탭).
 - [ ] **Step 4:** README 상단 English summary와 소개에 사이트 주소. SignPath 신청서의 홈페이지 주소를 바꿀지 사용자가 정한다.
 - [ ] **Step 5: Commit** — `docs: link the website`
 

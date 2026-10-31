@@ -32,7 +32,7 @@
 - 사이트에 보인 체크섬이 릴리스 파일과 다르다, 또는 초안(draft) 릴리스가 사이트에 새어 나온다.
 - "Code signing policy" 문구가 어떤 홈·내려받기·릴리스 페이지에서 빠진다.
 - 앱의 개인정보 방침("광고·분석 없음")과 사이트의 광고·쿠키가 한 문서에서 섞여, 앱이 광고를 하는 것처럼 읽힌다.
-- 사이트가 외부 글꼴·스크립트를 동의 없이 불러온다(광고를 켜기 전에는 외부 요청 0).
+- 사이트가 외부 글꼴·스크립트를 동의 없이 불러온다(광고를 켜기 전에는 외부 요청이 Cloudflare Web Analytics 비컨 하나뿐).
 
 ## 3. 사이트 구조
 
@@ -50,7 +50,7 @@
 | `/404.html` | 홈·내려받기 링크 | 없음 |
 
 - 바닥글(모든 페이지): `Code signing policy` · 개인정보 처리방침 · GitHub · 라이선스(MIT OR Apache-2.0) · goodflow. "Code signing policy"는 번역하지 않는다(SignPath가 정한 용어). **[설계자 판단]**
-- 후원(GitHub Sponsors 등) 링크는 **[사용자 결정 필요]**. 넣는다면 바닥글과 FAQ에만, 광고 근처에는 두지 않는다(광고 클릭 유도로 읽히지 않게).
+- 후원 링크 하나(GitHub Sponsors). **[사용자 결정: 후원 링크 넣음, 2026-10-31]** 바닥글과 FAQ("어떻게 도울 수 있나요?")에만, 먹 텍스트 링크로. 광고 근처에는 두지 않는다(광고 클릭 유도로 읽히지 않게). 저장소에도 `.github/FUNDING.yml`(`github: hyunwook-kim-goodflow`)을 넣어 GitHub의 Sponsor 버튼과 같은 곳을 가리킨다. Sponsors 프로필이 승인되기 전에는 링크를 빌드에서 뺀다(`extra.sponsor_url = ""`).
 - `robots.txt`, `sitemap.xml`, `ads.txt`(광고를 켤 때), Open Graph 이미지(로고 + 한 문장).
 
 ### 3.1 첫 화면 (히어로)
@@ -170,7 +170,7 @@ SignPath Foundation 약관(https://signpath.org/terms, 2026-10-31 확인)에서 
 
 ## 8. 개인정보·쿠키·분석
 
-- **광고를 켜기 전:** 쿠키 없음, 외부 요청 없음(시스템 글꼴, 외부 CDN 없음, 이미지는 사이트 안). 분석이 필요하면 쿠키 없는 Cloudflare Web Analytics 정도(이것도 외부 스크립트 하나 — **[사용자 결정 필요]**). 기본은 분석 없음. **[설계자 판단]**
+- **광고를 켜기 전:** 쿠키 없음(시스템 글꼴, 외부 CDN 없음, 이미지는 사이트 안). 분석은 **Cloudflare Web Analytics** **[사용자 결정, 2026-10-31]**: 쿠키·로컬 저장소를 쓰지 않고 방문자를 지문으로 추적하지 않는 집계형 분석이다. 외부 요청은 그 비컨 스크립트(`static.cloudflareinsights.com`)와 보고(`cloudflareinsights.com`) 하나뿐. Pages 프로젝트 설정의 자동 삽입을 켜지 않고, 템플릿에 토큰을 넣은 `<script defer>` 한 줄로 직접 넣는다(빌드 결과에서 보이고 검사할 수 있게, `extra.analytics.token`이 비면 없음). 사이트 개인정보 절에 "페이지 주소·참조 주소·브라우저 종류·나라 같은 집계 정보만, 쿠키 없음, Cloudflare가 처리"를 적는다. 쿠키가 없으므로 동의 창은 필요 없다(광고를 켜면 AdSense 동의 메시지가 생긴다).
 - **광고를 켤 때(AdSense):**
   - AdSense 필수 고지: Google 등 제3자가 쿠키로 이전 방문 기반 광고를 보여 준다는 사실, Google 광고 설정(맞춤 광고 끄기) 링크, 다른 광고 업체를 쓰면 그 목록과 거부 방법. → `/privacy/` "이 웹사이트" 절.
   - **EEA·영국·스위스 방문자:** Google 인증 CMP(IAB TCF 연동)가 있어야 맞춤 광고가 나간다(EEA·영국 2024-01-16부터, 스위스 2024-07-31부터). 없으면 비맞춤·제한 광고만. AdSense의 "개인 정보 보호 및 메시지"(Privacy & messaging) 동의 메시지가 인증 CMP라 따로 업체를 쓰지 않아도 된다. → 그것을 쓴다. **[설계자 판단]**
@@ -238,8 +238,8 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 | 도메인: `goodflow.dev` 하위 주소로 정함(2026-10-31). 이름 확정(`lightview.goodflow.dev` 제안), DNS에 CNAME 추가 | 배포 전 |
 | Cloudflare 계정·API 토큰을 저장소 시크릿에 넣기(또는 GitHub Pages 켜기) | 배포 전 |
 | 사이트 공개(첫 배포) 승인 | 배포 때 |
-| 분석 쓸지(없음 / 쿠키 없는 Cloudflare Web Analytics) | 배포 전 |
-| 후원 링크(GitHub Sponsors 등) 넣을지 | 언제든 |
+| 분석: Cloudflare Web Analytics로 정함. 대시보드에서 사이트를 더하고 토큰을 받는다 | 배포 전 |
+| 후원: 넣기로 정함. GitHub Sponsors 프로필 신청·승인(은행·세금 정보는 사용자만) | 언제든, 승인 뒤 링크 켬 |
 | AdSense 계정 만들기·사이트 등록·심사, 게시자 ID, 광고 단위 ID, Privacy & messaging 동의 메시지 설정, 소재 차단 | 광고 켤 때(서명 승인 뒤 권장) |
 | 사이트 개인정보 방침(광고 쿠키) 문구 확인, 필요하면 법률 확인 | 광고 켜기 전 |
 | SignPath에 홈페이지 주소 알리기(필요하면) | 사이트 공개 뒤 |
@@ -250,7 +250,10 @@ goodflow-app-design 스킬 `references/tokens.md` §7(웹)이 기준이다. **[�
 - 2026-10-31: 랜딩·다운로드·릴리스 노트 사이트, 광고 자리 포함, goodflow 형광펜 디자인, 한국어+영어. (작업 지시)
 - 2026-10-31: 호스팅은 Cloudflare Pages + 사용자 도메인. 빌드는 이 저장소의 GitHub Actions, 배포는 `wrangler pages deploy`.
 - 2026-10-31: 도메인은 `goodflow.dev`의 하위 주소. 이름은 `lightview.goodflow.dev`를 제안(확정 대기). `.dev`는 브라우저가 HTTPS만 허용하는 도메인이라 Cloudflare 인증서로 충분하다. `goodflow.dev`의 DNS가 Cloudflare에 없어도 하위 주소는 `<프로젝트>.pages.dev`로의 CNAME 하나로 Pages 사용자 도메인에 붙일 수 있다. 광고를 켤 때 AdSense에는 `goodflow.dev`를 사이트로 등록해 승인받는다(하위 주소는 그 아래에서 같은 게시자 코드).
-- (대기) 하위 주소 이름 확정, 분석, 후원, 광고 켜는 시점.
+- 2026-10-31: 분석은 Cloudflare Web Analytics(쿠키 없음).
+- 2026-10-31: 후원 링크 하나(GitHub Sponsors), 바닥글·FAQ에만.
+- 2026-10-31: 광고는 서명 승인(1.0.0) 뒤에 켠다. 켤 때 AdSense 계정·심사, Privacy & messaging 동의 메시지(인증 CMP), 소재 차단, 사이트 개인정보 문구(한국 맞춤형 광고 고지 포함) 확인을 추천대로 한다.
+- (대기) 하위 주소 이름 확정(`lightview.goodflow.dev` 제안).
 
 ## 14. 빌더 재량
 
