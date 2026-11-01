@@ -43,6 +43,9 @@ if ($adsOn) { $allowed += 'https://pagead2.googlesyndication.com/' }
 
 $pages = Get-SitePages $PublicDir
 $problems = @()
+$adsTxtPath = Join-Path $PublicDir 'ads.txt'
+$builtAdsTxt = if (Test-Path -LiteralPath $adsTxtPath) { [IO.File]::ReadAllText($adsTxtPath) } else { $null }
+$problems += Test-AdSettings $config $pages $builtAdsTxt
 if ($adsOn) {
     $problems += Test-AdSlots $pages
 } else {

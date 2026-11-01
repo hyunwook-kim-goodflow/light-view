@@ -440,3 +440,25 @@ function Get-AdsTxt([string]$ConfigText) {
 }
 
 function Test-AdsEnabled([string]$ConfigText) { return [bool](Get-AdsTxt $ConfigText) }
+
+# With ads on in site/config.toml: a publisher ID is set, every ad unit on the pages has
+# that publisher and a unit ID, and the built ads.txt ($AdsTxt, $null if missing) has the
+# line for that publisher.
+function Test-AdSettings([string]$ConfigText, $Pages, $AdsTxt) {
+    $t = $ConfigText -replace "`r`n", "`n"
+    $on = ($t -match '(?s)\[extra\.ads\]\n(.*?)(\n\[|\z)') -and ($Matches[1] -match '(?m)^enabled\s*=\s*true\s*$')
+    if (-not $on) { return @() }
+    $expected = Get-AdsTxt $ConfigText
+    if (-not $expected) { return @('site/config.toml: ads are enabled but [extra.ads] client is not a publisher ID (ca-pub-…)') }
+    $client = 'ca-' + ($expected -split ', ')[1]
+    $problems = @()
+    foreach ($path in $Pages.Keys) {
+        foreach ($m in [regex]::Matches($Pages[$path], '<ins\b[^>]*\bclass="adsbygoogle"[^>]*>')) {
+            if ($m.Value -notmatch "data-ad-client=`"$client`"") { $problems += "${path}: ad unit without publisher $client" }
+            if ($m.Value -notmatch 'data-ad-slot="\d+"') { $problems += "${path}: ad unit without a unit ID (set it in [extra.ads.slots])" }
+        }
+    }
+    if (-not $AdsTxt) { $problems += 'ads.txt: missing while ads are on (run scripts/site-data.ps1)' }
+    elseif (($AdsTxt.Trim()) -ne $expected) { $problems += "ads.txt: expected '$expected'" }
+    return $problems
+}

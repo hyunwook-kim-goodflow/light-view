@@ -171,4 +171,4 @@ testdata/site/                   releases API·SHA256SUMS 픽스처
 
 ### Task 10 (나중): 광고 켜기
 
-서명 승인(1.0.0) 뒤 권장이었으나, SignPath 거절(2026-10-31)로 시점을 다시 정해야 한다(설계서 §13). 사용자가 AdSense 계정·사이트 승인·광고 단위 ID·Privacy & messaging 메시지·소재 차단을 마친 뒤: `config.toml`의 `extra.ads`를 채우고, 개인정보 "이 웹사이트" 절(한국 맞춤형 광고 고지 포함)을 사용자가 확인, `site-check.ps1` 통과, 배포. AdSense 심사에서 "가치가 낮은 콘텐츠"로 거절되면 도움말 글(예: "윈도우에서 HEIC 여는 법")을 늘리는 후속 계획을 쓴다.
+서명을 기다리지 않는다(2026-11-01 결정, 설계서 §13): 사이트 공개(Task 9) 뒤 AdSense 승인이 나면 켠다. `site-check.ps1`은 광고를 켠 설정에서 게시자 ID, 모든 광고 칸의 광고 단위 ID, `ads.txt`가 맞는지도 본다. 사용자가 AdSense 계정·사이트 승인·광고 단위 ID·Privacy & messaging 메시지·소재 차단을 마친 뒤: `config.toml`의 `extra.ads`를 채우고, 개인정보 "이 웹사이트" 절(한국 맞춤형 광고 고지 포함)을 사용자가 확인, `site-check.ps1` 통과, 배포. AdSense 심사에서 "가치가 낮은 콘텐츠"로 거절되면 도움말 글(예: "윈도우에서 HEIC 여는 법")을 늘리는 후속 계획을 쓴다.

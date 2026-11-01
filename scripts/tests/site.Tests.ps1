@@ -399,6 +399,22 @@ Test 'ads_txt_follows_config' {
     Assert-Equal $null (Get-AdsTxt "[extra.ads]`nenabled = true`nclient = `"`"`n")
 }
 
+Test 'ads_on_needs_publisher_and_unit_ids' {
+    $on = "[extra.ads]`nenabled = true`nclient = `"ca-pub-1234567890123456`"`n"
+    $unit = '<ins class="adsbygoogle" data-ad-client="ca-pub-1234567890123456" data-ad-slot="{0}"></ins>'
+    $good = @{ 'index.html' = (Page ($unit -f '1234567890')) }
+    $txt = 'google.com, pub-1234567890123456, DIRECT, f08c47fec0942fa0'
+    Assert-Equal 0 @(Test-AdSettings $on $good $txt).Count 'complete'
+    $empty = @{ 'faq/index.html' = (Page ($unit -f '')) }
+    Assert-Equal 1 @(Test-AdSettings $on $empty $txt).Count 'empty unit ID'
+    Assert-Equal 1 @(Test-AdSettings $on $good $null).Count 'ads.txt missing'
+    Assert-Equal 1 @(Test-AdSettings $on $good 'google.com, pub-9, DIRECT, f08c47fec0942fa0').Count 'ads.txt for another publisher'
+    $noClient = "[extra.ads]`nenabled = true`nclient = `"`"`n"
+    Assert-Equal 1 @(Test-AdSettings $noClient @{} $null).Count 'on without a publisher ID'
+    $off = "[extra.ads]`nenabled = false`nclient = `"`"`n"
+    Assert-Equal 0 @(Test-AdSettings $off @{} $null).Count 'off'
+}
+
 Write-Host ''
 Write-Host "$script:Passed passed, $script:Failed failed"
 if ($script:Failed -gt 0) { exit 1 }
