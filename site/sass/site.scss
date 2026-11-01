@@ -364,6 +364,22 @@ details {
   p { color: var(--ink2); }
 }
 
+// The folded checks on the download page: a heading-sized summary, full-width content.
+details.verify {
+  max-width: none;
+  border-top: 1px solid var(--hairline);
+  margin-top: 1rem;
+  padding: .5rem 0 .75rem;
+  summary {
+    flex-wrap: wrap;
+    gap: .25rem 1rem;
+    h2 { display: inline; margin: 0; font-size: 1.25rem; }
+    span { font-weight: 400; font-size: .95rem; }
+  }
+  p { color: var(--ink); }
+  .table-wrap { margin-top: .75rem; }
+}
+
 .prose {
   max-width: 48rem;
   table { margin: 0 0 1rem; }
