@@ -15,21 +15,20 @@
 {{ section.content | safe }}
 </section>
 
-<section aria-labelledby="checksums">
-  <h2 id="checksums">{% if lang == "en" %}Check the download (SHA-256){% else %}받은 파일 확인 (SHA-256){% endif %}</h2>
-  {% include "partials/checksums.html" %}
-  <p>{% if lang == "en" %}In PowerShell, the <code>Hash</code> must equal the value above (case does not matter). If it differs, do not run the file; download it again.{% else %}PowerShell에서 아래 명령의 <code>Hash</code>가 위 값과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.{% endif %}</p>
-  <pre><code>Get-FileHash .\{{ setup.name }} -Algorithm SHA256</code></pre>
-</section>
-
-<section aria-labelledby="code-signing">
-  <h2 id="code-signing">Code signing policy</h2>
-  {%- if rel.signed %}
-  <p>{% if lang == "en" %}This release is signed. In the file's Properties → Digital Signatures, the signer is "SignPath Foundation".{% else %}이 릴리스는 서명돼 있어요. 파일 속성 → 디지털 서명에서 서명자가 "SignPath Foundation"인지 확인할 수 있어요.{% endif %}</p>
-  {%- else %}
-  <p>{% if lang == "en" %}Releases are not code-signed yet; check each file against the SHA-256 checksums above. We plan to apply again for free open source code signing.{% else %}릴리스에 아직 코드 서명이 없어요. 위 SHA-256 체크섬으로 파일을 확인해요. 오픈소스 무료 코드 서명은 나중에 다시 신청할 계획이에요.{% endif %}</p>
-  {%- endif %}
-  <p>{% if rel.signed %}Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>. {% endif %}<a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+{#- Checksums and signing status, folded: most people never open it. The download button's
+    "체크섬" link (#checksums) opens it. -#}
+<section aria-labelledby="verify">
+  <details id="checksums" class="verify">
+    <summary><h2 id="verify">{% if lang == "en" %}Check the download{% else %}받은 파일 확인하기{% endif %}</h2><span class="muted">SHA-256 · {% if lang == "en" %}code signing{% else %}코드 서명{% endif %}</span></summary>
+    {% include "partials/checksums.html" %}
+    <p>{% if lang == "en" %}In PowerShell, the <code>Hash</code> must equal the value above (case does not matter). If it differs, do not run the file; download it again.{% else %}PowerShell에서 아래 명령의 <code>Hash</code>가 위 값과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.{% endif %}</p>
+    <pre><code>Get-FileHash .\{{ setup.name }} -Algorithm SHA256</code></pre>
+    {%- if rel.signed %}
+    <p>{% if lang == "en" %}This release is signed. In the file's Properties → Digital Signatures, the signer is "SignPath Foundation". Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% else %}이 릴리스는 서명돼 있어요. 파일 속성 → 디지털 서명에서 서명자가 "SignPath Foundation"인지 확인할 수 있어요. Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+    {%- else %}
+    <p>{% if lang == "en" %}Releases are not code-signed yet, so the checksum is how to check a file.{% else %}릴리스에 아직 코드 서명이 없어서, 파일은 위 체크섬으로 확인해요.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+    {%- endif %}
+  </details>
 </section>
 
 <section aria-labelledby="older">
@@ -37,4 +36,14 @@
   <p><a href="{{ notes_url }}">{{ trans(key="nav_releases", lang=lang) }}</a> · <a href="https://github.com/{{ config.extra.repo }}/releases">GitHub Releases</a></p>
 </section>
 {%- endblock %}
-{%- block scripts %}{% include "partials/not_windows.html" %}{% endblock %}
+{%- block scripts %}{% include "partials/not_windows.html" %}
+<script>
+  // Opens the folded checks when the page is reached through #checksums.
+  (function () {
+    var d = document.getElementById("checksums");
+    function open() { if (location.hash === "#checksums" && d) { d.open = true; } }
+    open();
+    window.addEventListener("hashchange", open);
+  })();
+</script>
+{%- endblock %}

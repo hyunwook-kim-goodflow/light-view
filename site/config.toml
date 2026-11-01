@@ -34,9 +34,11 @@ repo = "hyunwook-kim-goodflow/light-view"
 sponsor_url = ""
 
 # Ads are off: with enabled = false no ad script, slot or ads.txt is built.
+# client: the AdSense publisher ID. While enabled = false it only adds the
+# google-adsense-account meta tag (site verification); no ad code, no ads.txt.
 [extra.ads]
 enabled = false
-client = ""
+client = "ca-pub-9134135891782141"
 
 # Manual ad unit IDs per slot (no Auto ads). Slots: home (after the features), releases
 # (after the list), release (after the notes), faq (at the end).
