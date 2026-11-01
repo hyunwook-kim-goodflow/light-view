@@ -371,6 +371,19 @@ Test 'ads_off_leaves_no_trace' {
     Assert-Equal 1 @(Test-NoAds $slot).Count 'slot'
 }
 
+Test 'privacy_mentions_analytics_only_when_loaded' {
+    $beacon = '<script defer src="https://static.cloudflareinsights.com/beacon.min.js"></script>'
+    $notice = '<p>Visits are counted with Cloudflare Web Analytics.</p>'
+    $both = @{ 'index.html' = (Page $beacon); 'privacy/index.html' = (Page "$beacon$notice"); 'en/privacy/index.html' = (Page "$beacon$notice") }
+    Assert-Equal 0 @(Test-AnalyticsNotice $both).Count 'loaded and described'
+    $neither = @{ 'index.html' = (Page $Features); 'privacy/index.html' = (Page $Features); 'en/privacy/index.html' = (Page $Features) }
+    Assert-Equal 0 @(Test-AnalyticsNotice $neither).Count 'neither'
+    $noticeOnly = @{ 'index.html' = (Page $Features); 'privacy/index.html' = (Page $notice); 'en/privacy/index.html' = (Page $Features) }
+    Assert-Equal 1 @(Test-AnalyticsNotice $noticeOnly).Count 'described but not loaded'
+    $beaconOnly = @{ 'index.html' = (Page $beacon); 'privacy/index.html' = (Page $beacon); 'en/privacy/index.html' = (Page "$beacon$notice") }
+    Assert-Equal 1 @(Test-AnalyticsNotice $beaconOnly).Count 'loaded but not described (ko)'
+}
+
 Test 'ad_slot_not_right_before_download_section' {
     $files = '<section><h2>Files</h2><a href="https://github.com/a" data-download>a.exe</a></section>'
     $before = @{ 'releases/0.2.0/index.html' = (Page "$Features$Ad$files") }

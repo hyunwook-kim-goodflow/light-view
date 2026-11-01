@@ -414,6 +414,20 @@ function Test-NoAds($Pages) {
     return $problems
 }
 
+# The privacy pages describe Cloudflare Web Analytics exactly when the site loads its
+# beacon (site/config.toml's [extra.analytics] token).
+function Test-AnalyticsNotice($Pages) {
+    $problems = @()
+    $loaded = @($Pages.Keys | Where-Object { $Pages[$_] -match 'static\.cloudflareinsights\.com' }).Count -gt 0
+    foreach ($path in 'privacy/index.html', 'en/privacy/index.html') {
+        if (-not $Pages.ContainsKey($path)) { continue }
+        $described = $Pages[$path] -match 'Cloudflare Web Analytics'
+        if ($described -and -not $loaded) { $problems += "${path}: describes Cloudflare Web Analytics, but no page loads it" }
+        if ($loaded -and -not $described) { $problems += "${path}: the site loads Cloudflare Web Analytics, but this page does not say so" }
+    }
+    return $problems
+}
+
 # The ads.txt line for site/config.toml's [extra.ads], or $null when ads are off or no
 # publisher ID is set. f08c47fec0942fa0 is Google's certification authority ID.
 function Get-AdsTxt([string]$ConfigText) {

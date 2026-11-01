@@ -13,8 +13,18 @@
   <div class="prose">
   {%- if config.extra.ads.enabled %}
   <p>{% if lang == "en" %}This website sets no cookies of its own; the ads below use Google's.{% else %}이 웹사이트는 자체 쿠키를 쓰지 않아요. 아래 광고만 Google의 쿠키를 써요.{% endif %}</p>
-  {%- else %}
+  {%- elif config.extra.analytics.token %}
   <p>{% if lang == "en" %}This website uses no cookies and loads no scripts from other sites except the analytics script below.{% else %}이 웹사이트는 쿠키를 쓰지 않고, 아래 통계 스크립트 말고는 다른 곳의 스크립트를 불러오지 않아요.{% endif %}</p>
+  {%- else %}
+  <p>{% if lang == "en" %}This website uses no cookies, keeps no visit statistics and loads no scripts from other sites.{% else %}이 웹사이트는 쿠키를 쓰지 않고, 방문 통계를 모으지 않으며, 다른 곳의 스크립트를 불러오지 않아요.{% endif %}</p>
+  {%- endif %}
+  {#- Only while site/config.toml has an analytics token (base.html loads the beacon then). #}
+  {%- if config.extra.analytics.token %}
+  {%- if lang == "en" %}
+  <p>Visits are counted with Cloudflare Web Analytics, which keeps <strong>aggregate data only</strong> (page address, referring address, browser type, country), uses no cookies or browser storage and does not track individual visitors. Cloudflare processes this data (<a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>).</p>
+  {%- else %}
+  <p>방문 통계는 Cloudflare Web Analytics로 모아요. 페이지 주소, 들어온 주소, 브라우저 종류, 나라 같은 <strong>집계 정보만</strong> 남고, 쿠키나 브라우저 저장소를 쓰지 않으며 방문자를 하나하나 추적하지 않아요. 이 정보는 Cloudflare가 처리해요(<a href="https://www.cloudflare.com/privacypolicy/">Cloudflare 개인정보 처리방침</a>).</p>
+  {%- endif %}
   {%- endif %}
   {{ section.content | safe }}
   {%- if config.extra.ads.enabled %}

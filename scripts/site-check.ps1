@@ -72,6 +72,7 @@ if ($AdsTest) {
 }
 $problems += Test-DownloadLinks $pages $Repo -Required @('index.html', 'en/index.html', 'download/index.html', 'en/download/index.html')
 $problems += Test-ExternalRequests $pages $BaseUrl $allowed
+$problems += Test-AnalyticsNotice $pages
 $problems += Test-CopiedText $pages 'privacy/index.html' (Read-Data 'privacy.ko.md')
 $problems += Test-CopiedText $pages 'en/privacy/index.html' (Read-Data 'privacy.en.md')
 $problems += Test-CopiedText $pages 'code-signing/index.html' (Read-Data 'code-signing.md')

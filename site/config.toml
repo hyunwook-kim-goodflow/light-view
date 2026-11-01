@@ -46,7 +46,9 @@ releases = ""
 release = ""
 faq = ""
 
-# Cloudflare Web Analytics token; empty = no analytics script.
+# Cloudflare Web Analytics token; empty = no analytics script and no analytics notice on
+# the privacy page. Set it here rather than turning on automatic setup in the Cloudflare
+# dashboard, which injects the script without the notice.
 [extra.analytics]
 token = ""
 
