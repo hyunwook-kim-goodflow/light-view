@@ -1,5 +1,8 @@
 //! The details handler as Explorer and the search indexer use it: made through the DLL's
 //! entry points or directly, fed a stream from `SHCreateMemStream`.
+//!
+//! The tests that make a store hold [`serial`]: `DllCanUnloadNow` counts every object of the
+//! process, and `property_store_never_starts_worker` asserts on it.
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -218,6 +221,7 @@ const EXPORTED: [PROPERTYKEY; 6] = [
 
 #[test]
 fn heif_properties_of_sample() {
+    let _serial = serial();
     let props = heif_properties(&std::fs::read(fixture_path(FIXTURE)).unwrap()).unwrap();
     assert_eq!(
         props,
@@ -260,6 +264,7 @@ fn heif_properties_of_sample() {
 
 #[test]
 fn rotated_heic_reports_rotated_size() {
+    let _serial = serial();
     let irot90 = std::fs::read(fixture_path("rainbow-451x461-irot90.heic")).unwrap();
     let props = heif_properties(&irot90).unwrap();
     assert_eq!((props.width, props.height), (461, 451));
@@ -281,6 +286,7 @@ fn rotated_heic_reports_rotated_size() {
 /// handlers read it: shown back in local time, it is the time the camera wrote.
 #[test]
 fn a_date_without_offset_is_local_time() {
+    let _serial = serial();
     let file = with_exif(&[], &camera_tiff("2024:05:06 07:08:09", None));
     let props = heif_properties(&file).unwrap();
     let Some(DateTaken::Local(_)) = props.date_taken else {
@@ -310,6 +316,7 @@ fn a_date_without_offset_is_local_time() {
 
 #[test]
 fn unusable_dates_are_left_out() {
+    let _serial = serial();
     for (date, offset) in [
         ("0000:00:00 00:00:00", None),
         ("2024:02:30 07:08:09", Some("+09:00")),
@@ -335,6 +342,7 @@ fn unusable_dates_are_left_out() {
 
 #[test]
 fn property_store_survives_corrupt_heic() {
+    let _serial = serial();
     let whole = fixture();
     let mut scrambled = whole.clone();
     for (i, b) in scrambled.iter_mut().enumerate().skip(32) {
@@ -442,6 +450,7 @@ fn property_store_never_starts_worker() {
 
 #[test]
 fn no_gps_properties_exported() {
+    let _serial = serial();
     let store = store_with(&fixture());
     let keys = keys(&store);
     assert_eq!(keys, EXPORTED, "exactly the six properties");
@@ -456,6 +465,7 @@ fn no_gps_properties_exported() {
 
 #[test]
 fn set_value_is_denied() {
+    let _serial = serial();
     let store = store_with(&fixture());
     let v = PROPVARIANT::from(5u32);
     // SAFETY: a local key and value.
@@ -492,6 +502,7 @@ fn set_value_is_denied() {
 
 #[test]
 fn initialize_rules_and_null_pointers() -> Result<()> {
+    let _serial = serial();
     let store: IPropertyStore = Store::new().into();
     // Before Initialize: nothing, and no error.
     // SAFETY: plain calls with local pointers.
@@ -530,6 +541,7 @@ fn initialize_rules_and_null_pointers() -> Result<()> {
 /// Over the shell's 64 MiB cap: Initialize fails without reading, like the other handlers.
 #[test]
 fn a_stream_over_the_cap_is_refused() {
+    let _serial = serial();
     let stream = mem_stream(&vec![0u8; crate::stream::READ_CAP as usize + 1]);
     let store: IPropertyStore = Store::new().into();
     let init: IInitializeWithStream = store.cast().unwrap();
