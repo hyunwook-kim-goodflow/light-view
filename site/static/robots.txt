@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://lightview.goodflow.dev/sitemap.xml

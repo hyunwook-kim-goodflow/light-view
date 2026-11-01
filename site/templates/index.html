@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{%- block content %}
+{%- set data = load_data(path="data/releases.json") %}
+{%- set rel = [x for x in data.releases if x.version == data.latest][0] %}
+<section class="hero">
+  <h1>{{ section.extra.headline | safe }}</h1>
+  <p class="lede">{{ section.extra.lede }}</p>
+  {% include "partials/download_button.html" %}
+</section>
+
+<section aria-labelledby="features">
+  <h2 id="features">{{ section.extra.features_title }}</h2>
+  <ul class="features">
+    {%- for f in section.extra.features %}
+    <li class="card"><h3>{{ f.title }}</h3><p>{{ f.body }}</p></li>
+    {%- endfor %}
+  </ul>
+</section>
+
+{%- if config.extra.ads.enabled %}
+{% set ad_slot = "home" %}{% include "partials/ad_slot.html" %}
+{%- endif %}
+
+<section aria-labelledby="safety">
+  <h2 id="safety">{{ section.extra.safety_title }}</h2>
+  <ul class="checks">
+    {%- for s in section.extra.safety %}
+    <li>{{ s }}</li>
+    {%- endfor %}
+  </ul>
+  <p><a href="{{ get_url(path='@/privacy/_index.md', lang=lang) }}">{{ trans(key="footer_privacy", lang=lang) }}</a> · <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+</section>
+
+<section aria-labelledby="faq">
+  <h2 id="faq">{{ section.extra.faq_title }}</h2>
+  {%- for f in section.extra.faq %}
+  <details>
+    <summary>{{ f.q }}</summary>
+    <p>{{ f.a }}</p>
+  </details>
+  {%- endfor %}
+  <p><a href="{{ get_url(path='@/faq/_index.md', lang=lang) }}">{{ trans(key="nav_faq", lang=lang) }} →</a></p>
+</section>
+{%- endblock %}
+{%- block scripts %}{% include "partials/not_windows.html" %}{% endblock %}

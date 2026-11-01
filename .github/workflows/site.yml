@@ -1,0 +1,150 @@
+# The website (lightview.goodflow.dev): build and check on every change, deploy to
+# Cloudflare Pages from main and when a release is published.
+#
+# Build: release data from the GitHub Releases API (published releases only), Zola, then
+# scripts/site-check.ps1 (downloads only from GitHub Releases, nothing loaded from other
+# sites, Code signing policy on every page, ad rules with an ads-on test build).
+#
+# Deploy runs only when the repository has the secret CLOUDFLARE_API_TOKEN (a token that
+# can edit Cloudflare Pages) and the variable CLOUDFLARE_ACCOUNT_ID, and goes through the
+# `site` environment, where required reviewers can hold each deploy for approval. Without
+# the secret the files are built and checked but not published.
+#
+# Design: docs/superpowers/specs/2026-10-31-light-view-site-design.md. Third-party actions
+# are pinned to full commit SHAs (the tag is in the comment), as in ci.yml.
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/releases/**"
+      - "PRIVACY.md"
+      - "README.md"
+      - "scripts/site-*.ps1"
+      - "scripts/tests/site.Tests.ps1"
+      - "testdata/site/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/releases/**"
+      - "PRIVACY.md"
+      - "README.md"
+      - "scripts/site-*.ps1"
+      - "scripts/tests/site.Tests.ps1"
+      - "testdata/site/**"
+      - ".github/workflows/site.yml"
+  # A person publishing a draft release (release.yml makes drafts) rebuilds the site with
+  # the new version, notes and checksums.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Runs that can deploy (main, releases, manual) share one group, so they run one after
+# another and the last one to deploy has read the newest release data; pull requests
+# only build and check, each in its own group.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('site-pr-{0}', github.ref) || 'site-publish' }}
+  cancel-in-progress: false
+
+env:
+  ZOLA_VERSION: "0.23.6"
+  ZOLA_SHA256: "8f5132b3522412d04e395e0b25f6d68613ad272a873e54a2b3ebf664873024a4"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and check the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # A release event's ref is the tag; the site comes from main's newest pages, with the
+      # new release read from the API.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || '' }}
+          persist-credentials: false
+
+      - name: Zola
+        run: |
+          archive="zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/$archive"
+          echo "${ZOLA_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/zola" --version
+
+      - name: Script tests
+        shell: pwsh
+        run: |
+          ./scripts/tests/site.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Read-only token: more API requests per hour than anonymous ones. Drafts are dropped
+      # by the script (design §4).
+      - name: Release data
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/site-data.ps1 -Repo "${{ github.repository }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build
+        run: |
+          "$RUNNER_TEMP/zola" --root site build
+          "$RUNNER_TEMP/zola" --root site check --skip-external-links
+
+      - name: Check the built site
+        shell: pwsh
+        run: |
+          ./scripts/site-check.ps1 -Repo "${{ github.repository }}" -AdsTest -Zola "$env:RUNNER_TEMP/zola"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the site
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: site/public
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to Cloudflare Pages
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: site
+      url: https://lightview.goodflow.dev
+    env:
+      # Secrets cannot appear in `if:`; this says whether deploying is set up.
+      DEPLOY_ENABLED: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+    steps:
+      - name: Not deployed
+        if: env.DEPLOY_ENABLED != 'true'
+        run: echo "::warning::CLOUDFLARE_API_TOKEN is not set; the site was built and checked but not deployed."
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: env.DEPLOY_ENABLED == 'true'
+        with:
+          name: site
+          path: public
+
+      # Direct upload of the checked files; Cloudflare's own Git builds are not used, so
+      # what goes live is exactly what site-check.ps1 passed.
+      - name: Deploy
+        if: env.DEPLOY_ENABLED == 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.151.0"
+          command: pages deploy public --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT || 'light-view' }} --branch=main

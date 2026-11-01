@@ -62,6 +62,16 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # docs/releases/<version>.md must exist, name this version and say `signed: true`
+      # exactly when this build is signed (docs/releases/README.md); its text opens the
+      # draft release and the website's release page.
+      - name: Release notes file
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          powershell -ExecutionPolicy Bypass -File scripts/release-notes.ps1 -Version "${{ steps.version.outputs.version }}" -Signed "$env:SIGNING_ENABLED" -Out dist/release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
@@ -186,6 +196,7 @@ jobs:
             dist/light-view-${{ steps.version.outputs.version }}-portable.zip
             dist/light-view-${{ steps.version.outputs.version }}-setup.exe
             dist/SHA256SUMS.txt
+            dist/release-notes.md
           if-no-files-found: error
 
   draft-release:
@@ -210,7 +221,10 @@ jobs:
         run: |
           cd release-files
           sha256sum --check SHA256SUMS.txt
-          notes="light-view $VERSION
+          # docs/releases/<version>.md (checked in the build job), then the fixed part.
+          notes="$(cat release-notes.md)
+
+          ## Files
 
           - light-view-$VERSION-setup.exe: 설치판 (for you only by default, no administrator rights; or for all users with administrator rights, which adds the HEIC preview pane and details)
           - light-view-$VERSION-portable.zip: 포터블판 (settings stay next to the exe)

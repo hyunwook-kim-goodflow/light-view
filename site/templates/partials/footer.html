@@ -1,0 +1,15 @@
+<footer class="site-footer">
+  <div class="wrap">
+    <ul>
+      {#- "Code signing policy" is SignPath's term and stays in English in both languages. #}
+      <li><a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></li>
+      <li><a href="{{ get_url(path='@/privacy/_index.md', lang=lang) }}">{{ trans(key="footer_privacy", lang=lang) }}</a></li>
+      <li><a href="https://github.com/{{ config.extra.repo }}">GitHub</a></li>
+      <li><a href="https://github.com/{{ config.extra.repo }}#readme">{{ trans(key="footer_license", lang=lang) }}</a></li>
+      {%- if config.extra.sponsor_url %}
+      <li><a href="{{ config.extra.sponsor_url }}" data-sponsor>{{ trans(key="footer_sponsor", lang=lang) }}</a></li>
+      {%- endif %}
+    </ul>
+    <p>{{ trans(key="footer_made_by", lang=lang) }} · lightview.goodflow.dev</p>
+  </div>
+</footer>

@@ -1,0 +1,10 @@
+{#- One manual AdSense unit (never Auto ads), labelled, in a plain hairline box with its
+    height reserved. Callers include it only when config.extra.ads.enabled, set `ad_slot`
+    to a key of config.extra.ads.slots, and place it after a headed section, never next to
+    a download link (design §9; scripts/site-check.ps1 checks). -#}
+<aside class="ad-slot" data-site-ad="{{ ad_slot }}" aria-label="{{ trans(key='ad_label', lang=lang) }}">
+  <span class="ad-label">{{ trans(key="ad_label", lang=lang) }}</span>
+  <ins class="adsbygoogle" style="display:block" data-ad-client="{{ config.extra.ads.client }}" data-ad-slot="{{ config.extra.ads.slots[ad_slot] }}" data-ad-format="auto" data-full-width-responsive="true"></ins>
+  <script>(window.adsbygoogle = window.adsbygoogle || []).push({});</script>
+  <span class="ad-report"><a href="https://github.com/{{ config.extra.repo }}/issues/new?title=Bad%20ad%20on%20the%20website">{{ trans(key="ad_report", lang=lang) }}</a></span>
+</aside>

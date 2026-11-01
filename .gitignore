@@ -4,3 +4,9 @@ testdata/private/
 /.vcpkg/
 /vcpkg_installed/
 /dist/
+
+# Website build output and generated data
+/site/public/
+/site/data/
+/site/content/releases/[0-9]*.md
+/site/static/ads.txt

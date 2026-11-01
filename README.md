@@ -33,7 +33,7 @@
 - `.heic`·`.heif`의 썸네일 처리기(두 방식), 미리 보기·자세히 처리기(모든 사용자) 자리에 다른 프로그램(예: 다른 HEIC 도구, Windows의 원래 자세히 처리기)이 등록해 둔 값이 있으면 설치 때 저장해 두었다가 제거할 때 되돌려요. 그 사이 다른 프로그램이 값을 바꿨으면 건드리지 않아요. 설치가 실패하거나 취소돼도 되돌려요.
 - 모든 사용자 설치를 제거하면 제거한 사용자의 작업자 AppContainer 프로필만 지워져요. 다른 사용자 계정의 프로필(`%LOCALAPPDATA%\Packages\goodflow.lightview.worker`)은 남으니, 필요하면 그 계정에서 지워 주세요.
 - 탐색기 썸네일 캐시는 지우지 않아요. 설치 전에 빈 아이콘으로 기억된 HEIC는 디스크 정리에서 썸네일(Thumbnails) 항목을 지우면 다시 그려져요.
-- 코드 서명은 v1.0 릴리스 때 받아요. 그전에는 모든 사용자 설치의 UAC 창에 "알 수 없는 게시자"가 나오고, 처음 실행할 때 아래 SmartScreen 경고가 뜰 수 있어요.
+- 릴리스는 아직 코드 서명이 없어요. 그래서 모든 사용자 설치의 UAC 창에 "알 수 없는 게시자"가 나오고, 처음 실행할 때 아래 SmartScreen 경고가 뜰 수 있어요. 받은 파일은 SHA-256 체크섬으로 확인해요.
 
 **SmartScreen 경고:** 코드 서명이 없는 릴리스는 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있어요. 아래처럼 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 누르면 돼요. zip에서 푼 파일에 경고가 뜨면 zip 파일의 속성에서 **차단 해제**를 체크하고 다시 풀어도 돼요.
 
@@ -144,7 +144,7 @@ M5(강화와 배포)까지 끝난 v0.1.0 릴리스 후보예요. 아직 GitHub�
 - **언어:** 한국어와 영어예요. "자동"이면 윈도우 표시 언어가 한국어일 때 한국어, 그 밖에는 영어예요. 설정에서 바꾸면 창 제목, 버튼 줄 도움말, 메뉴, 대화상자, 알림, EXIF 카드까지 바로 바뀌어요. 열기 대화상자의 단추와 제목은 윈도우가 그리는 것이라 윈도우 언어를 따라요.
 - **화면 읽기 프로그램:** UI Automation으로 버튼 줄, 시작 화면 [열기], 메뉴, 대화상자, 알림, EXIF 카드와 목록, 설정 창의 이름·역할·상태(사용 안 함, 고정됨, 선택됨)를 알려 주고, 포커스 이동과 알림을 읽어 줘요.
 - **USB 안전 제거:** 보던 사진이 있는 이동식 드라이브를 "하드웨어 안전 제거"로 빼려고 하면 폴더 감시를 놓아서 제거가 막히지 않아요. 화면의 사진은 그대로 남고, 그 뒤 저장·삭제는 파일이 바뀌었다고 알려 줘요. 제거가 취소되면 감시를 다시 시작하고, 드라이브를 다시 꽂고 같은 폴더의 사진을 열면 다시 감시해요.
-- 아직 없는 것: 단축키 편집, AVIF, 코드 서명(SignPath 신청 전). 아래 로드맵을 보세요.
+- 아직 없는 것: 단축키 편집, AVIF, 코드 서명(SignPath Foundation 재신청 예정). 아래 로드맵을 보세요.
 - **업데이트 확인(선택):** 네트워크를 쓰는 기능은 이것 하나예요. 사진을 처음 연 뒤 "새 버전이 나오면 알려 드릴까요?"라고 한 번 묻고, [알려 주세요]를 고를 때만 켜져요(Enter와 Esc는 [괜찮아요]). 켜면 하루 한 번 백그라운드에서 `https://api.github.com/repos/hyunwook-kim-goodflow/light-view/releases/latest`를 HTTPS로 조회해요(리디렉션·쿠키 없음, 인증서 해지 확인, 10초 제한, 응답 1 MB까지). 새 버전이 있으면 "새 버전(X)이 나왔어요 [보기]"를 보여 주고, [보기]는 그 릴리스 페이지(`https://github.com/hyunwook-kim-goodflow/light-view/releases/tag/...`)만 브라우저로 열어요. 다운로드·설치는 하지 않아요. 윈도우의 자동 프록시 설정을 따르므로 조회할 때 프록시 자동 검색(WPAD)이나 PAC 파일 요청이 함께 일어날 수 있어요. 설정의 "업데이트 확인"으로 끌 수 있어요.
 - **크래시 기록:** 앱이 비정상 종료되면 `%LOCALAPPDATA%\light-view\crashes\`(포터블판은 exe 옆 `data\crashes\`)에 로그와 미니덤프를 남겨요(최근 10개만). 어디로도 보내지 않아요. 원하면 GitHub 이슈에 직접 첨부해 주세요.
 
@@ -429,7 +429,7 @@ M2 마무리에서 libheif·libde265 디코딩 스레드를 켰어요(논리 CPU
 - (M5) **NAS/UNC:** 네트워크 공유의 사진 열기, 넘기기, 회전 저장, 삭제(영구 삭제 확인)가 되나요
 - (M5) **실제 아이폰 샘플:** 12 MP 아이폰 HEIC로 `lv-bench --heic <파일>`을 돌려 첫 사진 시간(목표 400 ms)과 메모리를 재고, 위 표의 "heic12mp" 줄을 채워 주세요. 큰 파노라마 JPEG이 축소해서 열리는지도 봐 주세요
 - (M5) **CI 첫 실행:** GitHub에 올린 뒤 `ci.yml`(빌드·테스트·clippy·fmt·deny·audit·bench), `fuzz.yml`(주 2회 nightly 퍼징, 말뭉치 캐시(이어받기는 최선 노력)·아티팩트), `release.yml`(`v*` 태그 → 패키징 → Inno Setup 컴파일 → 체크섬 → 초안 릴리스)이 처음으로 통과하나요. `baseline.json`은 이 노트북 한 대의 값이라 CI 러너에서 다시 만들어야 해요
-- (M5) **SignPath 신청:** SignPath Foundation(오픈소스 무료 서명)을 신청하고 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞춰 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요. 서명을 붙일 때 설치 파일만이 아니라 Inno Setup이 만드는 제거 프로그램(`unins000.exe`)도 서명되게 해 주세요(지금은 `setup.exe`만 SignPath로 보내요). (M7) SignPath의 `executables` 설정에는 `lv-app.exe`, `lv-worker.exe`와 함께 탐색기 확장 `lv_shell.dll`도 넣어 주세요(워크플로가 셋을 함께 보내요)
+- (M5) **SignPath 재신청:** 2026-10-31 신청은 "아직 공개적으로 알려진 정도가 부족하다"는 이유로 거절됐어요(별·포크·기여자, 외부 글이나 토론, 꾸준한 활동을 봐요). 사이트를 공개하고 사용자가 늘면 다시 신청해요. 승인되면 `SIGNPATH_API_TOKEN` 시크릿과 `release.yml`의 조직·프로젝트 이름을 맞추고, 아래 "Code signing policy" 절을 SignPath 문구로 되돌려 주세요. 그 전까지 릴리스는 서명 없이 체크섬만 있어요. 서명을 붙일 때 설치 파일만이 아니라 Inno Setup이 만드는 제거 프로그램(`unins000.exe`)도 서명되게 해 주세요(지금은 `setup.exe`만 SignPath로 보내요). (M7) SignPath의 `executables` 설정에는 `lv-app.exe`, `lv-worker.exe`와 함께 탐색기 확장 `lv_shell.dll`도 넣어 주세요(워크플로가 셋을 함께 보내요)
 - (M5) **릴리스 노트:** "세그먼트 사이에 잘못된 바이트가 끼거나 SOI·SOF가 두 번 나오는 JPEG은 이제 열지 않아요(안전을 위해)" 한 줄을 넣어 주세요
 - (M5) **업데이트 확인 실제 응답:** 첫 릴리스를 게시한 뒤 "업데이트 확인"을 켜고 낮은 버전으로 실행하면 "새 버전(X)이 나왔어요 [보기]"가 나오고 [보기]가 그 릴리스 페이지를 여나요(지금은 저장소가 없어 404 → 조용히 넘어가요)
 - (M5) **개발 PC 정리:** 이 PC의 `%USERPROFILE%\.cargo\bin\rustup.exe`가 사라져 `cargo`·`rustc` 바로 가기가 동작하지 않아요(M5 중 rustup 자체 업데이트 때문). [rustup.rs](https://rustup.rs)의 `rustup-init.exe`로 다시 설치해 주세요(도구 체인은 그대로 있어요). 또 M5 Task 1 테스트에서 남은 `lv-worker.exe` 프로세스(PID 21140)가 `target\debug\lv-worker.exe`를 잠그고 있어서 M5는 `CARGO_TARGET_DIR=target\m5`로 빌드했어요. 그 프로세스를 끝내 주세요
@@ -442,12 +442,12 @@ light-view의 코드는 [MIT](LICENSE-MIT) 또는 [Apache-2.0](LICENSE-APACHE) �
 
 ## Code signing policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org). (신청 중이에요. 승인 전 릴리스는 서명 없이 SHA-256 체크섬만 있어요.)
+Release files are not code-signed yet. Every release comes with SHA-256 checksums (`SHA256SUMS.txt`, also shown on the release page); check a file against them before running it. We plan to apply again to [SignPath Foundation](https://signpath.org)'s free code signing for open source projects, and this section will name the signing service once releases are signed.
 
 - **Committers and reviewers:** [Hyunwook Kim](https://github.com/hyunwook-kim-goodflow) (maintainer)
 - **Approvers:** [Hyunwook Kim](https://github.com/hyunwook-kim-goodflow) (maintainer)
 
-Every release is built by the GitHub Actions workflow `.github/workflows/release.yml` from a tagged commit of this repository; only those artifacts are submitted for signing, and each signing request is approved by hand.
+Every release is built by the GitHub Actions workflow `.github/workflows/release.yml` from a tagged commit of this repository and published by hand from a draft. Once signing is set up, only those artifacts will be submitted for signing, and each signing request will be approved by hand.
 
 **Privacy policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. The only such feature is the optional update check, which is off until you turn it on. See [`PRIVACY.md`](PRIVACY.md) (also shown by the installer).
 

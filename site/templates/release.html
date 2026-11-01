@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{%- block head_title %}
+  <title>{{ page.title }}</title>
+{%- endblock %}
+{%- block content %}
+{%- set data = load_data(path="data/releases.json") %}
+{%- set rel = [x for x in data.releases if x.version == page.extra.version][0] %}
+<h1>{{ page.title }}</h1>
+<p class="muted">{{ rel.date }} · <a href="{{ rel.url }}">GitHub</a> · <a href="{{ get_url(path='@/releases/_index.md', lang=lang) }}">{{ trans(key="nav_releases", lang=lang) }}</a></p>
+
+<section aria-labelledby="files">
+  <h2 id="files">{% if lang == "en" %}Files{% else %}파일{% endif %}</h2>
+  {% include "partials/checksums.html" %}
+  <p>{% if rel.signed %}{% if lang == "en" %}Signed by SignPath Foundation.{% else %}SignPath Foundation이 서명했어요.{% endif %}{% else %}{% if lang == "en" %}Not code-signed; check the SHA-256 above.{% else %}코드 서명 없음. 위 SHA-256으로 확인해요.{% endif %}{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+</section>
+
+<section class="prose" aria-label="{% if lang == 'en' %}Notes{% else %}노트{% endif %}">
+{{ page.content | safe }}
+</section>
+
+{%- if config.extra.ads.enabled %}
+{% set ad_slot = "release" %}{% include "partials/ad_slot.html" %}
+{%- endif %}
+
+{%- endblock %}

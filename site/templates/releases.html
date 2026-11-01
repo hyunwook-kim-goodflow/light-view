@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{%- block extra_head %}
+  <link rel="alternate" type="application/atom+xml" title="light-view releases" href="{{ get_url(path='@/releases/_index.md', lang=lang) }}atom.xml">
+{%- endblock %}
+{%- block content %}
+{%- set data = load_data(path="data/releases.json") %}
+<h1>{{ section.title }}</h1>
+<p class="muted"><a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a> · <a href="{{ get_url(path='@/releases/_index.md', lang=lang) }}atom.xml">{% if lang == "en" %}Atom feed{% else %}Atom 피드{% endif %}</a></p>
+<section aria-labelledby="versions">
+  <h2 id="versions" class="visually-hidden">{% if lang == "en" %}Versions{% else %}버전{% endif %}</h2>
+  <ol class="release-list">
+    {%- for r in data.releases %}
+    {%- set path = "@/releases/" ~ (r.version | replace(from=".", to="-")) ~ ".md" %}
+    {%- if lang == "en" %}{% set summary = r.summary_en %}{% else %}{% set summary = r.summary_ko %}{% endif %}
+    <li>
+      <a href="{{ get_url(path=path, lang=lang) }}"><span class="version">light-view {{ r.version }}</span></a>
+      <span class="muted">{{ r.date }}{% if r.version == data.latest %} · {% if lang == "en" %}latest{% else %}최신{% endif %}{% endif %}</span>
+      {%- if summary %}<p>{{ summary }}</p>{% endif %}
+    </li>
+    {%- endfor %}
+  </ol>
+</section>
+{%- if config.extra.ads.enabled %}
+{% set ad_slot = "releases" %}{% include "partials/ad_slot.html" %}
+{%- endif %}
+{%- endblock %}

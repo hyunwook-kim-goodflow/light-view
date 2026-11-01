@@ -1,0 +1,24 @@
+{%- set home_url = get_url(path="@/_index.md", lang=lang) -%}
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="{{ home_url }}">
+      <img src="{{ get_url(path='img/icon-192.png') }}" alt="" width="32" height="32">
+      <span>light-view</span>
+    </a>
+    <nav class="site-nav" aria-label="{{ trans(key='nav_label', lang=lang) }}">
+      {%- set nav = [["@/download/_index.md", "nav_download"], ["@/releases/_index.md", "nav_releases"], ["@/faq/_index.md", "nav_faq"]] %}
+      {%- for item in nav %}
+      {%- set url = get_url(path=item[0], lang=lang) %}
+      <a href="{{ url }}"{% if current and current.permalink == url %} aria-current="page"{% endif %}>{{ trans(key=item[1], lang=lang) }}</a>
+      {%- endfor %}
+    </nav>
+    {%- set other = "" %}
+    {%- if current %}
+    {%- for t in current.translations %}{% if t.lang != lang %}{% set_global other = t.permalink %}{% endif %}{% endfor %}
+    {%- endif %}
+    {%- if not other %}{% if lang == "en" %}{% set other = get_url(path="@/_index.md", lang="ko") %}{% else %}{% set other = get_url(path="@/_index.md", lang="en") %}{% endif %}{% endif %}
+    <span class="lang-switch">
+      <span aria-current="true">{{ trans(key="lang_name", lang=lang) }}</span>&nbsp;|&nbsp;<a href="{{ other }}" hreflang="{% if lang == 'en' %}ko{% else %}en{% endif %}" lang="{% if lang == 'en' %}ko{% else %}en{% endif %}">{{ trans(key="other_lang_name", lang=lang) }}</a>
+    </span>
+  </div>
+</header>
