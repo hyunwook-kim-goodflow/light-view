@@ -3,15 +3,21 @@ title = "light-view"
 description = "아이폰 사진(HEIC)도 바로 여는 가벼운 무료 Windows 사진 뷰어"
 
 [extra]
-headline = "아이폰 사진(HEIC)도 바로 여는<br>가벼운 <mark>무료</mark> Windows 사진 뷰어"
+headline = "아이폰 <span class=\"nobr\">사진(HEIC)도</span> 바로 여는 가벼운 <mark>무료</mark> Windows 사진 뷰어"
 lede = "윈도우에서 HEIC 사진을 보려면 보통 유료 HEVC 확장이 필요해요. light-view는 그 확장 없이 무료로, 빠르게, 안전하게 열어요."
-features_title = "할 수 있는 것"
+hero_alt = "light-view로 연 사진. 창 아래에 이전·다음, 확대·축소, 회전, 정보, 삭제 버튼이 떠 있어요."
+scenes = [
+  { img = "exif", title = "찍은 날과 카메라를 한눈에", body = "I 키를 누르면 찍은 날짜, 카메라, 노출이 작은 카드로 떠요. [전체 보기]에서 모든 태그를 보고 값을 복사해요.", alt = "밤 풍경 사진 위에 뜬 정보 카드. 2013. 8. 23, 오후 9:02, SONY DSLR-A550, 6s · f/10 · ISO 200, 4592×3056 · 9.2 MB." },
+  { img = "resize", title = "올리기 좋게 한 번에 줄이기", body = "여러 장을 해상도·용량·비율에 맞춰 한꺼번에 줄여요. 저장하기 전에 결과 크기를 미리 보여 주고, 위치 정보는 기본으로 지워요.", alt = "크기 조정 화면. 사진 여섯 장을 긴 변 1920 px JPEG로 줄이면 합계 50.0 MB가 약 10.0 MB가 된다고 미리 보여 줘요." },
+]
+credit = "화면 속 사진: Wilfredor, Jebulon (CC0, Wikimedia Commons)"
+cta_title = "더블클릭 한 번이면 열려요"
+features_title = "그 밖에 할 수 있는 것"
 features = [
   { title = "아이폰 사진을 무료로", body = "HEIC·HEIF를 유료 HEVC 확장 없이 열어요. JPEG, PNG, GIF, WebP, BMP도 열어요." },
   { title = "방향키로 폴더 넘기기", body = "사진을 더블클릭하면 바로 열리고, ←·→로 같은 폴더의 사진을 넘겨요. 휠·더블클릭으로 확대해요." },
   { title = "무손실 회전 저장", body = "Ctrl+← / Ctrl+→로 돌리고 Ctrl+S로 저장해요. JPEG는 화질을 잃지 않게 돌려요." },
   { title = "지우고 되돌리기", body = "Delete는 휴지통으로 보내고, Ctrl+Z로 바로 되돌려요." },
-  { title = "올리기 좋게 크기 줄이기", body = "해상도·파일 크기·비율에 맞춰 줄여요. 위치 정보는 기본으로 지워요." },
   { title = "탐색기에서 HEIC 썸네일", body = "설치판은 탐색기에 HEIC 사진의 썸네일을 보여 줘요. 모든 사용자 설치는 미리 보기 창과 자세히 탭도 채워요." },
 ]
 safety_title = "안심하고 쓰도록"
