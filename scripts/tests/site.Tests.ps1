@@ -311,6 +311,22 @@ Test 'release_notes_version_must_match_tag' {
     }
 }
 
+Test 'release_notes_signed_must_match_signing' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("lv-site-test-" + [guid]::NewGuid())
+    try {
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        Write-Utf8File (Join-Path $dir '1.0.0.md') "---`nversion: 1.0.0`nsigned: true`n---`n## 한국어`n`n- a`n`n## English`n`n- b`n"
+        Assert-Throws { Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' -Signed 'false' } 'signed: true'
+        $null = Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' -Signed 'true'
+        Write-Utf8File (Join-Path $dir '1.0.0.md') "---`nversion: 1.0.0`n---`n## 한국어`n`n- a`n`n## English`n`n- b`n"
+        Assert-Throws { Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' -Signed 'true' } 'signed: true'
+        $null = Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0' -Signed 'false'
+        $null = Get-ReleaseNotesBody -NotesDir $dir -Version '1.0.0'
+    } finally {
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    }
+}
+
 Test 'repository_release_notes_are_valid' {
     $dir = Join-Path $PSScriptRoot '../../docs/releases'
     foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.md' | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.md$' }) {

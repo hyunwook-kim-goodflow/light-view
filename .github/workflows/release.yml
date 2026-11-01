@@ -62,13 +62,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # docs/releases/<version>.md must exist and name this version (docs/releases/README.md);
-      # its text opens the draft release and the website's release page.
+      # docs/releases/<version>.md must exist, name this version and say `signed: true`
+      # exactly when this build is signed (docs/releases/README.md); its text opens the
+      # draft release and the website's release page.
       - name: Release notes file
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          powershell -ExecutionPolicy Bypass -File scripts/release-notes.ps1 -Version "${{ steps.version.outputs.version }}" -Out dist/release-notes.md
+          powershell -ExecutionPolicy Bypass -File scripts/release-notes.ps1 -Version "${{ steps.version.outputs.version }}" -Signed "$env:SIGNING_ENABLED" -Out dist/release-notes.md
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Rust toolchain

@@ -360,11 +360,18 @@ function Test-ReleasePages($Pages, $Site) {
 # The text of docs/releases/<Version>.md without its front matter (the Korean part, then
 # the English part). Throws when the file is missing, names another version, or lacks a
 # language part, so a tag cannot be released without notes (design §6).
-function Get-ReleaseNotesBody([string]$NotesDir, [string]$Version) {
+# $Signed ('true' or 'false', empty to skip) is whether the release workflow signs this
+# build; the notes' `signed:` flag, which the website shows, must say the same.
+function Get-ReleaseNotesBody([string]$NotesDir, [string]$Version, [string]$Signed = '') {
     $path = Join-Path $NotesDir "$Version.md"
     $notes = Read-ReleaseNotes $path
     if (-not $notes) { throw "docs/releases/$Version.md is missing: write the release notes (see docs/releases/README.md) before tagging v$Version" }
     if ($notes.front['version'] -ne $Version) { throw "docs/releases/$Version.md says version '$($notes.front['version'])', expected $Version" }
+    if ($Signed) {
+        $noted = ($notes.front['signed'] -eq 'true')
+        if ($noted -and $Signed -ne 'true') { throw "docs/releases/$Version.md says signed: true, but this build is not code-signed (SIGNPATH_API_TOKEN is not set)" }
+        if (-not $noted -and $Signed -eq 'true') { throw "this build is code-signed: set signed: true in docs/releases/$Version.md" }
+    }
     return "## 한국어`n`n$($notes.ko)`n`n## English`n`n$($notes.en)"
 }
 
