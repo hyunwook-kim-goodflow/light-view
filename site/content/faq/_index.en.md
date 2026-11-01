@@ -18,7 +18,7 @@ Photos are decoded (C code) only in a separate worker process (`lv-worker.exe`) 
 
 ## Windows says "Windows protected your PC".
 
-Releases before code signing can show SmartScreen on first run. Check the SHA-256 checksum on the [download page](@/download/_index.en.md) first, then choose **More info** → **Run anyway**. From the 1.0 release on, files are code-signed through SignPath Foundation ([Code signing policy](@/code-signing/_index.en.md)).
+Releases are not code-signed yet, so SmartScreen can show on first run. Check the SHA-256 checksum on the [download page](@/download/_index.en.md) first, then choose **More info** → **Run anyway**. The signing plan is in the [Code signing policy](@/code-signing/_index.en.md).
 
 ## What is the difference between "for me only" and "for all users"?
 

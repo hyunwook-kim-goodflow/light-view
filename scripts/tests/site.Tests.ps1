@@ -159,7 +159,8 @@ Test 'privacy_md_splits_by_language' {
 
 Test 'code_signing_section_is_extracted' {
     $text = Get-ReadmeSection (Get-Content -Raw -Encoding UTF8 (Join-Path $PSScriptRoot '../../README.md')) 'Code signing policy'
-    Assert-True ($text -like '*Free code signing provided by*SignPath Foundation*') 'signpath sentence'
+    Assert-True ($text -like '*not code-signed yet*SHA-256*') 'signing status sentence'
+    Assert-True ($text -like '*Approvers:*') 'roles'
     Assert-True ($text -notlike '*## HEVC*') 'stops at the next section'
 }
 

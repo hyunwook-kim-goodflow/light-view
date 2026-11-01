@@ -18,7 +18,7 @@ HEIC는 HEVC라는 압축 방식을 써요. Windows는 이걸 풀려면 Microsof
 
 ## "Windows의 PC 보호" 창이 떠요.
 
-코드 서명 전 릴리스라서 처음 실행할 때 SmartScreen 창이 뜰 수 있어요. [내려받기 페이지](@/download/_index.md)에서 SHA-256 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 눌러요. 1.0 릴리스부터는 SignPath Foundation의 코드 서명을 받아요([Code signing policy](@/code-signing/_index.md)).
+릴리스에 아직 코드 서명이 없어서 처음 실행할 때 SmartScreen 창이 뜰 수 있어요. [내려받기 페이지](@/download/_index.md)에서 SHA-256 체크섬을 먼저 확인한 다음 **추가 정보** → **실행**을 눌러요. 서명 계획은 [Code signing policy](@/code-signing/_index.md)에 있어요.
 
 ## 나만 사용과 모든 사용자 설치는 뭐가 달라요?
 
