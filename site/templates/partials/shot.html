@@ -1,0 +1,12 @@
+{#- An app screenshot (site/static/img/shots/<shot>[-en]-<width>.webp, 1262 and 760 px wide,
+    captured from the release build in the page's language). Needs `shot`, `alt`, `sizes`;
+    `eager` for the one above the fold. Photos in them are CC0 (content `credit`). -#}
+{%- set_global sfx = "" -%}
+{%- if lang == "en" %}{% set_global sfx = "-en" %}{% endif -%}
+{%- set_global h = 891 -%}
+{%- if shot == "viewer" %}{% set_global h = 901 %}{% elif shot == "resize" %}{% set_global h = 851 %}{% endif -%}
+{%- set base = "img/shots/" ~ shot ~ sfx -%}
+<img class="shot" src="{{ get_url(path=base ~ '-1262.webp') }}"
+     srcset="{{ get_url(path=base ~ '-760.webp') }} 760w, {{ get_url(path=base ~ '-1262.webp') }} 1262w"
+     sizes="{{ sizes }}" width="1262" height="{{ h }}" alt="{{ alt }}" decoding="async"
+     {%- if eager | default(value=false) %} fetchpriority="high"{% else %} loading="lazy"{% endif %}>
