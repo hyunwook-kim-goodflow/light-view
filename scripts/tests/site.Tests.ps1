@@ -415,6 +415,16 @@ Test 'ads_on_needs_publisher_and_unit_ids' {
     Assert-Equal 0 @(Test-AdSettings $off @{} $null).Count 'off'
 }
 
+Test 'structured_data_parses_and_names_the_app' {
+    $good = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"light-view","softwareVersion":"0.2.0","downloadUrl":"https://github.com/a/b/releases/download/v0.2.0/x.exe"}</script>'
+    Assert-Equal 0 @(Test-StructuredData @{ 'index.html' = (Page $good) } @('index.html') '0.2.0').Count 'valid'
+    $broken = '<script type="application/ld+json">{"name": "light-view",}</script>'
+    Assert-Equal 1 @(Test-StructuredData @{ 'index.html' = (Page $broken) } @('index.html') '0.2.0').Count 'does not parse'
+    Assert-Equal 1 @(Test-StructuredData @{ 'index.html' = (Page $Features) } @('index.html') '0.2.0').Count 'missing on a required page'
+    $old = $good -replace '"softwareVersion":"0.2.0"', '"softwareVersion":"0.1.0"'
+    Assert-Equal 1 @(Test-StructuredData @{ 'index.html' = (Page $old) } @('index.html') '0.2.0').Count 'not the latest version'
+}
+
 Write-Host ''
 Write-Host "$script:Passed passed, $script:Failed failed"
 if ($script:Failed -gt 0) { exit 1 }

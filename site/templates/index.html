@@ -67,4 +67,36 @@
   <p class="credit muted">{{ section.extra.credit }}</p>
 </section>
 {%- endblock %}
+{%- block extra_head %}
+{#- Structured data for search engines and AI answers: what the app is, that it is free,
+    which Windows, the version and the download. Facts only (no ratings). scripts/site-check.ps1
+    checks that it parses. -#}
+{%- set data = load_data(path="data/releases.json") %}
+{%- set rel = [x for x in data.releases if x.version == data.latest][0] %}
+{%- set setup = [x for x in rel.assets if x.kind == "setup"][0] %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "light-view",
+  "url": {{ current_url | json_encode | safe }},
+  "description": {{ section.description | json_encode | safe }},
+  "inLanguage": {{ lang | json_encode | safe }},
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Image viewer",
+  "operatingSystem": "Windows 10 22H2, Windows 11 (x64)",
+  "softwareVersion": {{ rel.version | json_encode | safe }},
+  "datePublished": {{ rel.date | json_encode | safe }},
+  "downloadUrl": {{ setup.url | json_encode | safe }},
+  "fileSize": "{{ setup.size_mb }} MB",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://github.com/{{ config.extra.repo }}/blob/main/LICENSE-MIT",
+  "codeRepository": "https://github.com/{{ config.extra.repo }}",
+  "screenshot": {% if lang == "en" %}{{ get_url(path="img/shots/viewer-en-1262.webp") | json_encode | safe }}{% else %}{{ get_url(path="img/shots/viewer-1262.webp") | json_encode | safe }}{% endif %},
+  "image": {{ get_url(path="img/og.png") | json_encode | safe }},
+  "author": { "@type": "Organization", "name": "goodflow", "url": "https://goodflow.dev" }
+}
+</script>
+{%- endblock %}
 {%- block scripts %}{% include "partials/not_windows.html" %}{% endblock %}

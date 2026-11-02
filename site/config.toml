@@ -48,6 +48,10 @@ releases = ""
 release = ""
 faq = ""
 
+# Search engines' site-ownership codes (meta tags on every page); empty = no tag.
+[extra.verify]
+naver = "5f7f53e371ed6035f6a9fdcfb2ca6c71fe54b1c0"
+
 # Cloudflare Web Analytics token; empty = no analytics script and no analytics notice on
 # the privacy page. Set it here rather than turning on automatic setup in the Cloudflare
 # dashboard, which injects the script without the notice.

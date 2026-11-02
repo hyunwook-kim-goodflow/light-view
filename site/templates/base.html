@@ -6,7 +6,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {%- block head_title %}
-  <title>{% if current and current.title and current.path != "/" and current.path != "/en/" %}{{ current.title }} · {% endif %}light-view</title>
+  {#- The home pages' titles carry the whole phrase people search for; other pages are "<page> · light-view". #}
+  <title>{% if current and current.title and current.path != "/" and current.path != "/en/" %}{{ current.title }} · light-view{% elif current and current.title %}{{ current.title }}{% else %}light-view{% endif %}</title>
   {%- endblock %}
   {%- if current and current.description %}{% set desc = current.description %}{% else %}{% set desc = trans(key="site_description", lang=lang) %}{% endif %}
   <meta name="description" content="{{ desc }}">
@@ -19,6 +20,9 @@
   <link rel="canonical" href="{{ current.permalink }}">
   {%- for t in current.translations %}
   <link rel="alternate" hreflang="{{ t.lang }}" href="{{ t.permalink }}">
+  {%- if t.lang == config.default_language %}
+  <link rel="alternate" hreflang="x-default" href="{{ t.permalink }}">
+  {%- endif %}
   {%- endfor %}
   {%- endif %}
   <meta property="og:type" content="website">
@@ -28,6 +32,9 @@
   <meta property="og:image" content="{{ get_url(path='img/og.png') }}">
   {%- if current %}<meta property="og:url" content="{{ current.permalink }}">{% endif %}
   {%- block extra_head %}{% endblock %}
+  {%- if config.extra.verify.naver %}
+  <meta name="naver-site-verification" content="{{ config.extra.verify.naver }}">
+  {%- endif %}
   {%- if config.extra.ads.client %}
   <meta name="google-adsense-account" content="{{ config.extra.ads.client }}">
   {%- endif %}

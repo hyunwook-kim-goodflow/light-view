@@ -414,6 +414,34 @@ function Test-NoAds($Pages) {
     return $problems
 }
 
+# The home pages' structured data (JSON-LD, read by search engines and AI answers): there,
+# parses, names light-view and gives the latest version.
+function Test-StructuredData($Pages, [string[]]$Required, [string]$Latest) {
+    $problems = @()
+    foreach ($path in $Required) {
+        if (-not $Pages.ContainsKey($path)) { $problems += "${path}: missing"; continue }
+        $m = [regex]::Match($Pages[$path], '(?s)<script type="application/ld\+json">(.*?)</script>')
+        if (-not $m.Success) { $problems += "${path}: no structured data (JSON-LD)"; continue }
+        try { $d = ConvertFrom-StrictJson $m.Groups[1].Value } catch { $problems += "${path}: structured data does not parse as JSON"; continue }
+        $name = $d.PSObject.Properties['name']
+        $version = $d.PSObject.Properties['softwareVersion']
+        if (-not $name -or $name.Value -ne 'light-view') { $problems += "${path}: structured data does not name light-view" }
+        if (-not $version -or $version.Value -ne $Latest) { $problems += "${path}: structured data version is not the latest ($Latest)" }
+    }
+    return $problems
+}
+
+# JSON as browsers and search engines read it. pwsh 7's ConvertFrom-Json also takes things
+# JSON does not allow (trailing commas, comments), so there System.Text.Json checks first;
+# Windows PowerShell 5.1's ConvertFrom-Json is already strict.
+function ConvertFrom-StrictJson([string]$Text) {
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        Add-Type -AssemblyName System.Text.Json
+        [System.Text.Json.JsonDocument]::Parse($Text, [System.Text.Json.JsonDocumentOptions]::new()).Dispose()
+    }
+    return $Text | ConvertFrom-Json
+}
+
 # The privacy pages describe Cloudflare Web Analytics exactly when the site loads its
 # beacon (site/config.toml's [extra.analytics] token).
 function Test-AnalyticsNotice($Pages) {
