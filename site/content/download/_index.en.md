@@ -19,7 +19,7 @@ You choose on the installer's first page. The default is **for me only**.
 | Explorer preview pane | No | Yes |
 | Details tab (size, date taken, camera) | No | Yes |
 
-Both add a Start menu shortcut and "Open with" entries and can be uninstalled. Windows 10/11 do not let a program make itself the default app, so pick light-view under **Open default apps settings** on the installer's last page.
+Both add a Start menu shortcut and "Open with" entries and can be uninstalled. Windows 10/11 do not let a program make itself the default app, so leave **Make light-view the default photo app** on at the installer's last page and click **Set default** once in the Windows Settings page that opens.
 
 ## Portable zip
 

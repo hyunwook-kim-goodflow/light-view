@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{#- The help section: how-to articles, newest weight first (content/help/*.md). -#}
+{%- block content %}
+<h1>{{ section.title }}</h1>
+<p class="lede">{{ section.description }}</p>
+<ul class="help-list">
+  {%- for p in section.pages %}
+  <li>
+    <a href="{{ p.permalink }}"><h2>{{ p.title }}</h2></a>
+    <p>{{ p.description }}</p>
+  </li>
+  {%- endfor %}
+</ul>
+{%- endblock %}
