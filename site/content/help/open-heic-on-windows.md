@@ -16,6 +16,8 @@ light-view는 HEIC 디코더(libheif, libde265)를 함께 담고 있어 이 확�
 2. 설치 마지막 화면에서 **light-view를 기본 사진 앱으로 지정**을 켠 채 마칩니다. Windows 설정의 light-view 페이지가 열리면 맨 위의 **기본값 설정**을 한 번 누릅니다. 지원하는 사진 형식이 모두 light-view로 열립니다. 이 단계를 건너뛰었다면 사진을 오른쪽 클릭 → **연결 프로그램** → light-view를 고르면 됩니다.
 3. 이제 HEIC 사진을 더블클릭하면 light-view로 열립니다. ←·→로 같은 폴더의 사진을 넘기고, 휠이나 더블클릭으로 확대합니다.
 
+{{<shot name="viewer" alt="light-view로 연 사진. 창 아래에 이전·다음, 확대·축소, 회전, 정보, 삭제 버튼이 떠 있는 모습." lang={lang} />}}
+
 ## 설치 없이 여는 법
 
 포터블 zip을 아무 폴더에 풀고 `light-view.exe`를 실행한 다음 **Ctrl+O**로 사진을 고릅니다. `light-view.exe` 아이콘에 사진을 끌어 놓아도 열립니다.

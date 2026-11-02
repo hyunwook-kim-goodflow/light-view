@@ -16,6 +16,8 @@ light-view comes with its own HEIC decoder (libheif, libde265) and opens HEIC an
 2. On the installer's last page, leave **Make light-view the default photo app** on and finish. When Windows Settings opens at light-view's page, click **Set default** at the top once; every supported photo type then opens in light-view. If you skipped that, right-click a photo → **Open with** → light-view.
 3. Double-click a HEIC photo and it opens in light-view. ← and → go through the folder; zoom with the wheel or a double-click.
 
+{{<shot name="viewer" alt="A photo open in light-view, with previous and next, zoom, rotate, info and delete buttons floating at the bottom of the window." lang={lang} />}}
+
 ## Without installing
 
 Unzip the portable zip into any folder, run `light-view.exe` and press **Ctrl+O** to pick a photo. Dropping a photo on `light-view.exe` opens it too.

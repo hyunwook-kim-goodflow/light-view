@@ -20,6 +20,8 @@ light-view's **Resize** screen saves HEIC and HEIF photos as JPEG, PNG or WebP. 
 
 The **Estimate** list shows each photo's size and file size before you save.
 
+{{<shot name="resize" alt="The Resize screen: the Resolution tab at 1920 px on the long edge, JPEG, Match original quality and New file selected, Remove location ticked, and the Estimate list showing the size and file size of each photo." lang={lang} />}}
+
 ## 3. Save
 
 **Save** writes `name_small.jpg` next to each original. If that name is taken, it uses `name_small (2).jpg` and so on. The HEIC originals are not deleted or changed.

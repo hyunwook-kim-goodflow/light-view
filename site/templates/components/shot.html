@@ -1,0 +1,9 @@
+{#- An app screenshot inside a help article, no caption:
+    {{<shot name="resize" alt="..." lang={lang} />}}
+    Same images and sizes as partials/shot.html on the home page, in the page's language. -#}
+{% component shot(name: string, alt: string, lang: string) %}
+{%- set sfx = "" %}{% if lang == "en" %}{% set sfx = "-en" %}{% endif -%}
+{%- set h = 891 %}{% if name == "viewer" %}{% set h = 901 %}{% elif name == "resize" %}{% set h = 851 %}{% endif -%}
+{%- set base = "img/shots/" ~ name ~ sfx -%}
+<figure class="help-shot"><img class="shot" src="{{ get_url(path=base ~ '-1262.webp') }}" srcset="{{ get_url(path=base ~ '-760.webp') }} 760w, {{ get_url(path=base ~ '-1262.webp') }} 1262w" sizes="(min-width: 52rem) 48rem, 100vw" width="1262" height="{{ h }}" alt="{{ alt }}" decoding="async" loading="lazy"></figure>
+{% endcomponent shot %}
