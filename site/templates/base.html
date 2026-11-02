@@ -32,6 +32,9 @@
   <meta property="og:image" content="{{ get_url(path='img/og.png') }}">
   {%- if current %}<meta property="og:url" content="{{ current.permalink }}">{% endif %}
   {%- block extra_head %}{% endblock %}
+  {%- if config.extra.verify.naver %}
+  <meta name="naver-site-verification" content="{{ config.extra.verify.naver }}">
+  {%- endif %}
   {%- if config.extra.ads.client %}
   <meta name="google-adsense-account" content="{{ config.extra.ads.client }}">
   {%- endif %}
