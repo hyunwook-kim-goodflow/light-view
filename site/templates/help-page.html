@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{#- One help article: title, one-line answer, the steps, then the other articles and the
+    download button (straight to GitHub Releases, like everywhere else). -#}
+{%- block content %}
+{%- set data = load_data(path="data/releases.json") %}
+{%- set rel = [x for x in data.releases if x.version == data.latest][0] %}
+{%- set help = get_section(path="help/_index.md", lang=lang) %}
+<article class="prose help-article">
+  <p class="muted"><a href="{{ help.permalink }}">{{ help.title }}</a></p>
+  <h1>{{ page.title }}</h1>
+  <p class="lede">{{ page.description }}</p>
+  {{ page.content | safe }}
+</article>
+
+<section class="help-more" aria-labelledby="more">
+  <h2 id="more">{{ trans(key="help_more", lang=lang) }}</h2>
+  <ul class="help-list compact">
+    {%- for p in help.pages %}{% if p.permalink != page.permalink %}
+    <li><a href="{{ p.permalink }}">{{ p.title }}</a></li>
+    {%- endif %}{% endfor %}
+  </ul>
+</section>
+
+<section class="cta" aria-labelledby="cta">
+  <h2 id="cta">{{ trans(key="help_cta", lang=lang) }}</h2>
+  {% include "partials/download_button.html" %}
+</section>
+{%- endblock %}
+{%- block scripts %}{% include "partials/not_windows.html" %}{% endblock %}

@@ -6,7 +6,7 @@
       <span>light-view</span>
     </a>
     <nav class="site-nav" aria-label="{{ trans(key='nav_label', lang=lang) }}">
-      {%- set nav = [["@/download/_index.md", "nav_download"], ["@/releases/_index.md", "nav_releases"], ["@/faq/_index.md", "nav_faq"]] %}
+      {%- set nav = [["@/download/_index.md", "nav_download"], ["@/help/_index.md", "nav_help"], ["@/releases/_index.md", "nav_releases"], ["@/faq/_index.md", "nav_faq"]] %}
       {%- for item in nav %}
       {%- set url = get_url(path=item[0], lang=lang) %}
       <a href="{{ url }}"{% if current and current.permalink == url %} aria-current="page"{% endif %}>{{ trans(key=item[1], lang=lang) }}</a>

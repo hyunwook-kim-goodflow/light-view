@@ -6,10 +6,9 @@ description = "A light, free Windows photo viewer that opens iPhone photos (HEIC
 headline = "A light, <mark>free</mark> Windows photo viewer that opens iPhone photos (HEIC) too"
 lede = "Windows usually needs a paid HEVC extension to show HEIC photos. light-view opens them without it: free, fast and safe."
 hero_alt = "A photo open in light-view, with previous and next, zoom, rotate, info and delete buttons along the bottom of the window."
-hero_caption = "FIG.01 — Viewer · ← and → go through the folder"
 scenes = [
-  { img = "exif", title = "When, and with what camera", body = "Press I for a small card with the date taken, the camera and the exposure. Show all lists every tag and copies any value.", caption = "FIG.02 — Info card · I key", alt = "An info card over a night photo: Aug 23, 2013, 9:02 PM, SONY DSLR-A550, 6s · f/10 · ISO 200, 4592×3056 · 9.2 MB." },
-  { img = "resize", title = "Resize a batch for upload", body = "Shrink several photos at once to a resolution, file size or scale. You see the result sizes before saving, and location data is removed by default.", caption = "FIG.03 — Resize · 6 photos, 50.0 MB → about 10.0 MB", alt = "The resize screen: six photos to JPEG at 1920 px on the long side, 50.0 MB in total down to about 10.0 MB, estimated before saving." },
+  { img = "exif", title = "When, and with what camera", body = "Press I for a small card with the date taken, the camera and the exposure. Show all lists every tag and copies any value.", alt = "An info card over a night photo: Aug 23, 2013, 9:02 PM, SONY DSLR-A550, 6s · f/10 · ISO 200, 4592×3056 · 9.2 MB." },
+  { img = "resize", title = "Resize a batch for upload", body = "Shrink several photos at once to a resolution, file size or scale. You see the result sizes before saving, and location data is removed by default.", alt = "The resize screen: six photos to JPEG at 1920 px on the long side, 50.0 MB in total down to about 10.0 MB, estimated before saving." },
 ]
 credit = "Photos in the screenshots: Wilfredor, Jebulon (CC0, Wikimedia Commons)"
 cta_title = "Double-click a photo and it opens"

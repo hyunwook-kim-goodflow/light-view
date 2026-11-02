@@ -21,6 +21,7 @@ The site is in Korean (default) and English (/en/). Downloads come only from the
 - [Download (English)](https://lightview.goodflow.dev/en/download/): installer and portable zip, checksums
 - [Release notes (English)](https://lightview.goodflow.dev/en/releases/)
 - [FAQ (English)](https://lightview.goodflow.dev/en/faq/)
+- [Help (English)](https://lightview.goodflow.dev/en/help/): how to open HEIC on Windows, convert HEIC to JPG, remove location data before sharing, and get HEIC thumbnails in Explorer
 - [Privacy policy (English)](https://lightview.goodflow.dev/en/privacy/)
 - [Code signing policy](https://lightview.goodflow.dev/en/code-signing/)
 - [Source code](https://github.com/hyunwook-kim-goodflow/light-view)
