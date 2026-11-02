@@ -36,3 +36,4 @@ signed: false
 - `signed: true` exactly when the release is code-signed (SignPath, from 1.0.0); the website shows it. The release workflow fails if it does not match whether that build was signed.
 - `## 한국어` comes first, then `## English`; headings inside use `###`.
 - Write for people using the app: what they can do now, what was fixed, what still goes wrong. Leave out internal refactors.
+- Korean in plain 합니다체, as on the website and goodflow.dev ("…를 엽니다", not "…를 열어요"); English in plain sentences.

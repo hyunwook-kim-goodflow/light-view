@@ -11,7 +11,7 @@
 <section aria-labelledby="files">
   <h2 id="files">{% if lang == "en" %}Files{% else %}파일{% endif %}</h2>
   {% include "partials/checksums.html" %}
-  <p>{% if rel.signed %}{% if lang == "en" %}Signed by SignPath Foundation.{% else %}SignPath Foundation이 서명했어요.{% endif %}{% else %}{% if lang == "en" %}Not code-signed; check the SHA-256 above.{% else %}코드 서명 없음. 위 SHA-256으로 확인해요.{% endif %}{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+  <p>{% if rel.signed %}{% if lang == "en" %}Signed by SignPath Foundation.{% else %}SignPath Foundation이 서명했습니다.{% endif %}{% else %}{% if lang == "en" %}Not code-signed; check the SHA-256 above.{% else %}코드 서명 없음. 위 SHA-256으로 확인합니다.{% endif %}{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
 </section>
 
 <section class="prose" aria-label="{% if lang == 'en' %}Notes{% else %}노트{% endif %}">
