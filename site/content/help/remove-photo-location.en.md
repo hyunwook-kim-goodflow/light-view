@@ -16,6 +16,8 @@ Photo files from a phone carry EXIF data, and if location services were on, that
 4. Press **Save**. A new file such as `name_small.jpg` appears in the same folder; the original stays as it was.
 5. Share the new `_small` file.
 
+{{<shot name="resize" alt="The Resize screen with Remove location ticked on the Metadata row, above the Estimate list." lang={lang} />}}
+
 ## What stays and what goes
 
 What stays is what helps you sort photos:
@@ -29,3 +31,5 @@ Location and everything else is left out. The photo is saved upright.
 ## How to check
 
 Open the saved file in light-view and press **I** for the info card. **Show all** lists every tag, so you can see that there is no location (GPS) entry.
+
+{{<shot name="exif" alt="The info card opened with I: the date taken, the time and camera, the exposure, the size and file size, and a Show all button below." lang={lang} />}}
