@@ -21,12 +21,12 @@
   <details id="checksums" class="verify">
     <summary><h2 id="verify">{% if lang == "en" %}Check the download{% else %}받은 파일 확인하기{% endif %}</h2><span class="muted">SHA-256 · {% if lang == "en" %}code signing{% else %}코드 서명{% endif %}</span></summary>
     {% include "partials/checksums.html" %}
-    <p>{% if lang == "en" %}In PowerShell, the <code>Hash</code> must equal the value above (case does not matter). If it differs, do not run the file; download it again.{% else %}PowerShell에서 아래 명령의 <code>Hash</code>가 위 값과 같아야 해요(대소문자는 상관없어요). 다르면 실행하지 말고 다시 받아요.{% endif %}</p>
+    <p>{% if lang == "en" %}In PowerShell, the <code>Hash</code> must equal the value above (case does not matter). If it differs, do not run the file; download it again.{% else %}PowerShell에서 아래 명령의 <code>Hash</code>가 위 값과 같아야 합니다(대소문자는 상관없습니다). 다르면 실행하지 말고 다시 받아 주세요.{% endif %}</p>
     <pre><code>Get-FileHash .\{{ setup.name }} -Algorithm SHA256</code></pre>
     {%- if rel.signed %}
-    <p>{% if lang == "en" %}This release is signed. In the file's Properties → Digital Signatures, the signer is "SignPath Foundation". Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% else %}이 릴리스는 서명돼 있어요. 파일 속성 → 디지털 서명에서 서명자가 "SignPath Foundation"인지 확인할 수 있어요. Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+    <p>{% if lang == "en" %}This release is signed. In the file's Properties → Digital Signatures, the signer is "SignPath Foundation". Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% else %}이 릴리스는 서명돼 있습니다. 파일 속성 → 디지털 서명에서 서명자가 "SignPath Foundation"인지 확인할 수 있습니다. Free code signing provided by <a href="https://about.signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a>.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
     {%- else %}
-    <p>{% if lang == "en" %}Releases are not code-signed yet, so the checksum is how to check a file.{% else %}릴리스에 아직 코드 서명이 없어서, 파일은 위 체크섬으로 확인해요.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
+    <p>{% if lang == "en" %}Releases are not code-signed yet, so the checksum is how to check a file.{% else %}릴리스에 아직 코드 서명이 없으므로, 파일은 위 체크섬으로 확인합니다.{% endif %} <a href="{{ get_url(path='@/code-signing/_index.md', lang=lang) }}">Code signing policy</a></p>
     {%- endif %}
   </details>
 </section>

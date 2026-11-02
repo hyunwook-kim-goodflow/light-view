@@ -11,6 +11,7 @@
   <figure class="hero-shot">
     {%- set shot = "viewer" %}{% set alt = section.extra.hero_alt %}{% set sizes = "(min-width: 60rem) 44rem, 100vw" %}{% set eager = true %}
     {% include "partials/shot.html" %}
+    <figcaption>{{ section.extra.hero_caption }}</figcaption>
   </figure>
 </section>
 
@@ -23,6 +24,7 @@
   <figure class="scene-shot">
     {%- set shot = s.img %}{% set alt = s.alt %}{% set sizes = "(min-width: 60rem) 40rem, 100vw" %}{% set eager = false %}
     {% include "partials/shot.html" %}
+    <figcaption>{{ s.caption }}</figcaption>
   </figure>
 </section>
 {%- endfor %}
@@ -95,7 +97,7 @@
   "codeRepository": "https://github.com/{{ config.extra.repo }}",
   "screenshot": {% if lang == "en" %}{{ get_url(path="img/shots/viewer-en-1262.webp") | json_encode | safe }}{% else %}{{ get_url(path="img/shots/viewer-1262.webp") | json_encode | safe }}{% endif %},
   "image": {{ get_url(path="img/og.png") | json_encode | safe }},
-  "author": { "@type": "Organization", "name": "goodflow", "url": "https://goodflow.dev" }
+  "author": { "@type": "Organization", "name": "GoodFlow", "url": "https://goodflow.dev" }
 }
 </script>
 {%- endblock %}
