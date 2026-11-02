@@ -1,5 +1,5 @@
 +++
-title = "light-view"
+title = "light-view — free Windows photo viewer that opens iPhone HEIC photos"
 description = "A light, free Windows photo viewer that opens iPhone photos (HEIC) too"
 
 [extra]

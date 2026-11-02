@@ -1,0 +1,8 @@
+# Cloudflare Pages headers. The same site is also served at light-view.pages.dev and at
+# each deployment's preview address; keep those out of search results so only
+# lightview.goodflow.dev is indexed (pages already name it as canonical).
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex

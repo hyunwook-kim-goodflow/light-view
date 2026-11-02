@@ -1,0 +1,26 @@
+# light-view
+
+> light-view is a free, open-source image viewer for Windows 10 22H2 and Windows 11 (x64). It opens iPhone photos (HEIC/HEIF) without Microsoft's paid HEVC extension, and JPEG, PNG, GIF, WebP and BMP. Made by goodflow; MIT or Apache-2.0.
+
+The site is in Korean (default) and English (/en/). Downloads come only from the project's GitHub Releases; the official places are lightview.goodflow.dev and github.com/hyunwook-kim-goodflow/light-view.
+
+## What it does
+
+- Opens HEIC/HEIF photos for free, decoding them in a separate, sandboxed worker process.
+- Flip through a folder with ← and →; zoom with the wheel or a double-click.
+- Lossless JPEG rotation (Ctrl+← / Ctrl+→, save with Ctrl+S).
+- Delete to the Recycle Bin with undo (Ctrl+Z).
+- EXIF card (I key): date taken, camera, exposure; copy any tag.
+- Resize a batch of photos for upload to a resolution, file size or scale, as JPEG, PNG or WebP; location data removed by default. Converting HEIC to JPEG works this way.
+- The installed version shows HEIC thumbnails in Windows Explorer.
+- No ads, no tracking, no account; the only network use is an optional update check. Releases are not code-signed yet; each comes with SHA-256 checksums.
+
+## Pages
+
+- [Home (English)](https://lightview.goodflow.dev/en/)
+- [Download (English)](https://lightview.goodflow.dev/en/download/): installer and portable zip, checksums
+- [Release notes (English)](https://lightview.goodflow.dev/en/releases/)
+- [FAQ (English)](https://lightview.goodflow.dev/en/faq/)
+- [Privacy policy (English)](https://lightview.goodflow.dev/en/privacy/)
+- [Code signing policy](https://lightview.goodflow.dev/en/code-signing/)
+- [Source code](https://github.com/hyunwook-kim-goodflow/light-view)

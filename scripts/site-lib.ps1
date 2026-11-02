@@ -414,6 +414,21 @@ function Test-NoAds($Pages) {
     return $problems
 }
 
+# The home pages' structured data (JSON-LD, read by search engines and AI answers): there,
+# parses, names light-view and gives the latest version.
+function Test-StructuredData($Pages, [string[]]$Required, [string]$Latest) {
+    $problems = @()
+    foreach ($path in $Required) {
+        if (-not $Pages.ContainsKey($path)) { $problems += "${path}: missing"; continue }
+        $m = [regex]::Match($Pages[$path], '(?s)<script type="application/ld\+json">(.*?)</script>')
+        if (-not $m.Success) { $problems += "${path}: no structured data (JSON-LD)"; continue }
+        try { $d = $m.Groups[1].Value | ConvertFrom-Json } catch { $problems += "${path}: structured data does not parse as JSON"; continue }
+        if ($d.name -ne 'light-view') { $problems += "${path}: structured data names '$($d.name)'" }
+        if ($d.softwareVersion -ne $Latest) { $problems += "${path}: structured data version $($d.softwareVersion), latest is $Latest" }
+    }
+    return $problems
+}
+
 # The privacy pages describe Cloudflare Web Analytics exactly when the site loads its
 # beacon (site/config.toml's [extra.analytics] token).
 function Test-AnalyticsNotice($Pages) {

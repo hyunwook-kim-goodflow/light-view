@@ -83,6 +83,7 @@ $problems += Test-CopiedText $pages 'en/code-signing/index.html' (Read-Data 'cod
 
 $site = [IO.File]::ReadAllText((Join-Path $DataDir 'releases.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json
 $problems += Test-ReleasePages $pages $site
+$problems += Test-StructuredData $pages @('index.html', 'en/index.html') $site.latest
 # SignPath's terms: "Code signing policy" on the home, download and release pages.
 $required = @()
 foreach ($prefix in '', 'en/') {
