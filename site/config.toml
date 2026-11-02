@@ -6,9 +6,11 @@ default_language = "ko"
 compile_sass = true
 minify_html = false
 build_search_index = false
-# Feeds are turned on per section (releases only).
+author = "goodflow"
+# Feeds are turned on per section (releases only). Atom, plus RSS 2.0 for readers that
+# take only RSS (Naver Search Advisor's RSS submission rejects the Atom feed).
 generate_feeds = false
-feed_filenames = ["atom.xml"]
+feed_filenames = ["atom.xml", "rss.xml"]
 taxonomies = []
 
 # Keep dots in addresses (/releases/0.2.0/); only characters unsafe in paths are changed.
@@ -25,6 +27,7 @@ external_links_no_referrer = true
 title = "light-view"
 description = "A light, free Windows photo viewer that opens iPhone photos (HEIC) too"
 generate_feeds = false
+feed_filenames = ["atom.xml", "rss.xml"]
 build_search_index = false
 taxonomies = []
 
