@@ -203,6 +203,19 @@ Root: HKA; Subkey: "Software\Classes\goodflow.lightview.heif\shell\open\command"
 Root: HKA; Subkey: "Software\Classes\.heif\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.heif"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".heif"; ValueData: ""
 Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".heif"; ValueData: "goodflow.lightview.heif"
+; .ithmb: the photo cache iTunes keeps for iPhone and Apple TV syncs ("iPod Photo Cache");
+; each file is one JPEG. PerceivedType=image lets Explorer draw its thumbnail and preview
+; with Windows' own image handlers. It is written only where nothing has set it; uninstall
+; removes it (it only says "this is an image", so removing a value another tool had set is
+; harmless).
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.ithmb"; ValueType: string; ValueName: ""; ValueData: "iPod photo cache image (light-view)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.ithmb"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserModelID}"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.ithmb\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},1"
+Root: HKA; Subkey: "Software\Classes\goodflow.lightview.ithmb\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.ithmb\OpenWithProgids"; ValueType: string; ValueName: "goodflow.lightview.ithmb"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.ithmb"; ValueType: string; ValueName: "PerceivedType"; ValueData: "image"; Flags: createvalueifdoesntexist uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".ithmb"; ValueData: ""
+Root: HKA; Subkey: "{#Capabilities}\FileAssociations"; ValueType: string; ValueName: ".ithmb"; ValueData: "goodflow.lightview.ithmb"
 ; Explorer right-click verb (M6): one process per selected file (MultiSelectModel=Player),
 ; which forwards its path to the running instance (--resize, ruling R4). Windows 11 shows it
 ; under "Show more options". Only our own verb key is deleted on uninstall.
@@ -238,6 +251,10 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.heif\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.ithmb\shell\goodflow.lightview.resize"; ValueType: string; ValueName: ""; ValueData: "{cm:ResizeVerb}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.ithmb\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "MultiSelectModel"; ValueData: "Player"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.ithmb\shell\goodflow.lightview.resize"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExe}"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.ithmb\shell\goodflow.lightview.resize\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --resize ""%1"""
 ; --- HEIC/HEIF in Explorer (M7). The DLL never decodes: the sandboxed lv-worker.exe next to
 ; it does. Only our own class keys are deleted on uninstall. The handler values under
 ; .heic/.heif\ShellEx\{guid} and PropertyHandlers\.heic/.heif are shared with other

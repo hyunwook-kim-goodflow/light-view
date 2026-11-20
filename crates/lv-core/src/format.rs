@@ -65,9 +65,13 @@ pub fn sniff_format(head: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-/// Supported file extensions, lowercase, without the dot.
-pub const EXTENSIONS: [&str; 12] = [
+/// Supported file extensions, lowercase, without the dot. `ithmb` is the extension of the
+/// photo cache iTunes keeps for iPhone and Apple TV syncs ("iPod Photo Cache"): each file
+/// is one ordinary JPEG. Files are decoded by their content (`sniff_format`), so an
+/// older iPod's raw-pixel `ithmb` is refused as an unknown format, not misread.
+pub const EXTENSIONS: [&str; 13] = [
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "bmp", "dib", "heic", "heif", "hif",
+    "ithmb",
 ];
 
 /// Case-insensitive check of the file extension against supported ones.
@@ -149,6 +153,9 @@ mod tests {
     fn extension_filter_is_case_insensitive() {
         assert!(is_supported_extension(Path::new(r"C:\a\IMG_1.HEIC")));
         assert!(is_supported_extension(Path::new("x.Jpeg")));
+        assert!(is_supported_extension(Path::new(
+            r"F:\iPod Photo Cache\F00\T149.ithmb"
+        )));
         assert!(!is_supported_extension(Path::new("x.avif")));
         assert!(!is_supported_extension(Path::new("noext")));
     }

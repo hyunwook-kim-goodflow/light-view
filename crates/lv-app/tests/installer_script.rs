@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-const EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif"];
+const EXTENSIONS: [&str; 9] = [
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "ithmb",
+];
 /// The types the Explorer extension (crates/lv-shell) handles (M7 Global Constraints).
 const SHELL_EXTENSIONS: [&str; 2] = ["heic", "heif"];
 /// The versioned shell DLL (spec M7 §6): every update installs a new file name.
@@ -831,4 +833,21 @@ fn installer_shows_the_privacy_notice() {
             "{file} names the update check"
         );
     }
+}
+
+/// `.ithmb` (iTunes photo cache, JPEG inside) is marked as an image so Explorer draws its
+/// thumbnail and preview with Windows' own handlers, without replacing a value someone
+/// else set.
+#[test]
+fn installer_marks_ithmb_as_an_image() {
+    let s = script();
+    let registry = section(&s, "Registry");
+    assert!(has_line(
+        &registry,
+        &[
+            r#"Subkey: "Software\Classes\.ithmb""#,
+            r#"ValueName: "PerceivedType"; ValueData: "image""#,
+            "createvalueifdoesntexist",
+        ]
+    ));
 }

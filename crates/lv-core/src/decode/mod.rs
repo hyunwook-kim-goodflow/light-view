@@ -474,6 +474,25 @@ mod tests {
         assert!(img.exif.is_none());
     }
 
+    /// An iTunes photo cache file (`.ithmb`) holding a JPEG opens like a JPEG; an older
+    /// iPod's raw-pixel `.ithmb` (no JPEG signature) is refused before it is read.
+    #[test]
+    fn ithmb_opens_by_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = dir.path().join("T149.ithmb");
+        std::fs::write(&jpeg, fixtures::jpeg_16x8_with_orientation(1)).unwrap();
+        let img = decode_file(&jpeg, &DecodeLimits::default()).unwrap();
+        assert_eq!((img.width, img.height), (16, 8));
+        assert_eq!(img.format, ImageFormat::Jpeg);
+
+        let raw = dir.path().join("F1009_1.ithmb");
+        std::fs::write(&raw, vec![0x1Fu8; 120 * 120 * 2]).unwrap();
+        assert!(matches!(
+            decode_file(&raw, &DecodeLimits::default()),
+            Err(DecodeError::Unsupported)
+        ));
+    }
+
     #[test]
     fn decodes_png() {
         let img = decode_bytes(&fixtures::png_2x1(), &DecodeLimits::default()).unwrap();
