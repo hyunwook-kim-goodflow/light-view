@@ -15,7 +15,7 @@ lv-core = { path = "../lv-core" }
 lv-ipc = { path = "../lv-ipc" }
 lv-sandbox = { path = "../lv-sandbox" }
 # `#[implement]` (COM objects) names this crate directly.
-windows-core = "0.58"
+windows-core = "0.100"
 
 [dependencies.windows]
 version = "0.58"
